@@ -1,0 +1,13 @@
+[package]
+name = "nfc-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hex = "0.4"
+log = "0.4"
+thiserror = "1.0"
+rusb = "0.9"
+rand = "0.8"
+des = "0.8"
+smallvec = "1.13"
