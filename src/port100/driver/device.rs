@@ -3,6 +3,7 @@ use super::errors::{DriverError, Result, convert_fault_to_comm_error};
 use crate::clf::crc;
 use crate::clf::errors::CommunicationError;
 use crate::clf::targets::RemoteTarget;
+use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
 use smallvec::SmallVec;
@@ -167,6 +168,27 @@ impl<T: Transport> Device<T> {
             response.truncate(response.len() - 2);
         }
         Ok(response)
+    }
+}
+
+impl<T: Transport> FelicaDriver for Device<T> {
+    fn sense_type_f(
+        &mut self,
+        target: &RemoteTarget,
+        system_code: u16,
+        request_code: u8,
+        time_slots: u8,
+    ) -> Result<Type3TagPollingResult> {
+        self.sense_type_f(target, system_code, request_code, time_slots)
+    }
+
+    fn send_command_receive_response(
+        &mut self,
+        target: &RemoteTarget,
+        data: &[u8],
+        timeout_ms: Option<u16>,
+    ) -> Result<Vec<u8>> {
+        self.send_command_receive_response(target, data, timeout_ms)
     }
 }
 

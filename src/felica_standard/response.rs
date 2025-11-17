@@ -4,7 +4,7 @@ use super::{
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, RequestServiceV2KeyVersion,
     SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
 };
-use crate::port100::driver::{DriverError, Result as DriverResult};
+use crate::driver::errors::{DriverError, Result as DriverResult};
 
 #[derive(Debug)]
 pub enum FelicaStandardResponse {

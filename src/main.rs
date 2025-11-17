@@ -1,17 +1,36 @@
 use hex::encode;
-use nfc_rs::felica_standard::RequestServiceV2KeyVersion;
-use nfc_rs::{BlockListElement, FelicaStandard, ServiceCode, open_port100_device};
+use nfc_rs::driver::errors::DriverError;
+use nfc_rs::felica_standard::{
+    FelicaDriver, FelicaStandard, FelicaStandardError, RequestServiceV2KeyVersion,
+};
+use nfc_rs::{
+    BlockListElement, Port400Device, ServiceCode, UsbTransport, open_port100_device,
+    open_port400_device,
+};
+use std::env;
 use std::error::Error;
 
+type Port100Device = nfc_rs::Device<UsbTransport>;
+type Port400UsbDevice = Port400Device<UsbTransport>;
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut device = open_port100_device()?;
+    let preference = reader_preference();
+    let mut reader = open_reader(preference).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+
     println!(
-        "Connected to {} {}",
-        device.vendor_name().unwrap_or("Unknown Vendor"),
-        device.product_name().unwrap_or("Unknown Device")
+        "Connected to {} {} ({})",
+        reader.vendor_name().unwrap_or("Unknown Vendor"),
+        reader.product_name().unwrap_or("Unknown Device"),
+        reader.chipset_name()
     );
 
-    let (mut felica, _polling) = FelicaStandard::polling(&mut device, "212F", 0xFFFF, 0x00, 0x00)?;
+    run_session(reader.as_driver_mut()).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+
+    Ok(())
+}
+
+fn run_session(device: &mut dyn FelicaDriver) -> Result<(), FelicaStandardError> {
+    let (mut felica, _polling) = FelicaStandard::polling(device, "212F", 0xFFFF, 0x00, 0x00)?;
 
     println!("IDm: {}", encode(felica.idm()).to_uppercase());
     println!("PMm: {}", encode(felica.pmm()).to_uppercase());
@@ -120,4 +139,69 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn reader_preference() -> ReaderPreference {
+    match env::var("NFC_DRIVER").ok().as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("port400") => ReaderPreference::ForcePort400,
+        Some(value) if value.eq_ignore_ascii_case("port100") => ReaderPreference::ForcePort100,
+        _ => ReaderPreference::Auto,
+    }
+}
+
+fn open_reader(preference: ReaderPreference) -> Result<Reader, DriverError> {
+    match preference {
+        ReaderPreference::ForcePort100 => open_port100_device().map(Reader::Port100),
+        ReaderPreference::ForcePort400 => open_port400_device().map(Reader::Port400),
+        ReaderPreference::Auto => match open_port100_device() {
+            Ok(device) => Ok(Reader::Port100(device)),
+            Err(err100) => match open_port400_device() {
+                Ok(device) => Ok(Reader::Port400(device)),
+                Err(err400) => Err(DriverError::Other(format!(
+                    "failed to open Port-100 ({err100}) and Port-400 ({err400})"
+                ))),
+            },
+        },
+    }
+}
+
+enum ReaderPreference {
+    Auto,
+    ForcePort100,
+    ForcePort400,
+}
+
+enum Reader {
+    Port100(Port100Device),
+    Port400(Port400UsbDevice),
+}
+
+impl Reader {
+    fn vendor_name(&self) -> Option<&str> {
+        match self {
+            Reader::Port100(device) => device.vendor_name(),
+            Reader::Port400(device) => device.vendor_name(),
+        }
+    }
+
+    fn product_name(&self) -> Option<&str> {
+        match self {
+            Reader::Port100(device) => device.product_name(),
+            Reader::Port400(device) => device.product_name(),
+        }
+    }
+
+    fn chipset_name(&self) -> &str {
+        match self {
+            Reader::Port100(device) => device.chipset_name(),
+            Reader::Port400(device) => device.chipset_name(),
+        }
+    }
+
+    fn as_driver_mut(&mut self) -> &mut dyn FelicaDriver {
+        match self {
+            Reader::Port100(device) => device,
+            Reader::Port400(device) => device,
+        }
+    }
 }

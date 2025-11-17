@@ -14,20 +14,36 @@ use super::{
     MAX_SERVICE_CODES, frame_with_length_prefix,
 };
 use crate::RemoteTarget;
+use crate::driver::errors::Result as DriverResult;
 use crate::felica_standard::Type3TagPollingResult;
-use crate::port100::driver::Device;
-use crate::transport::Transport;
 use rand::{RngCore, rngs::OsRng};
 use std::convert::TryInto;
 
-pub struct FelicaStandard<'a, T: Transport> {
-    device: &'a mut Device<T>,
+pub trait FelicaDriver {
+    fn sense_type_f(
+        &mut self,
+        target: &RemoteTarget,
+        system_code: u16,
+        request_code: u8,
+        time_slots: u8,
+    ) -> DriverResult<Type3TagPollingResult>;
+
+    fn send_command_receive_response(
+        &mut self,
+        target: &RemoteTarget,
+        data: &[u8],
+        timeout_ms: Option<u16>,
+    ) -> DriverResult<Vec<u8>>;
+}
+
+pub struct FelicaStandard<'a, D: FelicaDriver + ?Sized> {
+    device: &'a mut D,
     target: RemoteTarget,
     polling_result: Type3TagPollingResult,
     authenticated_context: Option<AuthenticatedContext>,
 }
 
-impl<'a, T: Transport> FelicaStandard<'a, T> {
+impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
     pub fn idm(&self) -> &[u8] {
         &self.polling_result.idm
     }
@@ -52,7 +68,7 @@ impl<'a, T: Transport> FelicaStandard<'a, T> {
     }
 
     pub fn polling(
-        device: &'a mut Device<T>,
+        device: &'a mut D,
         brty: &str,
         system_code: u16,
         request_code: u8,

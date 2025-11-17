@@ -1,5 +1,5 @@
 use crate::clf::errors::UnsupportedTargetError;
-use crate::port100::driver::DriverError;
+use crate::driver::errors::DriverError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

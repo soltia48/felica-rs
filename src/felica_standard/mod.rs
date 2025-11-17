@@ -6,7 +6,7 @@ mod secure;
 mod type3;
 mod types;
 
-pub use api::FelicaStandard;
+pub use api::{FelicaDriver, FelicaStandard};
 pub use command::FelicaStandardCommand;
 pub use error::FelicaStandardError;
 pub use response::FelicaStandardResponse;
