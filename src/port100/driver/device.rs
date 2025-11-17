@@ -20,7 +20,7 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
     Device::new(chipset)
 }
 
-pub fn open_rcs380_device() -> Result<Device<UsbTransport>> {
+pub fn open_port100_device() -> Result<Device<UsbTransport>> {
     const SONY_VID: u16 = 0x054C;
     const PRODUCT_IDS: [u16; 2] = [0x06C1, 0x06C3];
 

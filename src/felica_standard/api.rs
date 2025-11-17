@@ -15,7 +15,7 @@ use super::{
 };
 use crate::RemoteTarget;
 use crate::felica_standard::Type3TagPollingResult;
-use crate::rcs380::driver::Device;
+use crate::port100::driver::Device;
 use crate::transport::Transport;
 use rand::{RngCore, rngs::OsRng};
 use std::convert::TryInto;

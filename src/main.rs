@@ -1,10 +1,10 @@
 use hex::encode;
 use nfc_rs::felica_standard::RequestServiceV2KeyVersion;
-use nfc_rs::{BlockListElement, FelicaStandard, ServiceCode, open_rcs380_device};
+use nfc_rs::{BlockListElement, FelicaStandard, ServiceCode, open_port100_device};
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut device = open_rcs380_device()?;
+    let mut device = open_port100_device()?;
     println!(
         "Connected to {} {}",
         device.vendor_name().unwrap_or("Unknown Vendor"),

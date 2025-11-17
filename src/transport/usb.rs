@@ -103,6 +103,7 @@ impl Transport for UsbTransport {
             .handle
             .as_mut()
             .ok_or_else(|| Error::new(ErrorKind::NotConnected, "USB handle closed"))?;
+        debug!("USB write {} bytes to ep {:02x}", data.len(), self.out_ep);
         handle
             .write_bulk(self.out_ep, data, DEFAULT_TIMEOUT)
             .map_err(rusb_to_io_error)?;
@@ -120,9 +121,19 @@ impl Transport for UsbTransport {
             .as_mut()
             .ok_or_else(|| Error::new(ErrorKind::NotConnected, "USB handle closed"))?;
         let mut buffer = [0u8; 512];
-        let len = handle
-            .read_bulk(self.in_ep, &mut buffer, timeout)
-            .map_err(rusb_to_io_error)?;
+        let len = match handle.read_bulk(self.in_ep, &mut buffer, timeout) {
+            Ok(len) => {
+                debug!(
+                    "USB read {} bytes from ep {:02x} (timeout {:?})",
+                    len, self.in_ep, timeout
+                );
+                len
+            }
+            Err(err) => {
+                debug!("USB read error: {:?}", err);
+                return Err(rusb_to_io_error(err));
+            }
+        };
         if len == 0 {
             return Err(Error::new(
                 ErrorKind::UnexpectedEof,

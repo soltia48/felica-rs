@@ -139,7 +139,7 @@ pub(crate) fn frame_with_length_prefix(payload: &[u8]) -> Vec<u8> {
 }
 
 impl FelicaStandardCommand {
-    pub(crate) fn to_frame(&self) -> Vec<u8> {
+    pub fn to_frame(&self) -> Vec<u8> {
         match self.encoding() {
             CommandEncoding::Plain(frame) => frame,
             CommandEncoding::Secure { .. } => {

@@ -1,8 +1,10 @@
 use super::errors::{CommunicationFault, DriverError, Result, ensure_status_ok};
-use crate::rcs380::frame::{Frame, FrameType};
+use crate::port100::frame::{Frame, FrameType};
 use crate::transport::Transport;
-use log::debug;
-use std::time::Duration;
+use log::{debug, warn};
+use std::collections::VecDeque;
+use std::io::{self, ErrorKind};
+use std::time::{Duration, Instant};
 
 const IN_SET_PROTOCOL_DEFAULTS: [u8; 38] = [
     0x00, 0x18, 0x01, 0x01, 0x02, 0x01, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x08,
@@ -15,10 +17,14 @@ const TG_SET_PROTOCOL_DEFAULTS: [u8; 6] = [0x00, 0x01, 0x01, 0x01, 0x02, 0x07];
 pub struct Chipset<T: Transport> {
     pub(super) transport: T,
     firmware_version: (u8, u8),
+    read_buffer: VecDeque<u8>,
 }
 
 impl<T: Transport> Chipset<T> {
     pub const ACK: [u8; 6] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+    const ACK_TIMEOUT: Duration = Duration::from_millis(1_000);
+    const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
+    const BUFFER_CLEAR_TIMEOUT: Duration = Duration::from_millis(50);
 
     pub fn new(mut transport: T) -> Result<Self> {
         transport.write(&Self::ACK)?;
@@ -29,8 +35,15 @@ impl<T: Transport> Chipset<T> {
         let mut chipset = Self {
             transport,
             firmware_version: (0, 0),
+            read_buffer: VecDeque::new(),
         };
-        chipset.set_command_type(1)?;
+        match chipset.set_command_type(1) {
+            Ok(()) => {}
+            Err(DriverError::Status(_)) => {
+                chipset.set_command_type(0)?;
+            }
+            Err(err) => return Err(err),
+        }
         let version = chipset.get_firmware_version(Some(0x60))?;
         chipset.firmware_version = (version[0], version[1]);
         chipset.get_pd_data_version()?;
@@ -63,17 +76,24 @@ impl<T: Transport> Chipset<T> {
         data.push(code);
         data.extend_from_slice(payload);
         let frame = Frame::build(&data);
-        self.transport.write(frame.as_bytes())?;
-
-        let ack = Frame::parse(&self.transport.read(Duration::from_millis(100))?)
-            .ok_or_else(|| DriverError::Other("invalid ack frame".into()))?;
-        if ack.frame_type() != &FrameType::Ack {
-            return Err(DriverError::Other("unexpected frame type".into()));
+        if let Err(err) = self.transport.write(frame.as_bytes()) {
+            let driver_err = DriverError::from(err);
+            self.recover_after_error(false);
+            return Err(driver_err);
         }
 
-        let rsp_bytes = self.transport.read(Duration::from_millis(500))?;
-        let rsp = Frame::parse(&rsp_bytes)
-            .ok_or_else(|| DriverError::Other("invalid response frame".into()))?;
+        if let Err(err) = self.read_ack_frame() {
+            self.recover_after_error(false);
+            return Err(err);
+        }
+
+        let rsp = match self.read_response_frame() {
+            Ok(frame) => frame,
+            Err(err) => {
+                self.recover_after_error(true);
+                return Err(err);
+            }
+        };
 
         if let FrameType::Data(payload) = rsp.frame_type() {
             if payload.get(0) == Some(&0xD7) && payload.get(1) == Some(&code.wrapping_add(1)) {
@@ -284,6 +304,123 @@ impl<T: Transport> Chipset<T> {
         }
         let rsp = self.send_command(command, &payload)?;
         ensure_status_ok(rsp.first().copied())
+    }
+
+    fn read_ack_frame(&mut self) -> Result<()> {
+        let deadline = Instant::now() + Self::ACK_TIMEOUT;
+        let bytes = self.read_exact(Self::ACK.len(), deadline)?;
+        let frame =
+            Frame::parse(&bytes).ok_or_else(|| DriverError::Other("invalid ack frame".into()))?;
+        if frame.frame_type() != &FrameType::Ack {
+            return Err(DriverError::Other("unexpected frame type".into()));
+        }
+        Ok(())
+    }
+
+    fn read_response_frame(&mut self) -> Result<Frame> {
+        let deadline = Instant::now() + Self::RESPONSE_TIMEOUT;
+        let bytes = self.read_frame_bytes(deadline)?;
+        Frame::parse(&bytes).ok_or_else(|| DriverError::Other("invalid response frame".into()))
+    }
+
+    fn read_frame_bytes(&mut self, deadline: Instant) -> Result<Vec<u8>> {
+        let mut frame = self.read_exact(5, deadline)?;
+        if &frame[0..3] != [0x00, 0x00, 0xFF] {
+            return Err(DriverError::Other("invalid frame preamble".into()));
+        }
+
+        if frame[3] == 0xFF && frame[4] == 0xFF {
+            let extended = self.read_exact(3, deadline)?;
+            let mut len_bytes = [0u8; 2];
+            len_bytes.copy_from_slice(&extended[0..2]);
+            let len = u16::from_le_bytes(len_bytes) as usize;
+            frame.extend_from_slice(&extended);
+            let remaining = len
+                .checked_add(2)
+                .ok_or_else(|| DriverError::Other("frame length overflow".into()))?;
+            let tail = self.read_exact(remaining, deadline)?;
+            frame.extend_from_slice(&tail);
+            return Ok(frame);
+        }
+
+        let len = frame[3] as usize;
+        let remaining = len
+            .checked_add(2)
+            .ok_or_else(|| DriverError::Other("frame length overflow".into()))?;
+        let tail = self.read_exact(remaining, deadline)?;
+        frame.extend_from_slice(&tail);
+        Ok(frame)
+    }
+
+    fn read_exact(&mut self, len: usize, deadline: Instant) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            while out.len() < len {
+                if let Some(byte) = self.read_buffer.pop_front() {
+                    out.push(byte);
+                } else {
+                    break;
+                }
+            }
+            if out.len() == len {
+                break;
+            }
+            let now = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(now) else {
+                return Err(DriverError::Io(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "timeout while waiting for data",
+                )));
+            };
+            if remaining.as_nanos() == 0 {
+                return Err(DriverError::Io(io::Error::new(
+                    ErrorKind::TimedOut,
+                    "timeout while waiting for data",
+                )));
+            }
+            let chunk = self.transport.read(remaining)?;
+            if chunk.is_empty() {
+                continue;
+            }
+            self.read_buffer.extend(chunk);
+        }
+        Ok(out)
+    }
+
+    fn recover_after_error(&mut self, drain_buffer: bool) {
+        if let Err(err) = self.transport.write(&Self::ACK) {
+            warn!("failed to send recovery ACK: {}", err);
+        }
+        if drain_buffer {
+            self.drain_input(Self::BUFFER_CLEAR_TIMEOUT);
+        }
+        self.read_buffer.clear();
+    }
+
+    fn drain_input(&mut self, timeout: Duration) {
+        self.read_buffer.clear();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(now) else {
+                break;
+            };
+            if remaining.as_nanos() == 0 {
+                break;
+            }
+            match self.transport.read(remaining) {
+                Ok(bytes) => {
+                    if bytes.is_empty() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if err.kind() == ErrorKind::TimedOut {
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use super::{
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, RequestServiceV2KeyVersion,
     SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
 };
-use crate::rcs380::driver::{DriverError, Result as DriverResult};
+use crate::port100::driver::{DriverError, Result as DriverResult};
 
 #[derive(Debug)]
 pub enum FelicaStandardResponse {
@@ -84,7 +84,7 @@ pub enum FelicaStandardResponse {
 }
 
 impl FelicaStandardResponse {
-    pub(crate) fn from_bytes(data: &[u8]) -> DriverResult<FelicaStandardResponse> {
+    pub fn from_bytes(data: &[u8]) -> DriverResult<FelicaStandardResponse> {
         Self::ensure_response_len(data, 2, "short Felica response")?;
         let code = data[1];
         if code == 0x13 {
