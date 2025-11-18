@@ -1,4 +1,8 @@
-use super::iso14443::{IsoDepConfig, IsoDepSession, IsoDepState};
+use super::iso14443::{
+    ISO_DEP_S_DESELECT, ISO_DEP_S_IFS, ISO_DEP_S_WTX, IsoDepBlockType, IsoDepConfig, IsoDepSession,
+    IsoDepState, build_iso_dep_r_block, build_iso_dep_s_block, extend_timeout,
+    next_iso_dep_i_frame, parse_iso_dep_response, wtx_multiplier,
+};
 use super::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
 use crate::clf::errors::UnsupportedTargetError;
 use crate::clf::targets::RemoteTarget;
@@ -26,21 +30,6 @@ const PROPERTY_GROUP_NO: u8 = 8;
 const RFFE_PARAM_EEPROM: u8 = 0x01;
 const RFFE_PARAM_PD_SC_DPC: u8 = 0x02;
 const RFFE_PARAM_PROTOCOL_CONFIGURATION: u8 = 0x03;
-const ISO_DEP_PCB_I_BLOCK: u8 = 0x02;
-const ISO_DEP_PCB_CHAINING: u8 = 0x10;
-const ISO_DEP_PCB_CID: u8 = 0x08;
-const ISO_DEP_PCB_NAD: u8 = 0x04;
-const ISO_DEP_PCB_MASK: u8 = 0xC0;
-const ISO_DEP_PCB_TYPE_I: u8 = 0x00;
-const ISO_DEP_PCB_TYPE_R: u8 = 0x80;
-const ISO_DEP_PCB_TYPE_S: u8 = 0xC0;
-const ISO_DEP_S_MASK: u8 = 0x30;
-const ISO_DEP_S_DESELECT: u8 = 0x00;
-const ISO_DEP_S_IFS: u8 = 0x20;
-const ISO_DEP_S_WTX: u8 = 0x30;
-const ISO_DEP_R_ACK_BIT: u8 = 0x10;
-const ISO_DEP_WTXM_MIN: u8 = 1;
-const ISO_DEP_WTXM_MAX: u8 = 59;
 const DIAG_COMMUNICATION_LINE_SIZE_MAX: usize = 500;
 const DIAG_POLLING_COUNT_MIN: u8 = 1;
 const DIAG_POLLING_COUNT_MAX: u8 = 255;
@@ -76,6 +65,24 @@ pub struct ThroughOptions {
 impl Default for ThroughProtocol {
     fn default() -> Self {
         ThroughProtocol::Felica
+    }
+}
+
+impl ThroughProtocol {
+    fn transmission_flags(self) -> TransmissionFlags {
+        match self {
+            ThroughProtocol::Felica => TransmissionFlags::felica(),
+            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
+            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+            ThroughProtocol::Iso15693 => TransmissionFlags::iso15693(),
+        }
+    }
+
+    fn iso_dep_flags(self) -> TransmissionFlags {
+        match self {
+            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+            _ => TransmissionFlags::iso14443_type_a(),
+        }
     }
 }
 
@@ -282,29 +289,19 @@ impl<T: Transport> Device<T> {
         let timeout = timeout_ms
             .map(|ms| Duration::from_millis(ms as u64))
             .unwrap_or_else(|| Duration::from_millis(0));
-        let mut flags = default_flags_for_protocol(opts.protocol);
+        let mut flags = opts.protocol.transmission_flags();
         apply_flag_overrides(&mut flags, &opts);
         self.pcsc.transceive(data, timeout, &flags)
     }
 
     pub fn detect_type_a(&mut self, options: Option<TypeADetectOptions>) -> Result<Vec<u8>> {
         let opts = options.unwrap_or_default();
-        if let Some(mut config) = opts.iso_dep {
-            self.pcsc
-                .switch_protocol_iso14443_4a(config.fsdi, config.cid, 4)?;
-            if let Ok(ats) = self.pcsc.get_historical_bytes() {
-                if let Err(err) = config.apply_ats(&ats) {
-                    warn!("failed to apply ATS parameters: {err}");
-                } else {
-                    debug!("Port-400 ATS: {}", encode(&ats));
-                }
-            }
-            self.start_iso_dep_session(ThroughProtocol::Iso14443TypeA, config);
+        if let Some(config) = opts.iso_dep {
+            self.enable_type_a_iso_dep(config)?;
         } else {
-            self.pcsc.switch_protocol_iso14443_3a()?;
-            self.end_iso_dep_session();
+            self.prepare_type_a_polling()?;
         }
-        let _ = self.pcsc.card_baudrate()?;
+        self.refresh_card_baudrate()?;
         self.pcsc.get_uid()
     }
 
@@ -313,26 +310,14 @@ impl<T: Transport> Device<T> {
         let mut config = opts
             .iso_dep
             .unwrap_or_else(|| IsoDepConfig::type_b_defaults());
-        self.pcsc
-            .switch_protocol_iso14443_4b(config.fsdi, config.cid, 4)?;
-        let info = self
-            .pcsc
-            .request_type_b_info(opts.afi.unwrap_or(0x00), opts.param.unwrap_or(0x00))?;
-        if let Err(err) = config.apply_type_b_protocol_info(&info.protocol_info) {
-            warn!("failed to apply Type-B protocol info: {err}");
-        } else {
-            debug!(
-                "Port-400 Type-B protocol info: {}",
-                encode(&info.protocol_info)
-            );
-        }
+        let info = self.prepare_type_b_link(&mut config, &opts)?;
         self.start_iso_dep_session(ThroughProtocol::Iso14443TypeB, config);
-        let _ = self.pcsc.card_baudrate()?;
+        self.refresh_card_baudrate()?;
         Ok(info.pupi.to_vec())
     }
 
     pub fn detect_type_a_low_level(&mut self) -> Result<TypeACardInfo> {
-        self.pcsc.switch_protocol_iso14443_3a()?;
+        self.prepare_type_a_polling()?;
         let atqa_bytes = self.send_type_a_frame(&[0x26], Some(7), false, false)?;
         if atqa_bytes.len() != 2 {
             return Err(DriverError::Other("invalid ATQA length".into()));
@@ -403,14 +388,7 @@ impl<T: Transport> Device<T> {
         let mut config = opts
             .iso_dep
             .unwrap_or_else(|| IsoDepConfig::type_b_defaults());
-        self.pcsc
-            .switch_protocol_iso14443_4b(config.fsdi, config.cid, 4)?;
-        let info = self
-            .pcsc
-            .request_type_b_info(opts.afi.unwrap_or(0x00), opts.param.unwrap_or(0x00))?;
-        if let Err(err) = config.apply_type_b_protocol_info(&info.protocol_info) {
-            warn!("failed to apply Type-B protocol info: {err}");
-        }
+        let info = self.prepare_type_b_link(&mut config, &opts)?;
         let dri = config.dr.symbol().min(3);
         let dsi = config.ds.symbol().min(3);
         let attrib_cmd = build_type_b_attrib_command(&info, &config, dri, dsi);
@@ -521,11 +499,6 @@ impl<T: Transport> Device<T> {
         let protocol = self
             .iso_dep_protocol
             .unwrap_or(ThroughProtocol::Iso14443TypeA);
-        let flags = match protocol {
-            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
-            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
-            _ => TransmissionFlags::iso14443_type_a(),
-        };
         let base_timeout = session.config().fwt_duration();
         let mut current_timeout = base_timeout;
         let mut pending_response: Option<Vec<u8>> = None;
@@ -551,8 +524,7 @@ impl<T: Transport> Device<T> {
             let response_bytes = if let Some(bytes) = pending_response.take() {
                 bytes
             } else {
-                self.pcsc
-                    .transceive(&current_frame, current_timeout, &flags)?
+                self.iso_dep_transceive(&current_frame, protocol, current_timeout)?
             };
             let response = parse_iso_dep_response(session.state(), &response_bytes)?;
             match response.block_type {
@@ -563,7 +535,7 @@ impl<T: Transport> Device<T> {
                         if response.block_number == duplicate {
                             let ack_frame = build_iso_dep_r_block(session.state(), true);
                             let ack_response =
-                                self.pcsc.transceive(&ack_frame, current_timeout, &flags)?;
+                                self.iso_dep_transceive(&ack_frame, protocol, current_timeout)?;
                             pending_response = Some(ack_response);
                             continue;
                         }
@@ -588,7 +560,7 @@ impl<T: Transport> Device<T> {
                     if response.chaining {
                         let ack_frame = build_iso_dep_r_block(session.state(), true);
                         let ack_response =
-                            self.pcsc.transceive(&ack_frame, current_timeout, &flags)?;
+                            self.iso_dep_transceive(&ack_frame, protocol, current_timeout)?;
                         pending_response = Some(ack_response);
                         continue;
                     }
@@ -759,9 +731,7 @@ impl<T: Transport> Device<T> {
         match command {
             DiagnoseCommand::CommunicationLine(data) => {
                 if data.is_empty() || data.len() > DIAG_COMMUNICATION_LINE_SIZE_MAX {
-                    return Err(DriverError::Other(
-                        "diagnostic data size is invalid".into(),
-                    ));
+                    return Err(DriverError::Other("diagnostic data size is invalid".into()));
                 }
                 let response = self.pcsc.diagnose_communication_line(&data)?;
                 Ok(DiagnoseResult::CommunicationLine(response))
@@ -787,6 +757,62 @@ impl<T: Transport> Device<T> {
         }
     }
 
+    fn enable_type_a_iso_dep(&mut self, mut config: IsoDepConfig) -> Result<()> {
+        self.pcsc
+            .switch_protocol_iso14443_4a(config.fsdi, config.cid, 4)?;
+        if let Ok(ats) = self.pcsc.get_historical_bytes() {
+            if let Err(err) = config.apply_ats(&ats) {
+                warn!("failed to apply ATS parameters: {err}");
+            } else {
+                debug!("Port-400 ATS: {}", encode(&ats));
+            }
+        }
+        self.start_iso_dep_session(ThroughProtocol::Iso14443TypeA, config);
+        Ok(())
+    }
+
+    fn prepare_type_a_polling(&mut self) -> Result<()> {
+        self.pcsc.switch_protocol_iso14443_3a()?;
+        self.end_iso_dep_session();
+        Ok(())
+    }
+
+    fn refresh_card_baudrate(&mut self) -> Result<()> {
+        let _ = self.pcsc.card_baudrate()?;
+        Ok(())
+    }
+
+    fn prepare_type_b_link(
+        &mut self,
+        config: &mut IsoDepConfig,
+        options: &TypeBDetectOptions,
+    ) -> Result<TypeBInfo> {
+        self.pcsc
+            .switch_protocol_iso14443_4b(config.fsdi, config.cid, 4)?;
+        let info = self
+            .pcsc
+            .request_type_b_info(options.afi.unwrap_or(0x00), options.param.unwrap_or(0x00))?;
+        if let Err(err) = config.apply_type_b_protocol_info(&info.protocol_info) {
+            warn!("failed to apply Type-B protocol info: {err}");
+        } else {
+            debug!(
+                "Port-400 Type-B protocol info: {}",
+                encode(&info.protocol_info)
+            );
+        }
+        Ok(info)
+    }
+
+    fn iso_dep_transceive(
+        &mut self,
+        frame: &[u8],
+        protocol: ThroughProtocol,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let flags = protocol.iso_dep_flags();
+        self.pcsc.transceive(frame, timeout, &flags)
+    }
+
     fn send_s_block_wtx(
         &mut self,
         state: &IsoDepState,
@@ -794,23 +820,9 @@ impl<T: Transport> Device<T> {
         protocol: ThroughProtocol,
         timeout: Duration,
     ) -> Result<Vec<u8>> {
-        let mut pcb = ISO_DEP_PCB_TYPE_S | ISO_DEP_S_WTX;
-        pcb |= state.current_tx_block() & 0x01;
-        if state.cid().is_some() {
-            pcb |= ISO_DEP_PCB_CID;
-        }
-        let mut frame = Vec::with_capacity(3);
-        frame.push(pcb);
-        if let Some(cid) = state.cid() {
-            frame.push(cid);
-        }
-        frame.push(wtxm);
-        let flags = match protocol {
-            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
-            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
-            _ => TransmissionFlags::iso14443_type_a(),
-        };
-        self.pcsc.transceive(&frame, timeout, &flags)
+        let payload = [wtxm];
+        let frame = build_iso_dep_s_block(state, ISO_DEP_S_WTX, true, &payload);
+        self.iso_dep_transceive(&frame, protocol, timeout)
     }
 
     fn send_s_block_ifs(
@@ -819,23 +831,9 @@ impl<T: Transport> Device<T> {
         ifs: u8,
         protocol: ThroughProtocol,
     ) -> Result<Vec<u8>> {
-        let mut pcb = ISO_DEP_PCB_TYPE_S | ISO_DEP_S_IFS;
-        if state.cid().is_some() {
-            pcb |= ISO_DEP_PCB_CID;
-        }
-        let mut frame = Vec::with_capacity(3);
-        frame.push(pcb);
-        if let Some(cid) = state.cid() {
-            frame.push(cid);
-        }
-        frame.push(ifs);
-        let flags = match protocol {
-            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
-            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
-            _ => TransmissionFlags::iso14443_type_a(),
-        };
-        self.pcsc
-            .transceive(&frame, Duration::from_millis(10), &flags)
+        let payload = [ifs];
+        let frame = build_iso_dep_s_block(state, ISO_DEP_S_IFS, false, &payload);
+        self.iso_dep_transceive(&frame, protocol, Duration::from_millis(10))
     }
 
     fn send_s_block_deselect(
@@ -843,22 +841,8 @@ impl<T: Transport> Device<T> {
         state: &IsoDepState,
         protocol: ThroughProtocol,
     ) -> Result<Vec<u8>> {
-        let mut pcb = ISO_DEP_PCB_TYPE_S | ISO_DEP_S_DESELECT;
-        if state.cid().is_some() {
-            pcb |= ISO_DEP_PCB_CID;
-        }
-        let mut frame = Vec::with_capacity(2);
-        frame.push(pcb);
-        if let Some(cid) = state.cid() {
-            frame.push(cid);
-        }
-        let flags = match protocol {
-            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
-            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
-            _ => TransmissionFlags::iso14443_type_a(),
-        };
-        self.pcsc
-            .transceive(&frame, Duration::from_millis(10), &flags)
+        let frame = build_iso_dep_s_block(state, ISO_DEP_S_DESELECT, false, &[]);
+        self.iso_dep_transceive(&frame, protocol, Duration::from_millis(10))
     }
 
     fn send_type_a_frame(
@@ -921,19 +905,6 @@ impl<T: Transport> Device<T> {
     }
 }
 
-fn wtx_multiplier(value: u8) -> u8 {
-    let masked = value & 0x3F;
-    masked.clamp(ISO_DEP_WTXM_MIN, ISO_DEP_WTXM_MAX)
-}
-
-fn extend_timeout(base: Duration, multiplier: u8) -> Duration {
-    if multiplier <= 1 {
-        base
-    } else {
-        base.checked_mul(multiplier as u32).unwrap_or(Duration::MAX)
-    }
-}
-
 fn build_type_b_attrib_command(
     info: &TypeBInfo,
     config: &IsoDepConfig,
@@ -950,15 +921,6 @@ fn build_type_b_attrib_command(
     frame.push(param3);
     frame.push(config.cid & 0x0F);
     frame
-}
-
-fn default_flags_for_protocol(protocol: ThroughProtocol) -> TransmissionFlags {
-    match protocol {
-        ThroughProtocol::Felica => TransmissionFlags::felica(),
-        ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
-        ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
-        ThroughProtocol::Iso15693 => TransmissionFlags::iso15693(),
-    }
 }
 
 fn apply_flag_overrides(flags: &mut TransmissionFlags, options: &ThroughOptions) {
@@ -989,144 +951,6 @@ fn ensure_rffe_category(category: u8) -> Result<()> {
             "unsupported RFFE parameter category {category}"
         ))),
     }
-}
-
-fn build_iso_dep_i_block(state: &IsoDepState, payload: &[u8], chaining: bool) -> Vec<u8> {
-    let mut pcb: u8 = ISO_DEP_PCB_I_BLOCK | (state.current_tx_block() & 0x01);
-    if chaining {
-        pcb |= ISO_DEP_PCB_CHAINING;
-    }
-    if state.cid().is_some() {
-        pcb |= ISO_DEP_PCB_CID;
-    }
-    if state.nad().is_some() {
-        pcb |= ISO_DEP_PCB_NAD;
-    }
-    let mut frame = Vec::with_capacity(3 + payload.len());
-    frame.push(pcb);
-    if let Some(cid) = state.cid() {
-        frame.push(cid);
-    }
-    if let Some(nad) = state.nad() {
-        frame.push(nad);
-    }
-    frame.extend_from_slice(payload);
-    frame
-}
-
-struct IsoDepIFrame {
-    frame: Vec<u8>,
-    chaining: bool,
-}
-
-fn next_iso_dep_i_frame(
-    state: &IsoDepState,
-    payload: &[u8],
-    offset: &mut usize,
-    max_inf: usize,
-    chaining: bool,
-    sent_empty: &mut bool,
-) -> Option<IsoDepIFrame> {
-    if *offset >= payload.len() {
-        if payload.is_empty() && !*sent_empty {
-            *sent_empty = true;
-            let frame = build_iso_dep_i_block(state, &[], chaining);
-            return Some(IsoDepIFrame { frame, chaining });
-        }
-        return None;
-    }
-    let remaining = payload.len() - *offset;
-    let take = remaining.min(max_inf.max(1));
-    let chunk = &payload[*offset..*offset + take];
-    *offset += take;
-    let has_more = *offset < payload.len();
-    let block_chaining = has_more || (!has_more && chaining);
-    let frame = build_iso_dep_i_block(state, chunk, block_chaining);
-    Some(IsoDepIFrame {
-        frame,
-        chaining: block_chaining,
-    })
-}
-
-fn build_iso_dep_r_block(state: &IsoDepState, ack: bool) -> Vec<u8> {
-    let mut pcb: u8 = ISO_DEP_PCB_TYPE_R | (state.expected_picc_block() & 0x01);
-    if !ack {
-        pcb |= ISO_DEP_R_ACK_BIT;
-    }
-    if state.cid().is_some() {
-        pcb |= ISO_DEP_PCB_CID;
-    }
-    let mut frame = Vec::with_capacity(2);
-    frame.push(pcb);
-    if let Some(cid) = state.cid() {
-        frame.push(cid);
-    }
-    frame
-}
-
-fn parse_iso_dep_response(state: &IsoDepState, data: &[u8]) -> Result<IsoDepResponse> {
-    if data.is_empty() {
-        return Err(DriverError::Other("ISO-DEP response is empty".into()));
-    }
-    let pcb = data[0];
-    let mut offset = 1;
-    let block_number = pcb & 0x01;
-    if (pcb & ISO_DEP_PCB_CID) != 0 {
-        let cid = *data
-            .get(offset)
-            .ok_or_else(|| DriverError::Other("ISO-DEP response missing CID".into()))?;
-        if let Some(expected) = state.cid() {
-            if cid != expected {
-                return Err(DriverError::Other("ISO-DEP CID mismatch".into()));
-            }
-        }
-        offset += 1;
-    }
-    if (pcb & ISO_DEP_PCB_NAD) != 0 {
-        data.get(offset)
-            .ok_or_else(|| DriverError::Other("ISO-DEP response missing NAD".into()))?;
-        offset += 1;
-    }
-    let block_type = match pcb & ISO_DEP_PCB_MASK {
-        ISO_DEP_PCB_TYPE_I => {
-            if offset > data.len() {
-                return Err(DriverError::Other("ISO-DEP payload out of range".into()));
-            }
-            IsoDepBlockType::I {
-                payload: data[offset..].to_vec(),
-            }
-        }
-        ISO_DEP_PCB_TYPE_R => {
-            let ack = (pcb & ISO_DEP_R_ACK_BIT) == 0;
-            IsoDepBlockType::R { ack }
-        }
-        ISO_DEP_PCB_TYPE_S => {
-            let code = pcb & ISO_DEP_S_MASK;
-            IsoDepBlockType::S {
-                code,
-                payload: data[offset..].to_vec(),
-            }
-        }
-        other => IsoDepBlockType::Unknown(other),
-    };
-    Ok(IsoDepResponse {
-        block_type,
-        chaining: (pcb & ISO_DEP_PCB_CHAINING) != 0,
-        block_number,
-    })
-}
-
-struct IsoDepResponse {
-    block_type: IsoDepBlockType,
-    chaining: bool,
-    block_number: u8,
-}
-
-enum IsoDepBlockType {
-    I { payload: Vec<u8> },
-    R { ack: bool },
-    S { code: u8, payload: Vec<u8> },
-    Unknown(u8),
 }
 
 impl<T: Transport> FelicaDriver for Device<T> {

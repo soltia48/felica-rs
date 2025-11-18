@@ -14,36 +14,25 @@ const DEFAULT_RATS_RESPONSE: [u8; 5] = [0x05, 0x78, 0x80, 0x70, 0x02];
 impl<T: Transport> Device<T> {
     pub fn detect_type_a(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
         let brty = target.brty();
-        if !matches!(brty, "106A" | "212A" | "424A") {
-            return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {}", brty),
-            )));
-        }
+        ensure_supported_bitrate(brty, &["106A", "212A", "424A"], "unsupported bitrate ")?;
 
         debug!("polling for NFC-A technology");
 
-        self.chipset.set_initiator_rf(brty, None)?;
-        self.chipset.apply_initiator_defaults()?;
-        self.chipset.configure_initiator(&[
-            ("initial_guard_time", 6),
-            ("add_crc", 0),
-            ("check_crc", 0),
-            ("check_parity", 1),
-            ("last_byte_bit_count", 7),
-        ])?;
+        self.configure_initiator_for_poll(
+            brty,
+            &[
+                ("initial_guard_time", 6),
+                ("add_crc", 0),
+                ("check_crc", 0),
+                ("check_parity", 1),
+                ("last_byte_bit_count", 7),
+            ],
+        )?;
 
         let sens_req = target.data.sens_req.clone().unwrap_or_else(|| vec![0x26]);
-
-        let sens_res = match self.chipset.initiator_exchange_rf(&sens_req, 30) {
-            Ok(data) => data,
-            Err(DriverError::Fault(fault)) => {
-                if fault.matches("RECEIVE_TIMEOUT_ERROR") {
-                    return Ok(None);
-                }
-                debug!("{}", fault);
-                return Ok(None);
-            }
-            Err(err) => return Err(err),
+        let sens_res = match self.initiator_exchange_optional(&sens_req, 30, "SENS_REQ", false)? {
+            Some(data) => data,
+            None => return Ok(None),
         };
 
         if sens_res.len() != 2 {
@@ -64,16 +53,12 @@ impl<T: Transport> Device<T> {
             if sens_res[1] & 0x0F == 0b1100 {
                 let rid_cmd = vec![0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
                 debug!("send RID_CMD {}", hex::encode(&rid_cmd));
-                match self.chipset.initiator_exchange_rf(&rid_cmd, 30) {
-                    Ok(rid_res) => {
-                        found.data.rid_res = Some(rid_res);
-                    }
-                    Err(DriverError::Fault(fault)) => {
-                        debug!("{}", fault);
-                        return Ok(None);
-                    }
-                    Err(err) => return Err(err),
-                }
+                let rid_res =
+                    match self.initiator_exchange_optional(&rid_cmd, 30, "RID_CMD", true)? {
+                        Some(res) => res,
+                        None => return Ok(None),
+                    };
+                found.data.rid_res = Some(rid_res);
             }
             return Ok(Some(found));
         }
@@ -107,17 +92,12 @@ impl<T: Transport> Device<T> {
                     .fold(0, |acc, b| acc ^ b);
                 sel_req.push(bcc);
                 debug!("send SEL_REQ {}", hex::encode(&sel_req));
-                match self.chipset.initiator_exchange_rf(&sel_req, 30) {
-                    Ok(res) => {
-                        sel_res = res;
-                        debug!("received SEL_RES {}", hex::encode(&sel_res));
-                    }
-                    Err(DriverError::Fault(fault)) => {
-                        debug!("{}", fault);
-                        return Ok(None);
-                    }
-                    Err(err) => return Err(err),
-                }
+                let Some(res) = self.initiator_exchange_optional(&sel_req, 30, "SEL_REQ", true)?
+                else {
+                    return Ok(None);
+                };
+                sel_res = res;
+                debug!("received SEL_RES {}", hex::encode(&sel_res));
             }
             uid_value = target.data.sel_req.clone().unwrap_or_default();
         } else {
@@ -127,13 +107,10 @@ impl<T: Transport> Device<T> {
                     .configure_initiator(&[("add_crc", 0), ("check_crc", 0)])?;
                 let sdd_req = vec![sel_cmd, 0x20];
                 debug!("send SDD_REQ {}", hex::encode(&sdd_req));
-                let sdd_res = match self.chipset.initiator_exchange_rf(&sdd_req, 30) {
-                    Ok(data) => data,
-                    Err(DriverError::Fault(fault)) => {
-                        debug!("{}", fault);
-                        return Ok(None);
-                    }
-                    Err(err) => return Err(err),
+                let Some(sdd_res) =
+                    self.initiator_exchange_optional(&sdd_req, 30, "SDD_REQ", true)?
+                else {
+                    return Ok(None);
                 };
                 debug!("received SDD_RES {}", hex::encode(&sdd_res));
                 self.chipset
@@ -141,17 +118,12 @@ impl<T: Transport> Device<T> {
                 let mut sel_req = vec![sel_cmd, 0x70];
                 sel_req.extend_from_slice(&sdd_res);
                 debug!("send SEL_REQ {}", hex::encode(&sel_req));
-                match self.chipset.initiator_exchange_rf(&sel_req, 30) {
-                    Ok(res) => {
-                        sel_res = res.clone();
-                        debug!("received SEL_RES {}", hex::encode(&sel_res));
-                    }
-                    Err(DriverError::Fault(fault)) => {
-                        debug!("{}", fault);
-                        return Ok(None);
-                    }
-                    Err(err) => return Err(err),
-                }
+                let Some(res) = self.initiator_exchange_optional(&sel_req, 30, "SEL_REQ", true)?
+                else {
+                    return Ok(None);
+                };
+                sel_res = res.clone();
+                debug!("received SEL_RES {}", hex::encode(&sel_res));
                 if !sel_res.is_empty() && (sel_res[0] & 0b0000_0100) != 0 {
                     if sdd_res.len() >= 4 {
                         uid.extend_from_slice(&sdd_res[1..4]);
@@ -178,23 +150,20 @@ impl<T: Transport> Device<T> {
 
     pub fn detect_type_b(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
         let brty = target.brty();
-        if !matches!(brty, "106B" | "212B" | "424B") {
-            return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {}", brty),
-            )));
-        }
+        ensure_supported_bitrate(brty, &["106B", "212B", "424B"], "unsupported bitrate ")?;
 
         debug!("polling for NFC-B technology");
 
-        self.chipset.set_initiator_rf(brty, None)?;
-        self.chipset.apply_initiator_defaults()?;
-        self.chipset.configure_initiator(&[
-            ("initial_guard_time", 20),
-            ("add_sof", 1),
-            ("check_sof", 1),
-            ("add_eof", 1),
-            ("check_eof", 1),
-        ])?;
+        self.configure_initiator_for_poll(
+            brty,
+            &[
+                ("initial_guard_time", 20),
+                ("add_sof", 1),
+                ("check_sof", 1),
+                ("add_eof", 1),
+                ("check_eof", 1),
+            ],
+        )?;
 
         let sensb_req = target
             .data
@@ -203,17 +172,11 @@ impl<T: Transport> Device<T> {
             .unwrap_or_else(|| vec![0x05, 0x00, 0x10]);
         debug!("send SENSB_REQ {}", hex::encode(&sensb_req));
 
-        let sensb_res = match self.chipset.initiator_exchange_rf(&sensb_req, 30) {
-            Ok(data) => data,
-            Err(DriverError::Fault(fault)) => {
-                if fault.matches("RECEIVE_TIMEOUT_ERROR") {
-                    return Ok(None);
-                }
-                debug!("{}", fault);
-                return Ok(None);
-            }
-            Err(err) => return Err(err),
-        };
+        let sensb_res =
+            match self.initiator_exchange_optional(&sensb_req, 30, "SENSB_REQ", false)? {
+                Some(data) => data,
+                None => return Ok(None),
+            };
 
         if sensb_res.len() >= 12 && sensb_res[0] == 0x50 {
             debug!("received SENSB_RES {}", hex::encode(&sensb_res));
@@ -233,18 +196,11 @@ impl<T: Transport> Device<T> {
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
         let brty = target.brty();
-        if !matches!(brty, "212F" | "424F") {
-            return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {}", brty),
-            )));
-        }
+        ensure_supported_bitrate(brty, &["212F", "424F"], "unsupported bitrate ")?;
 
         debug!("polling for NFC-F technology");
 
-        self.chipset.set_initiator_rf(brty, None)?;
-        self.chipset.apply_initiator_defaults()?;
-        self.chipset
-            .configure_initiator(&[("initial_guard_time", 24)])?;
+        self.configure_initiator_for_poll(brty, &[("initial_guard_time", 24)])?;
 
         let timeout_ms = ((0.003625_f32 + time_slots as f32 * 0.001208_f32) * 1000.0).ceil();
         let command = FelicaStandardCommand::Polling {
@@ -278,9 +234,9 @@ impl<T: Transport> Device<T> {
         }
     }
 
-    pub fn sense_dep_passive(&mut self, _target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
+    pub fn detect_dep_passive(&mut self, _target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
         Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-            "device does not support active DEP sense".into(),
+            "device does not support active DEP detect".into(),
         )))
     }
 
@@ -289,11 +245,11 @@ impl<T: Transport> Device<T> {
         target: &LocalTarget,
         timeout: f32,
     ) -> Result<Option<LocalTarget>> {
-        if target.brty_send() != "106A" {
-            return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported target bitrate: {}", target.brty()),
-            )));
-        }
+        ensure_supported_bitrate(
+            target.brty_send(),
+            &["106A"],
+            "unsupported target bitrate: ",
+        )?;
         if target.data.rid_res.is_some() {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
                 "listening for type 1 tag activation is not supported".into(),
@@ -302,9 +258,7 @@ impl<T: Transport> Device<T> {
         let nfca_params = nfca_params_from_local(target)?;
         debug!("nfca_params {}", hex::encode(&nfca_params));
 
-        self.chipset.set_target_rf("106A")?;
-        self.chipset.apply_target_defaults()?;
-        self.chipset.configure_target(&[("rf_off_error", 0)])?;
+        self.configure_target_for_listen("106A")?;
 
         let sel_res_byte = target
             .data
@@ -341,16 +295,14 @@ impl<T: Transport> Device<T> {
         target: &LocalTarget,
         timeout: f32,
     ) -> Result<Option<LocalTarget>> {
-        if !matches!(target.brty_send(), "212F" | "424F") {
-            return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported target bitrate: {}", target.brty()),
-            )));
-        }
+        ensure_supported_bitrate(
+            target.brty_send(),
+            &["212F", "424F"],
+            "unsupported target bitrate: ",
+        )?;
         let sensf_res = ensure_sensf_res(target)?;
 
-        self.chipset.set_target_rf(target.brty_send())?;
-        self.chipset.apply_target_defaults()?;
-        self.chipset.configure_target(&[("rf_off_error", 0)])?;
+        self.configure_target_for_listen(target.brty_send())?;
 
         self.listen_type_f_loop(target, sensf_res, timeout)
     }
@@ -379,9 +331,7 @@ impl<T: Transport> Device<T> {
             ));
         }
 
-        self.chipset.set_target_rf("106A")?;
-        self.chipset.apply_target_defaults()?;
-        self.chipset.configure_target(&[("rf_off_error", 0)])?;
+        self.configure_target_for_listen("106A")?;
 
         self.listen_dep_loop(target, nfca_params, nfcf_params, timeout)
     }
@@ -396,17 +346,7 @@ impl<T: Transport> Device<T> {
         };
         while recv_timeout > 0 {
             debug!("wait {} ms for Type 2 Tag activation", recv_timeout);
-            match self.chipset.target_exchange_rf(
-                0,
-                0xFFFF,
-                true,
-                nfca_params,
-                &[],
-                false,
-                false,
-                recv_timeout,
-                None,
-            ) {
+            match self.target_exchange_default(true, nfca_params, &[], recv_timeout, None) {
                 Ok(data) => {
                     let bitrate = data.get(0).and_then(|&v| decode_target_bitrate(v));
                     let payload = data.get(7..).unwrap_or(&[]);
@@ -446,17 +386,8 @@ impl<T: Transport> Device<T> {
         while recv_timeout > 0 {
             debug!("wait {} ms for 106A TT4 command", recv_timeout);
             let payload = transmit_data.as_deref();
-            let result = self.chipset.target_exchange_rf(
-                0,
-                0xFFFF,
-                true,
-                nfca_params,
-                &[],
-                false,
-                false,
-                recv_timeout,
-                payload,
-            );
+            let result =
+                self.target_exchange_default(true, nfca_params, &[], recv_timeout, payload);
             transmit_data = None;
 
             match result {
@@ -589,14 +520,10 @@ impl<T: Transport> Device<T> {
                 debug!("{} send {}", target.brty(), hex::encode(data));
             }
             debug!("{} wait recv {} ms", target.brty(), recv_timeout);
-            let response = self.chipset.target_exchange_rf(
-                0,
-                0xFFFF,
+            let response = self.target_exchange_default(
                 false,
                 &[],
                 &[],
-                false,
-                false,
                 recv_timeout,
                 transmit_data.as_deref(),
             );
@@ -677,17 +604,8 @@ impl<T: Transport> Device<T> {
 
         while recv_timeout > 0 {
             debug!("wait {} ms for activation", recv_timeout);
-            match self.chipset.target_exchange_rf(
-                0,
-                0xFFFF,
-                true,
-                &nfca_params,
-                &nfcf_params,
-                false,
-                false,
-                recv_timeout,
-                None,
-            ) {
+            match self.target_exchange_default(true, &nfca_params, &nfcf_params, recv_timeout, None)
+            {
                 Ok(data) => {
                     let brty = data.get(0).and_then(|&v| decode_target_bitrate(v));
                     debug!(
@@ -815,6 +733,72 @@ impl<T: Transport> Device<T> {
         }
 
         Ok(None)
+    }
+
+    fn configure_initiator_for_poll(&mut self, brty: &str, params: &[(&str, u8)]) -> Result<()> {
+        self.chipset.set_initiator_rf(brty, None)?;
+        self.chipset.apply_initiator_defaults()?;
+        if !params.is_empty() {
+            self.chipset.configure_initiator(params)?;
+        }
+        Ok(())
+    }
+
+    fn configure_target_for_listen(&mut self, brty: &str) -> Result<()> {
+        self.chipset.set_target_rf(brty)?;
+        self.chipset.apply_target_defaults()?;
+        self.chipset.configure_target(&[("rf_off_error", 0)])
+    }
+
+    fn target_exchange_default(
+        &mut self,
+        mdaa: bool,
+        nfca_params: &[u8],
+        nfcf_params: &[u8],
+        timeout: u16,
+        payload: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        self.chipset.target_exchange_rf(
+            0,
+            0xFFFF,
+            mdaa,
+            nfca_params,
+            nfcf_params,
+            false,
+            false,
+            timeout,
+            payload,
+        )
+    }
+
+    fn initiator_exchange_optional(
+        &mut self,
+        payload: &[u8],
+        timeout: u16,
+        context: &str,
+        log_timeouts: bool,
+    ) -> Result<Option<Vec<u8>>> {
+        match self.chipset.initiator_exchange_rf(payload, timeout) {
+            Ok(data) => Ok(Some(data)),
+            Err(DriverError::Fault(fault)) => {
+                let is_timeout = fault.matches("RECEIVE_TIMEOUT_ERROR");
+                if log_timeouts || !is_timeout {
+                    debug!("{}: {}", context, fault);
+                }
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn ensure_supported_bitrate(brty: &str, allowed: &[&str], error_prefix: &str) -> Result<()> {
+    if allowed.iter().any(|&candidate| candidate == brty) {
+        Ok(())
+    } else {
+        Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
+            format!("{error_prefix}{brty}"),
+        )))
     }
 }
 

@@ -309,7 +309,15 @@ impl<T: Transport> Pcsc<T> {
 
     pub fn prepare_firmware_update(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         let mut frame = Vec::with_capacity(7 + data.len());
-        frame.extend_from_slice(&[0xFF, PREPARE_FIRMWARE_UPDATE_INS, 0x00, 0x00, 0x00, 0x01, 0x00]);
+        frame.extend_from_slice(&[
+            0xFF,
+            PREPARE_FIRMWARE_UPDATE_INS,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            0x00,
+        ]);
         frame.extend_from_slice(data);
         self.send_extended_escape(&frame)
     }

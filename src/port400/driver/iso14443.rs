@@ -8,6 +8,21 @@ const ISO_DEP_MAX_FSDI: u8 = 8;
 const ISO_DEP_MAX_FWI: u8 = 14;
 const ISO_DEP_MAX_SFGI: u8 = 14;
 const ISO_DEP_FRAME_SIZE_TABLE: [usize; 9] = [16, 24, 32, 40, 48, 64, 96, 128, 256];
+pub const ISO_DEP_PCB_I_BLOCK: u8 = 0x02;
+pub const ISO_DEP_PCB_CHAINING: u8 = 0x10;
+pub const ISO_DEP_PCB_CID: u8 = 0x08;
+pub const ISO_DEP_PCB_NAD: u8 = 0x04;
+pub const ISO_DEP_PCB_MASK: u8 = 0xC0;
+pub const ISO_DEP_PCB_TYPE_I: u8 = 0x00;
+pub const ISO_DEP_PCB_TYPE_R: u8 = 0x80;
+pub const ISO_DEP_PCB_TYPE_S: u8 = 0xC0;
+pub const ISO_DEP_S_MASK: u8 = 0x30;
+pub const ISO_DEP_S_DESELECT: u8 = 0x00;
+pub const ISO_DEP_S_IFS: u8 = 0x20;
+pub const ISO_DEP_S_WTX: u8 = 0x30;
+pub const ISO_DEP_R_ACK_BIT: u8 = 0x10;
+pub const ISO_DEP_WTXM_MIN: u8 = 1;
+pub const ISO_DEP_WTXM_MAX: u8 = 59;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IsoDepDataRate {
@@ -331,6 +346,182 @@ impl IsoDepSession {
     pub fn increment_retry_r_nak(&mut self) -> bool {
         self.retry_r_nak_counter = self.retry_r_nak_counter.saturating_add(1);
         self.retry_r_nak_counter <= self.config.max_retry_r_nak
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct IsoDepIFrame {
+    pub frame: Vec<u8>,
+    pub chaining: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct IsoDepResponse {
+    pub block_type: IsoDepBlockType,
+    pub chaining: bool,
+    pub block_number: u8,
+}
+
+#[derive(Clone, Debug)]
+pub enum IsoDepBlockType {
+    I { payload: Vec<u8> },
+    R { ack: bool },
+    S { code: u8, payload: Vec<u8> },
+    Unknown(u8),
+}
+
+pub fn build_iso_dep_i_block(state: &IsoDepState, payload: &[u8], chaining: bool) -> Vec<u8> {
+    let mut pcb: u8 = ISO_DEP_PCB_I_BLOCK | (state.current_tx_block() & 0x01);
+    if chaining {
+        pcb |= ISO_DEP_PCB_CHAINING;
+    }
+    if state.cid().is_some() {
+        pcb |= ISO_DEP_PCB_CID;
+    }
+    if state.nad().is_some() {
+        pcb |= ISO_DEP_PCB_NAD;
+    }
+    let mut frame = Vec::with_capacity(3 + payload.len());
+    frame.push(pcb);
+    if let Some(cid) = state.cid() {
+        frame.push(cid);
+    }
+    if let Some(nad) = state.nad() {
+        frame.push(nad);
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+pub fn build_iso_dep_s_block(
+    state: &IsoDepState,
+    code: u8,
+    include_block_number: bool,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut pcb = ISO_DEP_PCB_TYPE_S | code;
+    if include_block_number {
+        pcb |= state.current_tx_block() & 0x01;
+    }
+    if state.cid().is_some() {
+        pcb |= ISO_DEP_PCB_CID;
+    }
+    let mut frame = Vec::with_capacity(2 + payload.len());
+    frame.push(pcb);
+    if let Some(cid) = state.cid() {
+        frame.push(cid);
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+pub fn build_iso_dep_r_block(state: &IsoDepState, ack: bool) -> Vec<u8> {
+    let mut pcb: u8 = ISO_DEP_PCB_TYPE_R | (state.expected_picc_block() & 0x01);
+    if !ack {
+        pcb |= ISO_DEP_R_ACK_BIT;
+    }
+    if state.cid().is_some() {
+        pcb |= ISO_DEP_PCB_CID;
+    }
+    let mut frame = Vec::with_capacity(2);
+    frame.push(pcb);
+    if let Some(cid) = state.cid() {
+        frame.push(cid);
+    }
+    frame
+}
+
+pub fn next_iso_dep_i_frame(
+    state: &IsoDepState,
+    payload: &[u8],
+    offset: &mut usize,
+    max_inf: usize,
+    chaining: bool,
+    sent_empty: &mut bool,
+) -> Option<IsoDepIFrame> {
+    if *offset >= payload.len() {
+        if payload.is_empty() && !*sent_empty {
+            *sent_empty = true;
+            let frame = build_iso_dep_i_block(state, &[], chaining);
+            return Some(IsoDepIFrame { frame, chaining });
+        }
+        return None;
+    }
+    let remaining = payload.len() - *offset;
+    let take = remaining.min(max_inf.max(1));
+    let chunk = &payload[*offset..*offset + take];
+    *offset += take;
+    let has_more = *offset < payload.len();
+    let block_chaining = has_more || (!has_more && chaining);
+    let frame = build_iso_dep_i_block(state, chunk, block_chaining);
+    Some(IsoDepIFrame {
+        frame,
+        chaining: block_chaining,
+    })
+}
+
+pub fn parse_iso_dep_response(state: &IsoDepState, data: &[u8]) -> Result<IsoDepResponse> {
+    if data.is_empty() {
+        return Err(DriverError::Other("ISO-DEP response is empty".into()));
+    }
+    let pcb = data[0];
+    let mut offset = 1;
+    let block_number = pcb & 0x01;
+    if (pcb & ISO_DEP_PCB_CID) != 0 {
+        let cid = *data
+            .get(offset)
+            .ok_or_else(|| DriverError::Other("ISO-DEP response missing CID".into()))?;
+        if let Some(expected) = state.cid() {
+            if cid != expected {
+                return Err(DriverError::Other("ISO-DEP CID mismatch".into()));
+            }
+        }
+        offset += 1;
+    }
+    if (pcb & ISO_DEP_PCB_NAD) != 0 {
+        data.get(offset)
+            .ok_or_else(|| DriverError::Other("ISO-DEP response missing NAD".into()))?;
+        offset += 1;
+    }
+    let block_type = match pcb & ISO_DEP_PCB_MASK {
+        ISO_DEP_PCB_TYPE_I => {
+            if offset > data.len() {
+                return Err(DriverError::Other("ISO-DEP payload out of range".into()));
+            }
+            IsoDepBlockType::I {
+                payload: data[offset..].to_vec(),
+            }
+        }
+        ISO_DEP_PCB_TYPE_R => {
+            let ack = (pcb & ISO_DEP_R_ACK_BIT) == 0;
+            IsoDepBlockType::R { ack }
+        }
+        ISO_DEP_PCB_TYPE_S => {
+            let code = pcb & ISO_DEP_S_MASK;
+            IsoDepBlockType::S {
+                code,
+                payload: data[offset..].to_vec(),
+            }
+        }
+        other => IsoDepBlockType::Unknown(other),
+    };
+    Ok(IsoDepResponse {
+        block_type,
+        chaining: (pcb & ISO_DEP_PCB_CHAINING) != 0,
+        block_number,
+    })
+}
+
+pub fn wtx_multiplier(value: u8) -> u8 {
+    let masked = value & 0x3F;
+    masked.clamp(ISO_DEP_WTXM_MIN, ISO_DEP_WTXM_MAX)
+}
+
+pub fn extend_timeout(base: Duration, multiplier: u8) -> Duration {
+    if multiplier <= 1 {
+        base
+    } else {
+        base.checked_mul(multiplier as u32).unwrap_or(Duration::MAX)
     }
 }
 
