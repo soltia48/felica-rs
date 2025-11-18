@@ -36,6 +36,10 @@ pub enum FelicaStandardResponse {
         idm: Vec<u8>,
         result: Option<SearchServiceCodeResult>,
     },
+    RequestSystemCode {
+        idm: Vec<u8>,
+        system_codes: Vec<u16>,
+    },
     RequestBlockInformation {
         idm: Vec<u8>,
         block_counts: Vec<u16>,
@@ -100,6 +104,7 @@ impl FelicaStandardResponse {
             0x07 => Self::parse_read_without_encryption(idm, data),
             0x09 => Self::parse_write_without_encryption(idm, data),
             0x0B => Self::parse_search_service_code(idm, data),
+            0x0D => Self::parse_request_systemcode(idm, data),
             0x0F => Self::parse_request_block_information(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
@@ -275,6 +280,79 @@ impl FelicaStandardResponse {
         })
     }
 
+    fn parse_search_service_code(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short search service code response")?;
+        let payload = &data[10..];
+        let result = if payload == &[0xFF, 0xFF] {
+            None
+        } else if payload.len() == 2 {
+            Some(SearchServiceCodeResult::Service(ServiceCode::new(
+                u16::from_le_bytes([payload[0], payload[1]]),
+            )))
+        } else if payload.len() == 4 {
+            Some(SearchServiceCodeResult::Area {
+                area_code: u16::from_le_bytes([payload[0], payload[1]]),
+                end_service_index: u16::from_le_bytes([payload[2], payload[3]]),
+            })
+        } else {
+            return Err(DriverError::Other(
+                "search service code response must contain 2 or 4 bytes".into(),
+            ));
+        };
+        Ok(FelicaStandardResponse::SearchServiceCode { idm, result })
+    }
+
+    fn parse_request_systemcode(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short request system code response")?;
+        let count = data[10] as usize;
+        if count == 0 {
+            return Err(DriverError::Other(
+                "request system code response count must be at least 1".into(),
+            ));
+        }
+        let expected_len = 11 + count * 2;
+        Self::ensure_response_len(
+            data,
+            expected_len,
+            "short request system code response list",
+        )?;
+        let mut system_codes = Vec::with_capacity(count);
+        for chunk in data[11..11 + count * 2].chunks_exact(2) {
+            system_codes.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+        }
+        Ok(FelicaStandardResponse::RequestSystemCode { idm, system_codes })
+    }
+
+    fn parse_request_block_information(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short request block information response")?;
+        let count = data[10] as usize;
+        if count == 0 {
+            return Err(DriverError::Other(
+                "request block information count must be at least 1".into(),
+            ));
+        }
+        let expected_len = 11 + count * 2;
+        Self::ensure_response_len(data, expected_len, "short request block information list")?;
+        let mut block_counts = Vec::with_capacity(count);
+        for chunk in data[11..11 + count * 2].chunks_exact(2) {
+            block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+        Ok(FelicaStandardResponse::RequestBlockInformation { idm, block_counts })
+    }
+
+    fn parse_authentication1(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 26, "short authentication1 response")?;
+        let mut challenge_1b = [0u8; 8];
+        challenge_1b.copy_from_slice(&data[10..18]);
+        let mut challenge_2a = [0u8; 8];
+        challenge_2a.copy_from_slice(&data[18..26]);
+        Ok(FelicaStandardResponse::Authentication1 {
+            idm,
+            challenge_1b,
+            challenge_2a,
+        })
+    }
+
     fn parse_secure_read(data: &[u8]) -> DriverResult<Self> {
         if data.len() < 3 {
             return Err(DriverError::Other(
@@ -374,58 +452,6 @@ impl FelicaStandardResponse {
         Ok(FelicaStandardResponse::CommitRegistration {
             status_flag1: data[0],
             status_flag2: data[1],
-        })
-    }
-
-    fn parse_search_service_code(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short search service code response")?;
-        let payload = &data[10..];
-        let result = if payload == &[0xFF, 0xFF] {
-            None
-        } else if payload.len() == 2 {
-            Some(SearchServiceCodeResult::Service(ServiceCode::new(
-                u16::from_le_bytes([payload[0], payload[1]]),
-            )))
-        } else if payload.len() == 4 {
-            Some(SearchServiceCodeResult::Area {
-                area_code: u16::from_le_bytes([payload[0], payload[1]]),
-                end_service_index: u16::from_le_bytes([payload[2], payload[3]]),
-            })
-        } else {
-            return Err(DriverError::Other(
-                "search service code response must contain 2 or 4 bytes".into(),
-            ));
-        };
-        Ok(FelicaStandardResponse::SearchServiceCode { idm, result })
-    }
-
-    fn parse_request_block_information(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short request block information response")?;
-        let count = data[10] as usize;
-        if count == 0 {
-            return Err(DriverError::Other(
-                "request block information count must be at least 1".into(),
-            ));
-        }
-        let expected_len = 11 + count * 2;
-        Self::ensure_response_len(data, expected_len, "short request block information list")?;
-        let mut block_counts = Vec::with_capacity(count);
-        for chunk in data[11..11 + count * 2].chunks_exact(2) {
-            block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
-        }
-        Ok(FelicaStandardResponse::RequestBlockInformation { idm, block_counts })
-    }
-
-    fn parse_authentication1(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 26, "short authentication1 response")?;
-        let mut challenge_1b = [0u8; 8];
-        challenge_1b.copy_from_slice(&data[10..18]);
-        let mut challenge_2a = [0u8; 8];
-        challenge_2a.copy_from_slice(&data[18..26]);
-        Ok(FelicaStandardResponse::Authentication1 {
-            idm,
-            challenge_1b,
-            challenge_2a,
         })
     }
 

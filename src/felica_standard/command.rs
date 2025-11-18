@@ -33,6 +33,9 @@ pub enum FelicaStandardCommand {
         idm: [u8; IDM_LEN],
         service_index: u16,
     },
+    RequestSystemCode {
+        idm: [u8; IDM_LEN],
+    },
     RequestBlockInformation {
         idm: [u8; IDM_LEN],
         node_codes: Vec<u16>,
@@ -227,6 +230,11 @@ impl FelicaStandardCommand {
                 let mut payload = PayloadBuilder::new(0x0A);
                 payload.idm(idm);
                 payload.extend_u16_le(*service_index);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestSystemCode { idm } => {
+                let mut payload = PayloadBuilder::new(0x0C);
+                payload.idm(idm);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::RequestBlockInformation { idm, node_codes } => {

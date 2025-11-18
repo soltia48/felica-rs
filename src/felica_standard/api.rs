@@ -283,6 +283,22 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    pub fn request_system_code(&mut self) -> Result<Vec<u16>, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self.polling_result.request_system_code_timeout_ms();
+
+        let response = self.execute_command(
+            "Request System Code",
+            FelicaStandardCommand::RequestSystemCode { idm },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::RequestSystemCode { system_codes, .. } => Ok(system_codes),
+            _ => Err(unexpected_response("Request System Code")),
+        }
+    }
+
     pub fn request_block_information(
         &mut self,
         node_codes: &[u16],
@@ -511,9 +527,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
     ) -> Result<Vec<[u8; BLOCK_SIZE]>, FelicaStandardError> {
         ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
 
-        let timeout_ms = self
-            .polling_result
-            .read_without_encryption_timeout_ms(block_list.len());
+        let timeout_ms = self.polling_result.read_timeout_ms(block_list.len());
 
         let response = self.execute_command(
             "Read",
@@ -552,9 +566,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
         ensure_block_data_length(block_list.len(), data.len())?;
 
-        let timeout_ms = self
-            .polling_result
-            .write_without_encryption_timeout_ms(block_list.len());
+        let timeout_ms = self.polling_result.write_timeout_ms(block_list.len());
 
         let response = self.execute_command(
             "Write",
