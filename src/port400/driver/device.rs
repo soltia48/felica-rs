@@ -1,4 +1,5 @@
-use super::pcsc::{Pcsc, TransmissionFlags};
+use super::iso14443::{IsoDepConfig, IsoDepSession, IsoDepState};
+use super::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
 use crate::clf::errors::UnsupportedTargetError;
 use crate::clf::targets::RemoteTarget;
 use crate::driver::errors::{DriverError, Result};
@@ -7,19 +8,143 @@ use crate::felica_standard::{
 };
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
-use log::debug;
+use hex::encode;
+use log::{debug, warn};
 use std::io::{self, ErrorKind};
+use std::thread::sleep;
 use std::time::Duration;
 
 const SONY_VID: u16 = 0x054C;
 const PORT400_PIDS: &[u16] = &[0x0DC8, 0x0DC9, 0x0D8F];
 const MAX_THROUGH_PAYLOAD: usize = 290;
+const TYPE_A_CMD_TIMEOUT_MS: u16 = 30;
+const TYPE_B_CMD_TIMEOUT_MS: u16 = 30;
+const PROPERTY_HARDWARE_VERSION: u8 = 1;
+const PROPERTY_MODEL_ID: u8 = 2;
+const PROPERTY_SERIAL_NO: u8 = 3;
+const PROPERTY_GROUP_NO: u8 = 8;
+const RFFE_PARAM_EEPROM: u8 = 0x01;
+const RFFE_PARAM_PD_SC_DPC: u8 = 0x02;
+const RFFE_PARAM_PROTOCOL_CONFIGURATION: u8 = 0x03;
+const ISO_DEP_PCB_I_BLOCK: u8 = 0x02;
+const ISO_DEP_PCB_CHAINING: u8 = 0x10;
+const ISO_DEP_PCB_CID: u8 = 0x08;
+const ISO_DEP_PCB_NAD: u8 = 0x04;
+const ISO_DEP_PCB_MASK: u8 = 0xC0;
+const ISO_DEP_PCB_TYPE_I: u8 = 0x00;
+const ISO_DEP_PCB_TYPE_R: u8 = 0x80;
+const ISO_DEP_PCB_TYPE_S: u8 = 0xC0;
+const ISO_DEP_S_MASK: u8 = 0x30;
+const ISO_DEP_S_DESELECT: u8 = 0x00;
+const ISO_DEP_S_IFS: u8 = 0x20;
+const ISO_DEP_S_WTX: u8 = 0x30;
+const ISO_DEP_R_ACK_BIT: u8 = 0x10;
+const ISO_DEP_WTXM_MIN: u8 = 1;
+const ISO_DEP_WTXM_MAX: u8 = 59;
+const DIAG_COMMUNICATION_LINE_SIZE_MAX: usize = 500;
+const DIAG_POLLING_COUNT_MIN: u8 = 1;
+const DIAG_POLLING_COUNT_MAX: u8 = 255;
 
 pub struct Device<T: Transport> {
     pcsc: Pcsc<T>,
     chipset_name: String,
     vendor_name: Option<String>,
     product_name: Option<String>,
+    iso_dep_session: Option<IsoDepSession>,
+    iso_dep_protocol: Option<ThroughProtocol>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThroughProtocol {
+    Felica,
+    Iso14443TypeA,
+    Iso14443TypeB,
+    Iso15693,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ThroughOptions {
+    pub protocol: ThroughProtocol,
+    pub append_crc: Option<bool>,
+    pub discard_crc: Option<bool>,
+    pub insert_parity: Option<bool>,
+    pub expect_parity: Option<bool>,
+    pub append_protocol_prologue: Option<bool>,
+    pub tx_valid_bits: Option<u8>,
+}
+
+impl Default for ThroughProtocol {
+    fn default() -> Self {
+        ThroughProtocol::Felica
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TypeADetectOptions {
+    pub iso_dep: Option<IsoDepConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TypeBDetectOptions {
+    pub iso_dep: Option<IsoDepConfig>,
+    pub afi: Option<u8>,
+    pub param: Option<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeACardInfo {
+    pub atqa: [u8; 2],
+    pub sak: u8,
+    pub uid: Vec<u8>,
+    pub ats: Vec<u8>,
+    pub iso_dep_config: IsoDepConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeBCardInfo {
+    pub pupi: [u8; 4],
+    pub application_data: [u8; 4],
+    pub protocol_info: Vec<u8>,
+    pub attrib_response: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DiagnoseCommand {
+    CommunicationLine(Vec<u8>),
+    Rom,
+    Ram,
+    Polling {
+        protocol: DiagnosePollingProtocol,
+        count: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DiagnosePollingProtocol {
+    Felica,
+    Iso18092,
+    Iso14443TypeA,
+    Iso14443TypeB,
+    Iso15693,
+}
+
+impl DiagnosePollingProtocol {
+    fn code(self) -> u8 {
+        match self {
+            DiagnosePollingProtocol::Felica | DiagnosePollingProtocol::Iso18092 => 0x02,
+            DiagnosePollingProtocol::Iso14443TypeA => 0x00,
+            DiagnosePollingProtocol::Iso14443TypeB => 0x01,
+            DiagnosePollingProtocol::Iso15693 => 0x03,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DiagnoseResult {
+    CommunicationLine(Vec<u8>),
+    Rom(u8),
+    Ram(Vec<u8>),
+    Polling(u8),
 }
 
 pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
@@ -62,6 +187,8 @@ impl<T: Transport> Device<T> {
             chipset_name,
             vendor_name,
             product_name,
+            iso_dep_session: None,
+            iso_dep_protocol: None,
         })
     }
 
@@ -94,7 +221,7 @@ impl<T: Transport> Device<T> {
         MAX_THROUGH_PAYLOAD
     }
 
-    pub fn sense_type_f(
+    pub fn detect_type_f(
         &mut self,
         target: &RemoteTarget,
         system_code: u16,
@@ -132,7 +259,7 @@ impl<T: Transport> Device<T> {
         }
     }
 
-    pub fn send_command_receive_response(
+    pub fn transceive(
         &mut self,
         _target: &RemoteTarget,
         data: &[u8],
@@ -144,26 +271,882 @@ impl<T: Transport> Device<T> {
         let flags = TransmissionFlags::felica();
         self.pcsc.transceive(data, timeout, &flags)
     }
+
+    pub fn communicate_thru(
+        &mut self,
+        data: &[u8],
+        timeout_ms: Option<u16>,
+        options: Option<ThroughOptions>,
+    ) -> Result<Vec<u8>> {
+        let opts = options.unwrap_or_default();
+        let timeout = timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64))
+            .unwrap_or_else(|| Duration::from_millis(0));
+        let mut flags = default_flags_for_protocol(opts.protocol);
+        apply_flag_overrides(&mut flags, &opts);
+        self.pcsc.transceive(data, timeout, &flags)
+    }
+
+    pub fn detect_type_a(&mut self, options: Option<TypeADetectOptions>) -> Result<Vec<u8>> {
+        let opts = options.unwrap_or_default();
+        if let Some(mut config) = opts.iso_dep {
+            self.pcsc
+                .switch_protocol_iso14443_4a(config.fsdi, config.cid, 4)?;
+            if let Ok(ats) = self.pcsc.get_historical_bytes() {
+                if let Err(err) = config.apply_ats(&ats) {
+                    warn!("failed to apply ATS parameters: {err}");
+                } else {
+                    debug!("Port-400 ATS: {}", encode(&ats));
+                }
+            }
+            self.start_iso_dep_session(ThroughProtocol::Iso14443TypeA, config);
+        } else {
+            self.pcsc.switch_protocol_iso14443_3a()?;
+            self.end_iso_dep_session();
+        }
+        let _ = self.pcsc.card_baudrate()?;
+        self.pcsc.get_uid()
+    }
+
+    pub fn detect_type_b(&mut self, options: Option<TypeBDetectOptions>) -> Result<Vec<u8>> {
+        let opts = options.unwrap_or_default();
+        let mut config = opts
+            .iso_dep
+            .unwrap_or_else(|| IsoDepConfig::type_b_defaults());
+        self.pcsc
+            .switch_protocol_iso14443_4b(config.fsdi, config.cid, 4)?;
+        let info = self
+            .pcsc
+            .request_type_b_info(opts.afi.unwrap_or(0x00), opts.param.unwrap_or(0x00))?;
+        if let Err(err) = config.apply_type_b_protocol_info(&info.protocol_info) {
+            warn!("failed to apply Type-B protocol info: {err}");
+        } else {
+            debug!(
+                "Port-400 Type-B protocol info: {}",
+                encode(&info.protocol_info)
+            );
+        }
+        self.start_iso_dep_session(ThroughProtocol::Iso14443TypeB, config);
+        let _ = self.pcsc.card_baudrate()?;
+        Ok(info.pupi.to_vec())
+    }
+
+    pub fn detect_type_a_low_level(&mut self) -> Result<TypeACardInfo> {
+        self.pcsc.switch_protocol_iso14443_3a()?;
+        let atqa_bytes = self.send_type_a_frame(&[0x26], Some(7), false, false)?;
+        if atqa_bytes.len() != 2 {
+            return Err(DriverError::Other("invalid ATQA length".into()));
+        }
+        let atqa = [atqa_bytes[0], atqa_bytes[1]];
+        let mut sel_code = 0x93;
+        let mut uid = Vec::new();
+        let final_sak = loop {
+            let anticollision = self.send_type_a_frame(&[sel_code, 0x20], None, false, false)?;
+            if anticollision.len() < 5 {
+                return Err(DriverError::Other("invalid anticollision response".into()));
+            }
+            let block = &anticollision[..4];
+            let bcc = anticollision[4];
+            let computed_bcc = block.iter().fold(0u8, |acc, b| acc ^ b);
+            if bcc != computed_bcc {
+                return Err(DriverError::Other("UID BCC mismatch".into()));
+            }
+            let mut select = Vec::with_capacity(7);
+            select.extend_from_slice(&[sel_code, 0x70]);
+            select.extend_from_slice(&anticollision[..5]);
+            let sak_resp = self.send_type_a_frame(&select, None, true, true)?;
+            let sak = *sak_resp
+                .get(0)
+                .ok_or_else(|| DriverError::Other("missing SAK".into()))?;
+            if block[0] == 0x88 {
+                uid.extend_from_slice(&block[1..4]);
+            } else {
+                uid.extend_from_slice(block);
+            }
+            if (sak & 0x04) == 0 {
+                break sak;
+            }
+            sel_code = match sel_code {
+                0x93 => 0x95,
+                0x95 => 0x97,
+                _ => {
+                    return Err(DriverError::Other(
+                        "unsupported Type-A cascade level".into(),
+                    ));
+                }
+            };
+            uid.truncate(0);
+        };
+        let mut config = IsoDepConfig::type_a_defaults();
+        let rats_param = ((config.fsdi & 0x0F) << 4) | (config.cid & 0x0F);
+        let rats_cmd = [0xE0, rats_param];
+        let ats = self.send_type_a_frame(&rats_cmd, None, true, true)?;
+        if let Err(err) = config.apply_ats(&ats) {
+            warn!("failed to apply ATS parameters: {err}");
+        }
+        sleep(config.sfgt_duration());
+        self.send_type_a_pps(&config)?;
+        Ok(TypeACardInfo {
+            atqa,
+            sak: final_sak,
+            uid,
+            ats,
+            iso_dep_config: config,
+        })
+    }
+
+    pub fn detect_type_b_low_level(
+        &mut self,
+        options: Option<TypeBDetectOptions>,
+    ) -> Result<TypeBCardInfo> {
+        let opts = options.unwrap_or_default();
+        let mut config = opts
+            .iso_dep
+            .unwrap_or_else(|| IsoDepConfig::type_b_defaults());
+        self.pcsc
+            .switch_protocol_iso14443_4b(config.fsdi, config.cid, 4)?;
+        let info = self
+            .pcsc
+            .request_type_b_info(opts.afi.unwrap_or(0x00), opts.param.unwrap_or(0x00))?;
+        if let Err(err) = config.apply_type_b_protocol_info(&info.protocol_info) {
+            warn!("failed to apply Type-B protocol info: {err}");
+        }
+        let dri = config.dr.symbol().min(3);
+        let dsi = config.ds.symbol().min(3);
+        let attrib_cmd = build_type_b_attrib_command(&info, &config, dri, dsi);
+        let attrib_response =
+            self.send_type_b_frame(&attrib_cmd, true, true, TYPE_B_CMD_TIMEOUT_MS)?;
+        if attrib_response.is_empty() {
+            return Err(DriverError::Other("invalid ATTRIB response".into()));
+        }
+        let speed_code = ((dri & 0x07) << 3) | (dsi & 0x07);
+        if speed_code != 0 {
+            self.pcsc.set_comm_speed(speed_code)?;
+        }
+        sleep(config.sfgt_duration());
+        Ok(TypeBCardInfo {
+            pupi: info.pupi,
+            application_data: info.application_data,
+            protocol_info: info.protocol_info,
+            attrib_response,
+        })
+    }
+
+    pub fn detect_type_v(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.switch_protocol_iso15693()?;
+        self.pcsc.get_uid()
+    }
+
+    pub fn set_detection_target(&mut self, selector: u8) -> Result<()> {
+        self.pcsc.set_detection_target(selector)
+    }
+
+    pub fn set_rf_speed(
+        &mut self,
+        reader_to_card: u8,
+        card_to_reader: u8,
+        option: u8,
+    ) -> Result<()> {
+        self.pcsc
+            .set_rf_speed(reader_to_card, card_to_reader, option)
+    }
+
+    pub fn get_rf_speed(&mut self, selector: u8) -> Result<Vec<u8>> {
+        self.pcsc.get_rf_speed(selector)
+    }
+
+    pub fn set_comm_speed(&mut self, speed: u8) -> Result<()> {
+        self.pcsc.set_comm_speed(speed)
+    }
+
+    pub fn set_tx_rx_flag(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.pcsc.set_tx_rx_flag(data)
+    }
+
+    pub fn set_tx_bit_framing(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.pcsc.set_tx_bit_framing(data)
+    }
+
+    pub fn iso_dep_session(&mut self) -> Option<&mut IsoDepSession> {
+        self.iso_dep_session.as_mut()
+    }
+
+    pub fn start_iso_dep_session(&mut self, protocol: ThroughProtocol, config: IsoDepConfig) {
+        self.iso_dep_session = Some(IsoDepSession::new(config));
+        self.iso_dep_protocol = Some(protocol);
+    }
+
+    pub fn reset_iso_dep_session(&mut self) -> Result<()> {
+        match self.iso_dep_session.as_mut() {
+            Some(session) => {
+                session.reset();
+                Ok(())
+            }
+            None => Err(DriverError::Other("ISO-DEP session is not active".into())),
+        }
+    }
+
+    pub fn end_iso_dep_session(&mut self) {
+        self.iso_dep_session = None;
+        self.iso_dep_protocol = None;
+    }
+
+    fn ensure_iso_dep_link_parameters(&mut self, session: &mut IsoDepSession) -> Result<()> {
+        if !session.needs_ifs_request() {
+            return Ok(());
+        }
+        let protocol = self
+            .iso_dep_protocol
+            .unwrap_or(ThroughProtocol::Iso14443TypeA);
+        let desired_ifs = session.config().max_inf_len_pcd().min(0xFE) as u8;
+        let response = self.send_s_block_ifs(session.state(), desired_ifs, protocol)?;
+        let parsed = parse_iso_dep_response(session.state(), &response)?;
+        match parsed.block_type {
+            IsoDepBlockType::R { ack } if ack => {
+                session.mark_ifs_negotiated();
+                Ok(())
+            }
+            _ => Err(DriverError::Other(
+                "unexpected response to S(IFS) request".into(),
+            )),
+        }
+    }
+
+    pub fn iso_dep_exchange(&mut self, payload: &[u8], chaining: bool) -> Result<Vec<u8>> {
+        let mut session = self
+            .iso_dep_session
+            .take()
+            .ok_or_else(|| DriverError::Other("ISO-DEP session is not active".into()))?;
+        self.ensure_iso_dep_link_parameters(&mut session)?;
+        let protocol = self
+            .iso_dep_protocol
+            .unwrap_or(ThroughProtocol::Iso14443TypeA);
+        let flags = match protocol {
+            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
+            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+            _ => TransmissionFlags::iso14443_type_a(),
+        };
+        let base_timeout = session.config().fwt_duration();
+        let mut current_timeout = base_timeout;
+        let mut pending_response: Option<Vec<u8>> = None;
+        let mut wtx_attempts: u8 = 0;
+        let mut nak_retries = session.config().max_retry_r_nak.max(1) as i32;
+        let mut tx_offset = 0usize;
+        let mut sent_empty_frame = false;
+        let mut current_frame_info = next_iso_dep_i_frame(
+            session.state(),
+            payload,
+            &mut tx_offset,
+            session.config().max_inf_len_pcd(),
+            chaining,
+            &mut sent_empty_frame,
+        )
+        .ok_or_else(|| DriverError::Other("ISO-DEP empty frame generation failed".into()))?;
+        let mut current_frame = current_frame_info.frame.clone();
+        let mut last_frame_chaining = current_frame_info.chaining;
+        let mut aggregated_response = Vec::new();
+        let max_picc_inf = session.config().max_inf_len_picc();
+
+        let result = loop {
+            let response_bytes = if let Some(bytes) = pending_response.take() {
+                bytes
+            } else {
+                self.pcsc
+                    .transceive(&current_frame, current_timeout, &flags)?
+            };
+            let response = parse_iso_dep_response(session.state(), &response_bytes)?;
+            match response.block_type {
+                IsoDepBlockType::I { payload } => {
+                    let expected = session.state().expected_picc_block();
+                    if response.block_number != expected {
+                        let duplicate = expected ^ 0x01;
+                        if response.block_number == duplicate {
+                            let ack_frame = build_iso_dep_r_block(session.state(), true);
+                            let ack_response =
+                                self.pcsc.transceive(&ack_frame, current_timeout, &flags)?;
+                            pending_response = Some(ack_response);
+                            continue;
+                        }
+                        break Err(DriverError::Other(
+                            "ISO-DEP PICC block number mismatch".into(),
+                        ));
+                    }
+                    if payload.len() > max_picc_inf {
+                        break Err(DriverError::Other(
+                            "ISO-DEP PICC payload exceeds FSC".into(),
+                        ));
+                    }
+                    if aggregated_response.len() + payload.len() > MAX_THROUGH_PAYLOAD {
+                        break Err(DriverError::Other(
+                            "ISO-DEP response exceeds receive buffer".into(),
+                        ));
+                    }
+                    aggregated_response.extend_from_slice(&payload);
+                    session.state_mut().advance_picc_block();
+                    wtx_attempts = 0;
+                    current_timeout = base_timeout;
+                    if response.chaining {
+                        let ack_frame = build_iso_dep_r_block(session.state(), true);
+                        let ack_response =
+                            self.pcsc.transceive(&ack_frame, current_timeout, &flags)?;
+                        pending_response = Some(ack_response);
+                        continue;
+                    }
+                    session.state_mut().next_tx_block();
+                    break Ok(aggregated_response);
+                }
+                IsoDepBlockType::R { ack } => {
+                    wtx_attempts = 0;
+                    current_timeout = base_timeout;
+                    let expected_nr = session.state().current_tx_block() ^ 0x01;
+                    if response.block_number != expected_nr {
+                        break Err(DriverError::Other("ISO-DEP R-Block NR mismatch".into()));
+                    }
+                    if ack {
+                        session.state_mut().next_tx_block();
+                        if let Some(next_frame) = next_iso_dep_i_frame(
+                            session.state(),
+                            payload,
+                            &mut tx_offset,
+                            session.config().max_inf_len_pcd(),
+                            chaining,
+                            &mut sent_empty_frame,
+                        ) {
+                            current_frame = next_frame.frame.clone();
+                            last_frame_chaining = next_frame.chaining;
+                            current_frame_info = next_frame;
+                            continue;
+                        }
+                        if last_frame_chaining {
+                            break Ok(Vec::new());
+                        }
+                        break Err(DriverError::Other(
+                            "ISO-DEP unexpected ACK without pending data".into(),
+                        ));
+                    }
+                    if nak_retries == 0 {
+                        break Err(DriverError::Other("ISO-DEP retry limit reached".into()));
+                    }
+                    nak_retries -= 1;
+                    current_frame = current_frame_info.frame.clone();
+                    continue;
+                }
+                IsoDepBlockType::S { code, payload } => match code {
+                    ISO_DEP_S_WTX => {
+                        let wtxm = payload
+                            .get(0)
+                            .copied()
+                            .ok_or_else(|| DriverError::Other("Invalid WTX block".into()))?;
+                        wtx_attempts = wtx_attempts.saturating_add(1);
+                        if wtx_attempts > session.config().max_try_s_wtx {
+                            break Err(DriverError::Other(
+                                "ISO-DEP WTX retry limit reached".into(),
+                            ));
+                        }
+                        let multiplier = wtx_multiplier(wtxm);
+                        let timeout = extend_timeout(base_timeout, multiplier);
+                        let state_snapshot = *session.state();
+                        let next_response =
+                            self.send_s_block_wtx(&state_snapshot, wtxm, protocol, timeout)?;
+                        current_timeout = timeout;
+                        pending_response = Some(next_response);
+                        continue;
+                    }
+                    ISO_DEP_S_IFS => {
+                        let new_ifs = payload
+                            .get(0)
+                            .copied()
+                            .ok_or_else(|| DriverError::Other("Invalid IFS block".into()))?;
+                        session.config_mut().update_pcd_ifs(new_ifs);
+                        session.mark_ifs_negotiated();
+                        let state_snapshot = *session.state();
+                        self.send_s_block_ifs(&state_snapshot, new_ifs, protocol)?;
+                        continue;
+                    }
+                    ISO_DEP_S_DESELECT => {
+                        let state_snapshot = *session.state();
+                        self.send_s_block_deselect(&state_snapshot, protocol)?;
+                        self.end_iso_dep_session();
+                        break Err(DriverError::Other("ISO-DEP deselected by PICC".into()));
+                    }
+                    _ => {
+                        break Err(DriverError::Other(format!(
+                            "ISO-DEP S-Block {:02X} handling not implemented",
+                            code
+                        )));
+                    }
+                },
+                IsoDepBlockType::Unknown(code) => {
+                    break Err(DriverError::Other(format!(
+                        "Unknown ISO-DEP block type {:02X}",
+                        code
+                    )));
+                }
+            }
+        };
+        self.iso_dep_session = Some(session);
+        result
+    }
+
+    pub fn start_rffe_parameter_mode(&mut self) -> Result<()> {
+        self.pcsc.start_rffe_parameter_mode()
+    }
+
+    pub fn end_rffe_parameter_mode(&mut self) -> Result<()> {
+        self.pcsc.end_rffe_parameter_mode()
+    }
+
+    pub fn read_rffe_parameter(&mut self, category: u8, selector: u8) -> Result<Vec<u8>> {
+        ensure_rffe_category(category)?;
+        self.pcsc.read_rffe_parameter(category, selector)
+    }
+
+    pub fn write_rffe_parameter(
+        &mut self,
+        category: u8,
+        selector: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>> {
+        ensure_rffe_category(category)?;
+        self.pcsc.write_rffe_parameter(category, selector, data)
+    }
+
+    pub fn hardware_version(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.get_property(PROPERTY_HARDWARE_VERSION)
+    }
+
+    pub fn model_id(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.get_property(PROPERTY_MODEL_ID)
+    }
+
+    pub fn card_identifier(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.card_id()
+    }
+
+    pub fn card_name(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.card_name()
+    }
+
+    pub fn card_type(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.card_type()
+    }
+
+    pub fn card_type_name(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.card_type_name()
+    }
+
+    pub fn serial_number_bytes(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.get_property(PROPERTY_SERIAL_NO)
+    }
+
+    pub fn group_number(&mut self) -> Result<Vec<u8>> {
+        self.pcsc.get_property(PROPERTY_GROUP_NO)
+    }
+
+    pub fn prepare_firmware_update(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.pcsc.prepare_firmware_update(data)
+    }
+
+    pub fn update_firmware(&mut self, sequence: u16, data: &[u8]) -> Result<Vec<u8>> {
+        self.pcsc.update_firmware(sequence, data)
+    }
+
+    pub fn reset_device(&mut self, delay_ms: u16) -> Result<Vec<u8>> {
+        self.pcsc.reset_device(delay_ms)
+    }
+
+    pub fn self_diagnose(&mut self, command: DiagnoseCommand) -> Result<DiagnoseResult> {
+        match command {
+            DiagnoseCommand::CommunicationLine(data) => {
+                if data.is_empty() || data.len() > DIAG_COMMUNICATION_LINE_SIZE_MAX {
+                    return Err(DriverError::Other(
+                        "diagnostic data size is invalid".into(),
+                    ));
+                }
+                let response = self.pcsc.diagnose_communication_line(&data)?;
+                Ok(DiagnoseResult::CommunicationLine(response))
+            }
+            DiagnoseCommand::Rom => {
+                let result = self.pcsc.diagnose_rom()?;
+                Ok(DiagnoseResult::Rom(result))
+            }
+            DiagnoseCommand::Ram => {
+                let result = self.pcsc.diagnose_ram()?;
+                Ok(DiagnoseResult::Ram(result))
+            }
+            DiagnoseCommand::Polling { protocol, count } => {
+                if count < DIAG_POLLING_COUNT_MIN || count > DIAG_POLLING_COUNT_MAX {
+                    return Err(DriverError::Other(
+                        "diagnostic polling count out of range".into(),
+                    ));
+                }
+                let code = protocol.code();
+                let result = self.pcsc.diagnose_polling(code, count)?;
+                Ok(DiagnoseResult::Polling(result))
+            }
+        }
+    }
+
+    fn send_s_block_wtx(
+        &mut self,
+        state: &IsoDepState,
+        wtxm: u8,
+        protocol: ThroughProtocol,
+        timeout: Duration,
+    ) -> Result<Vec<u8>> {
+        let mut pcb = ISO_DEP_PCB_TYPE_S | ISO_DEP_S_WTX;
+        pcb |= state.current_tx_block() & 0x01;
+        if state.cid().is_some() {
+            pcb |= ISO_DEP_PCB_CID;
+        }
+        let mut frame = Vec::with_capacity(3);
+        frame.push(pcb);
+        if let Some(cid) = state.cid() {
+            frame.push(cid);
+        }
+        frame.push(wtxm);
+        let flags = match protocol {
+            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
+            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+            _ => TransmissionFlags::iso14443_type_a(),
+        };
+        self.pcsc.transceive(&frame, timeout, &flags)
+    }
+
+    fn send_s_block_ifs(
+        &mut self,
+        state: &IsoDepState,
+        ifs: u8,
+        protocol: ThroughProtocol,
+    ) -> Result<Vec<u8>> {
+        let mut pcb = ISO_DEP_PCB_TYPE_S | ISO_DEP_S_IFS;
+        if state.cid().is_some() {
+            pcb |= ISO_DEP_PCB_CID;
+        }
+        let mut frame = Vec::with_capacity(3);
+        frame.push(pcb);
+        if let Some(cid) = state.cid() {
+            frame.push(cid);
+        }
+        frame.push(ifs);
+        let flags = match protocol {
+            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
+            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+            _ => TransmissionFlags::iso14443_type_a(),
+        };
+        self.pcsc
+            .transceive(&frame, Duration::from_millis(10), &flags)
+    }
+
+    fn send_s_block_deselect(
+        &mut self,
+        state: &IsoDepState,
+        protocol: ThroughProtocol,
+    ) -> Result<Vec<u8>> {
+        let mut pcb = ISO_DEP_PCB_TYPE_S | ISO_DEP_S_DESELECT;
+        if state.cid().is_some() {
+            pcb |= ISO_DEP_PCB_CID;
+        }
+        let mut frame = Vec::with_capacity(2);
+        frame.push(pcb);
+        if let Some(cid) = state.cid() {
+            frame.push(cid);
+        }
+        let flags = match protocol {
+            ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
+            ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+            _ => TransmissionFlags::iso14443_type_a(),
+        };
+        self.pcsc
+            .transceive(&frame, Duration::from_millis(10), &flags)
+    }
+
+    fn send_type_a_frame(
+        &mut self,
+        payload: &[u8],
+        tx_valid_bits: Option<u8>,
+        append_crc: bool,
+        discard_crc: bool,
+    ) -> Result<Vec<u8>> {
+        let options = ThroughOptions {
+            protocol: ThroughProtocol::Iso14443TypeA,
+            append_crc: Some(append_crc),
+            discard_crc: Some(discard_crc),
+            insert_parity: Some(true),
+            expect_parity: Some(true),
+            append_protocol_prologue: Some(false),
+            tx_valid_bits,
+        };
+        self.communicate_thru(payload, Some(TYPE_A_CMD_TIMEOUT_MS), Some(options))
+    }
+
+    fn send_type_a_pps(&mut self, config: &IsoDepConfig) -> Result<()> {
+        let dri = config.dr.symbol().min(3);
+        let dsi = config.ds.symbol().min(3);
+        if dri == 0 && dsi == 0 {
+            return Ok(());
+        }
+        let ppss = 0xD0 | (config.cid & 0x0F);
+        let pps0 = 0x11;
+        let pps1 = ((dsi & 0x03) << 2) | (dri & 0x03);
+        let frame = [ppss, pps0, pps1];
+        let response = self.send_type_a_frame(&frame, None, true, true)?;
+        if response.first().copied() != Some(ppss) {
+            return Err(DriverError::Other("PPS response mismatch".into()));
+        }
+        let speed_code = ((dri & 0x07) << 3) | (dsi & 0x07);
+        if speed_code != 0 {
+            self.pcsc.set_comm_speed(speed_code)?;
+        }
+        Ok(())
+    }
+
+    fn send_type_b_frame(
+        &mut self,
+        payload: &[u8],
+        append_crc: bool,
+        discard_crc: bool,
+        timeout_ms: u16,
+    ) -> Result<Vec<u8>> {
+        let options = ThroughOptions {
+            protocol: ThroughProtocol::Iso14443TypeB,
+            append_crc: Some(append_crc),
+            discard_crc: Some(discard_crc),
+            insert_parity: Some(false),
+            expect_parity: Some(false),
+            append_protocol_prologue: Some(false),
+            tx_valid_bits: None,
+        };
+        self.communicate_thru(payload, Some(timeout_ms), Some(options))
+    }
+}
+
+fn wtx_multiplier(value: u8) -> u8 {
+    let masked = value & 0x3F;
+    masked.clamp(ISO_DEP_WTXM_MIN, ISO_DEP_WTXM_MAX)
+}
+
+fn extend_timeout(base: Duration, multiplier: u8) -> Duration {
+    if multiplier <= 1 {
+        base
+    } else {
+        base.checked_mul(multiplier as u32).unwrap_or(Duration::MAX)
+    }
+}
+
+fn build_type_b_attrib_command(
+    info: &TypeBInfo,
+    config: &IsoDepConfig,
+    dri: u8,
+    dsi: u8,
+) -> Vec<u8> {
+    let param2 = ((dsi & 0x03) << 6) | ((dri & 0x03) << 4) | (config.fsdi & 0x0F);
+    let param3 = info.protocol_info.get(1).copied().unwrap_or(0x02) & 0x0F;
+    let mut frame = Vec::with_capacity(9);
+    frame.push(0x1D);
+    frame.extend_from_slice(&info.pupi);
+    frame.push(0x00);
+    frame.push(param2);
+    frame.push(param3);
+    frame.push(config.cid & 0x0F);
+    frame
+}
+
+fn default_flags_for_protocol(protocol: ThroughProtocol) -> TransmissionFlags {
+    match protocol {
+        ThroughProtocol::Felica => TransmissionFlags::felica(),
+        ThroughProtocol::Iso14443TypeA => TransmissionFlags::iso14443_type_a(),
+        ThroughProtocol::Iso14443TypeB => TransmissionFlags::iso14443_type_b(),
+        ThroughProtocol::Iso15693 => TransmissionFlags::iso15693(),
+    }
+}
+
+fn apply_flag_overrides(flags: &mut TransmissionFlags, options: &ThroughOptions) {
+    if let Some(value) = options.append_crc {
+        flags.append_crc = value;
+    }
+    if let Some(value) = options.discard_crc {
+        flags.discard_crc = value;
+    }
+    if let Some(value) = options.insert_parity {
+        flags.insert_parity = value;
+    }
+    if let Some(value) = options.expect_parity {
+        flags.expect_parity = value;
+    }
+    if let Some(value) = options.append_protocol_prologue {
+        flags.append_protocol_prologue = value;
+    }
+    if let Some(bits) = options.tx_valid_bits {
+        flags.tx_valid_bits = Some(bits);
+    }
+}
+
+fn ensure_rffe_category(category: u8) -> Result<()> {
+    match category {
+        RFFE_PARAM_EEPROM | RFFE_PARAM_PD_SC_DPC | RFFE_PARAM_PROTOCOL_CONFIGURATION => Ok(()),
+        _ => Err(DriverError::Other(format!(
+            "unsupported RFFE parameter category {category}"
+        ))),
+    }
+}
+
+fn build_iso_dep_i_block(state: &IsoDepState, payload: &[u8], chaining: bool) -> Vec<u8> {
+    let mut pcb: u8 = ISO_DEP_PCB_I_BLOCK | (state.current_tx_block() & 0x01);
+    if chaining {
+        pcb |= ISO_DEP_PCB_CHAINING;
+    }
+    if state.cid().is_some() {
+        pcb |= ISO_DEP_PCB_CID;
+    }
+    if state.nad().is_some() {
+        pcb |= ISO_DEP_PCB_NAD;
+    }
+    let mut frame = Vec::with_capacity(3 + payload.len());
+    frame.push(pcb);
+    if let Some(cid) = state.cid() {
+        frame.push(cid);
+    }
+    if let Some(nad) = state.nad() {
+        frame.push(nad);
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
+struct IsoDepIFrame {
+    frame: Vec<u8>,
+    chaining: bool,
+}
+
+fn next_iso_dep_i_frame(
+    state: &IsoDepState,
+    payload: &[u8],
+    offset: &mut usize,
+    max_inf: usize,
+    chaining: bool,
+    sent_empty: &mut bool,
+) -> Option<IsoDepIFrame> {
+    if *offset >= payload.len() {
+        if payload.is_empty() && !*sent_empty {
+            *sent_empty = true;
+            let frame = build_iso_dep_i_block(state, &[], chaining);
+            return Some(IsoDepIFrame { frame, chaining });
+        }
+        return None;
+    }
+    let remaining = payload.len() - *offset;
+    let take = remaining.min(max_inf.max(1));
+    let chunk = &payload[*offset..*offset + take];
+    *offset += take;
+    let has_more = *offset < payload.len();
+    let block_chaining = has_more || (!has_more && chaining);
+    let frame = build_iso_dep_i_block(state, chunk, block_chaining);
+    Some(IsoDepIFrame {
+        frame,
+        chaining: block_chaining,
+    })
+}
+
+fn build_iso_dep_r_block(state: &IsoDepState, ack: bool) -> Vec<u8> {
+    let mut pcb: u8 = ISO_DEP_PCB_TYPE_R | (state.expected_picc_block() & 0x01);
+    if !ack {
+        pcb |= ISO_DEP_R_ACK_BIT;
+    }
+    if state.cid().is_some() {
+        pcb |= ISO_DEP_PCB_CID;
+    }
+    let mut frame = Vec::with_capacity(2);
+    frame.push(pcb);
+    if let Some(cid) = state.cid() {
+        frame.push(cid);
+    }
+    frame
+}
+
+fn parse_iso_dep_response(state: &IsoDepState, data: &[u8]) -> Result<IsoDepResponse> {
+    if data.is_empty() {
+        return Err(DriverError::Other("ISO-DEP response is empty".into()));
+    }
+    let pcb = data[0];
+    let mut offset = 1;
+    let block_number = pcb & 0x01;
+    if (pcb & ISO_DEP_PCB_CID) != 0 {
+        let cid = *data
+            .get(offset)
+            .ok_or_else(|| DriverError::Other("ISO-DEP response missing CID".into()))?;
+        if let Some(expected) = state.cid() {
+            if cid != expected {
+                return Err(DriverError::Other("ISO-DEP CID mismatch".into()));
+            }
+        }
+        offset += 1;
+    }
+    if (pcb & ISO_DEP_PCB_NAD) != 0 {
+        data.get(offset)
+            .ok_or_else(|| DriverError::Other("ISO-DEP response missing NAD".into()))?;
+        offset += 1;
+    }
+    let block_type = match pcb & ISO_DEP_PCB_MASK {
+        ISO_DEP_PCB_TYPE_I => {
+            if offset > data.len() {
+                return Err(DriverError::Other("ISO-DEP payload out of range".into()));
+            }
+            IsoDepBlockType::I {
+                payload: data[offset..].to_vec(),
+            }
+        }
+        ISO_DEP_PCB_TYPE_R => {
+            let ack = (pcb & ISO_DEP_R_ACK_BIT) == 0;
+            IsoDepBlockType::R { ack }
+        }
+        ISO_DEP_PCB_TYPE_S => {
+            let code = pcb & ISO_DEP_S_MASK;
+            IsoDepBlockType::S {
+                code,
+                payload: data[offset..].to_vec(),
+            }
+        }
+        other => IsoDepBlockType::Unknown(other),
+    };
+    Ok(IsoDepResponse {
+        block_type,
+        chaining: (pcb & ISO_DEP_PCB_CHAINING) != 0,
+        block_number,
+    })
+}
+
+struct IsoDepResponse {
+    block_type: IsoDepBlockType,
+    chaining: bool,
+    block_number: u8,
+}
+
+enum IsoDepBlockType {
+    I { payload: Vec<u8> },
+    R { ack: bool },
+    S { code: u8, payload: Vec<u8> },
+    Unknown(u8),
 }
 
 impl<T: Transport> FelicaDriver for Device<T> {
-    fn sense_type_f(
+    fn detect_type_f(
         &mut self,
         target: &RemoteTarget,
         system_code: u16,
         request_code: u8,
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
-        self.sense_type_f(target, system_code, request_code, time_slots)
+        self.detect_type_f(target, system_code, request_code, time_slots)
     }
 
-    fn send_command_receive_response(
+    fn transceive(
         &mut self,
         target: &RemoteTarget,
         data: &[u8],
         timeout_ms: Option<u16>,
     ) -> Result<Vec<u8>> {
-        self.send_command_receive_response(target, data, timeout_ms)
+        self.transceive(target, data, timeout_ms)
     }
 }
 

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_RATS_RESPONSE: [u8; 5] = [0x05, 0x78, 0x80, 0x70, 0x02];
 
 impl<T: Transport> Device<T> {
-    pub fn sense_type_a(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
+    pub fn detect_type_a(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
         let brty = target.brty();
         if !matches!(brty, "106A" | "212A" | "424A") {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
@@ -176,7 +176,7 @@ impl<T: Transport> Device<T> {
         Ok(None)
     }
 
-    pub fn sense_type_b(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
+    pub fn detect_type_b(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
         let brty = target.brty();
         if !matches!(brty, "106B" | "212B" | "424B") {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
@@ -225,7 +225,7 @@ impl<T: Transport> Device<T> {
         Ok(None)
     }
 
-    pub fn sense_type_f(
+    pub fn detect_type_f(
         &mut self,
         target: &RemoteTarget,
         system_code: u16,

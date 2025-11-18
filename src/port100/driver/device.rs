@@ -84,7 +84,7 @@ impl<T: Transport> Device<T> {
         290
     }
 
-    pub fn send_command_receive_response(
+    pub fn transceive(
         &mut self,
         target: &RemoteTarget,
         data: &[u8],
@@ -172,23 +172,23 @@ impl<T: Transport> Device<T> {
 }
 
 impl<T: Transport> FelicaDriver for Device<T> {
-    fn sense_type_f(
+    fn detect_type_f(
         &mut self,
         target: &RemoteTarget,
         system_code: u16,
         request_code: u8,
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
-        self.sense_type_f(target, system_code, request_code, time_slots)
+        self.detect_type_f(target, system_code, request_code, time_slots)
     }
 
-    fn send_command_receive_response(
+    fn transceive(
         &mut self,
         target: &RemoteTarget,
         data: &[u8],
         timeout_ms: Option<u16>,
     ) -> Result<Vec<u8>> {
-        self.send_command_receive_response(target, data, timeout_ms)
+        self.transceive(target, data, timeout_ms)
     }
 }
 

@@ -20,7 +20,7 @@ use rand::{RngCore, rngs::OsRng};
 use std::convert::TryInto;
 
 pub trait FelicaDriver {
-    fn sense_type_f(
+    fn detect_type_f(
         &mut self,
         target: &RemoteTarget,
         system_code: u16,
@@ -28,7 +28,7 @@ pub trait FelicaDriver {
         time_slots: u8,
     ) -> DriverResult<Type3TagPollingResult>;
 
-    fn send_command_receive_response(
+    fn transceive(
         &mut self,
         target: &RemoteTarget,
         data: &[u8],
@@ -75,7 +75,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         time_slots: u8,
     ) -> Result<(Self, Type3TagPollingResult), FelicaStandardError> {
         let target = RemoteTarget::new(brty)?;
-        let polling_result = device.sense_type_f(&target, system_code, request_code, time_slots)?;
+        let polling_result =
+            device.detect_type_f(&target, system_code, request_code, time_slots)?;
         Ok((
             Self {
                 device,
@@ -94,11 +95,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
     ) -> Result<FelicaStandardResponse, FelicaStandardError> {
         match command.encoding() {
             CommandEncoding::Plain(frame) => {
-                let response_bytes = self.device.send_command_receive_response(
-                    &self.target,
-                    &frame,
-                    Some(timeout_ms),
-                )?;
+                let response_bytes =
+                    self.device
+                        .transceive(&self.target, &frame, Some(timeout_ms))?;
                 Ok(FelicaStandardResponse::from_bytes(&response_bytes)?)
             }
             CommandEncoding::Secure { opcode, payload } => {
@@ -471,9 +470,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         payload.push(command_code);
         payload.extend_from_slice(encrypted_payload);
         let frame = frame_with_length_prefix(&payload);
-        let response =
-            self.device
-                .send_command_receive_response(&self.target, &frame, Some(timeout_ms))?;
+        let response = self
+            .device
+            .transceive(&self.target, &frame, Some(timeout_ms))?;
         if response.len() < 2 {
             return Err(FelicaStandardError::Protocol(
                 "secure response too short".into(),

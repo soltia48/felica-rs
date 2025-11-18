@@ -1,6 +1,8 @@
 use crate::driver::errors::{DriverError, Result};
 use crate::transport::Transport;
 use log::debug;
+use std::borrow::Cow;
+use std::convert::{TryFrom, TryInto};
 use std::io::{self, Error, ErrorKind};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -18,12 +20,27 @@ const RESPONSE_DATA_TAG: u8 = 0x97;
 const SWITCH_PROTOCOL_METADATA_TAG: u8 = 0x8F;
 const GET_DATA_INS: u8 = 0xCA;
 const GET_FIRMWARE_VERSION_INS: u8 = 0x56;
+const GET_PROPERTY_INS: u8 = 0x5F;
+const GET_UID_SELECTOR: u8 = 0x00;
+const GET_HISTORICAL_BYTES_SELECTOR: u8 = 0x01;
+const GET_CARD_ID_SELECTOR: u8 = 0xF0;
+const GET_CARD_NAME_SELECTOR: u8 = 0xF1;
 const GET_CARD_BAUDRATE_SELECTOR: u8 = 0xF2;
+const GET_CARD_TYPE_SELECTOR: u8 = 0xF3;
+const GET_CARD_TYPE_NAME_SELECTOR: u8 = 0xF4;
 const MANAGE_SESSION_INS: u8 = 0x50;
 const TRANSPARENT_SESSION_CHANNEL: u8 = 0x01;
 const SLOT_BUSY_ERROR: u8 = 0xE0;
 const VENDOR_SPECIFIC_TAG: u8 = 0xFF;
 const VENDOR_TAG_RESPONSE: u8 = 0x6D;
+const DIAGNOSE_INS: u8 = 0x57;
+const PREPARE_FIRMWARE_UPDATE_INS: u8 = 0x53;
+const UPDATE_FIRMWARE_INS: u8 = 0x54;
+const RESET_DEVICE_INS: u8 = 0x55;
+const DIAG_TEST_COMMUNICATION_LINE: u8 = 0x00;
+const DIAG_TEST_ROM: u8 = 0x01;
+const DIAG_TEST_RAM: u8 = 0x02;
+const DIAG_TEST_POLLING: u8 = 0x03;
 
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const SLOT_BUSY_WAIT_TIME: Duration = Duration::from_millis(50);
@@ -35,6 +52,7 @@ const SLOT_BUSY_RETRY_COUNT: usize = 1;
 const SLOT_BUSY_END_SESSION_RETRIES: usize = 4;
 const SEQUENCE_ERROR_RETRY_COUNT: usize = 2;
 
+#[derive(Clone, Copy, Debug, Default)]
 pub struct TransmissionFlags {
     pub append_crc: bool,
     pub discard_crc: bool,
@@ -44,8 +62,49 @@ pub struct TransmissionFlags {
     pub tx_valid_bits: Option<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TypeBInfo {
+    pub pupi: [u8; 4],
+    #[allow(dead_code)]
+    pub application_data: [u8; 4],
+    pub protocol_info: Vec<u8>,
+}
+
 impl TransmissionFlags {
     pub fn felica() -> Self {
+        Self {
+            append_crc: true,
+            discard_crc: true,
+            insert_parity: false,
+            expect_parity: false,
+            append_protocol_prologue: false,
+            tx_valid_bits: None,
+        }
+    }
+
+    pub fn iso14443_type_a() -> Self {
+        Self {
+            append_crc: true,
+            discard_crc: true,
+            insert_parity: true,
+            expect_parity: true,
+            append_protocol_prologue: false,
+            tx_valid_bits: None,
+        }
+    }
+
+    pub fn iso14443_type_b() -> Self {
+        Self {
+            append_crc: true,
+            discard_crc: true,
+            insert_parity: false,
+            expect_parity: false,
+            append_protocol_prologue: false,
+            tx_valid_bits: None,
+        }
+    }
+
+    pub fn iso15693() -> Self {
         Self {
             append_crc: true,
             discard_crc: true,
@@ -104,7 +163,23 @@ impl<T: Transport> Pcsc<T> {
 
     pub fn switch_protocol_type_f(&mut self, auto_baud: bool) -> Result<()> {
         let param = if auto_baud { 1 } else { 0 };
-        self.switch_protocol(3, param)
+        self.switch_protocol(3, param, None, None)
+    }
+
+    pub fn switch_protocol_iso14443_3a(&mut self) -> Result<()> {
+        self.switch_protocol(0, 3, None, None)
+    }
+
+    pub fn switch_protocol_iso14443_4a(&mut self, fsdi: u8, cid: u8, parameter: u8) -> Result<()> {
+        self.switch_protocol(0, parameter, Some(fsdi), Some(cid))
+    }
+
+    pub fn switch_protocol_iso14443_4b(&mut self, fsdi: u8, cid: u8, parameter: u8) -> Result<()> {
+        self.switch_protocol(1, parameter, Some(fsdi), Some(cid))
+    }
+
+    pub fn switch_protocol_iso15693(&mut self) -> Result<()> {
+        self.switch_protocol(2, 3, None, None)
     }
 
     pub fn transceive(
@@ -113,16 +188,15 @@ impl<T: Transport> Pcsc<T> {
         timeout: Duration,
         flags: &TransmissionFlags,
     ) -> Result<Vec<u8>> {
-        self.transparent_exchange(TRANSCEIVE_TAG, payload, timeout, flags)
+        self.exchange(TRANSCEIVE_TAG, payload)
+            .timeout(timeout)
+            .flags(*flags)
+            .execute_payload()
     }
 
     pub fn get_data(&mut self, selector: u8) -> Result<Vec<u8>> {
-        let frame = [0xFF, GET_DATA_INS, selector, 0x00];
-        let response = self
-            .ccid
-            .escape(&frame, self.receive_timeout, SLOT_BUSY_RETRY_COUNT)?;
-        Self::verify_status(&response)?;
-        Ok(response[..response.len() - 2].to_vec())
+        let command = EscapeCommand::new(GET_DATA_INS, selector, 0x00);
+        self.send_escape_command(command)
     }
 
     pub fn get_firmware_version(&mut self) -> Result<Vec<u8>> {
@@ -146,6 +220,220 @@ impl<T: Transport> Pcsc<T> {
         Ok(rate)
     }
 
+    pub fn card_id(&mut self) -> Result<Vec<u8>> {
+        self.get_data(GET_CARD_ID_SELECTOR)
+    }
+
+    pub fn card_name(&mut self) -> Result<Vec<u8>> {
+        self.get_data(GET_CARD_NAME_SELECTOR)
+    }
+
+    pub fn card_type(&mut self) -> Result<Vec<u8>> {
+        self.get_data(GET_CARD_TYPE_SELECTOR)
+    }
+
+    pub fn card_type_name(&mut self) -> Result<Vec<u8>> {
+        self.get_data(GET_CARD_TYPE_NAME_SELECTOR)
+    }
+
+    pub fn request_type_b_info(&mut self, afi: u8, param: u8) -> Result<TypeBInfo> {
+        const REQB: u8 = 0x05;
+        let cmd = [REQB, afi, param];
+        let flags = TransmissionFlags::iso14443_type_b();
+        let response = self.transceive(&cmd, Duration::from_millis(10), &flags)?;
+        if response.len() < 13 || response[0] != 0x50 {
+            return Err(DriverError::Other(
+                "invalid or unsupported SENSB_RES response".into(),
+            ));
+        }
+        let pupi: [u8; 4] = response[1..5]
+            .try_into()
+            .map_err(|_| DriverError::Other("SENSB_RES missing PUPI".into()))?;
+        let application_data: [u8; 4] = response[5..9]
+            .try_into()
+            .map_err(|_| DriverError::Other("SENSB_RES missing application data".into()))?;
+        let protocol_info = response[9..].to_vec();
+        Ok(TypeBInfo {
+            pupi,
+            application_data,
+            protocol_info,
+        })
+    }
+
+    pub fn get_uid(&mut self) -> Result<Vec<u8>> {
+        self.get_data(GET_UID_SELECTOR)
+    }
+
+    pub fn get_historical_bytes(&mut self) -> Result<Vec<u8>> {
+        self.get_data(GET_HISTORICAL_BYTES_SELECTOR)
+    }
+
+    pub fn set_detection_target(&mut self, selector: u8) -> Result<()> {
+        let data = [selector];
+        let command = EscapeCommand::with_data(0x5A, 0x00, 0x00, &data);
+        self.send_escape_command(command).map(|_| ())
+    }
+
+    pub fn set_rf_speed(&mut self, rw_to_card: u8, card_to_rw: u8, option: u8) -> Result<()> {
+        let data = [rw_to_card, card_to_rw, option];
+        let command = EscapeCommand::with_data(0x5C, 0x00, 0x00, &data);
+        self.send_escape_command(command).map(|_| ())
+    }
+
+    pub fn get_rf_speed(&mut self, selector: u8) -> Result<Vec<u8>> {
+        let data = [selector];
+        let command = EscapeCommand::with_data(0x5D, 0x00, 0x00, &data);
+        self.send_escape_command(command)
+    }
+
+    pub fn set_comm_speed(&mut self, speed: u8) -> Result<()> {
+        let data = [0x6E, 0x03, 0x05, 0x01, speed];
+        self.manage_session(&[(0xFF, &data)], SLOT_BUSY_RETRY_COUNT)?;
+        Ok(())
+    }
+
+    pub fn set_tx_rx_flag(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.exchange(TRANSMISSION_AND_RECEPTION_FLAG_TAG, data)
+            .execute_payload()
+    }
+
+    pub fn set_tx_bit_framing(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.exchange(TRANSMISSION_BIT_FRAMING_TAG, data)
+            .execute_payload()
+    }
+
+    pub fn get_property(&mut self, selector: u8) -> Result<Vec<u8>> {
+        let command = EscapeCommand::new(GET_PROPERTY_INS, selector, 0x00);
+        self.send_escape_command(command)
+    }
+
+    pub fn prepare_firmware_update(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut frame = Vec::with_capacity(7 + data.len());
+        frame.extend_from_slice(&[0xFF, PREPARE_FIRMWARE_UPDATE_INS, 0x00, 0x00, 0x00, 0x01, 0x00]);
+        frame.extend_from_slice(data);
+        self.send_extended_escape(&frame)
+    }
+
+    pub fn update_firmware(&mut self, sequence: u16, data: &[u8]) -> Result<Vec<u8>> {
+        let mut frame = Vec::with_capacity(7 + data.len());
+        frame.extend_from_slice(&[
+            0xFF,
+            UPDATE_FIRMWARE_INS,
+            (sequence & 0xFF) as u8,
+            (sequence >> 8) as u8,
+            0x00,
+            0x01,
+            0x00,
+        ]);
+        frame.extend_from_slice(data);
+        self.send_extended_escape(&frame)
+    }
+
+    pub fn reset_device(&mut self, delay_ms: u16) -> Result<Vec<u8>> {
+        let frame = vec![
+            0xFF,
+            RESET_DEVICE_INS,
+            0x00,
+            0x00,
+            0x02,
+            (delay_ms & 0xFF) as u8,
+            (delay_ms >> 8) as u8,
+        ];
+        self.send_extended_escape(&frame)
+    }
+
+    pub fn diagnose_communication_line(&mut self, pattern: &[u8]) -> Result<Vec<u8>> {
+        let total_len = pattern
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| DriverError::Other("diagnose payload too large".into()))?;
+        let total_len = u16::try_from(total_len)
+            .map_err(|_| DriverError::Other("diagnose payload too large".into()))?;
+        let mut frame = Vec::with_capacity(pattern.len() + 11);
+        frame.extend_from_slice(&[0xFF, DIAGNOSE_INS, 0x00, 0x00]);
+        frame.push(0x00);
+        frame.push((total_len >> 8) as u8);
+        frame.push((total_len & 0xFF) as u8);
+        frame.push(DIAG_TEST_COMMUNICATION_LINE);
+        frame.extend_from_slice(pattern);
+        frame.extend_from_slice(&[0x00, 0x00, 0x00]);
+        let payload = self.send_extended_escape(&frame)?;
+        if payload.len() != total_len as usize {
+            return Err(DriverError::Other(
+                "diagnose response length mismatch".into(),
+            ));
+        }
+        if payload.first().copied() != Some(DIAG_TEST_COMMUNICATION_LINE) {
+            return Err(DriverError::Other("diagnose test mismatch".into()));
+        }
+        Ok(payload[1..].to_vec())
+    }
+
+    pub fn diagnose_rom(&mut self) -> Result<u8> {
+        let frame = [0xFF, DIAGNOSE_INS, 0x00, 0x00, 0x01, DIAG_TEST_ROM];
+        let payload = self.send_extended_escape(&frame)?;
+        if payload.len() != 2 || payload[0] != DIAG_TEST_ROM {
+            return Err(DriverError::Other("diagnose ROM response invalid".into()));
+        }
+        Ok(payload[1])
+    }
+
+    pub fn diagnose_ram(&mut self) -> Result<Vec<u8>> {
+        let frame = [0xFF, DIAGNOSE_INS, 0x00, 0x00, 0x01, DIAG_TEST_RAM];
+        let payload = self.send_extended_escape(&frame)?;
+        if payload.is_empty() || payload.len() > 7 {
+            return Err(DriverError::Other(
+                "diagnose RAM response length invalid".into(),
+            ));
+        }
+        if payload[0] != DIAG_TEST_RAM {
+            return Err(DriverError::Other("diagnose RAM response invalid".into()));
+        }
+        Ok(payload[1..].to_vec())
+    }
+
+    pub fn diagnose_polling(&mut self, protocol_code: u8, count: u8) -> Result<u8> {
+        let frame = [
+            0xFF,
+            DIAGNOSE_INS,
+            0x00,
+            0x00,
+            0x03,
+            DIAG_TEST_POLLING,
+            protocol_code,
+            count,
+        ];
+        let payload = self.send_extended_escape(&frame)?;
+        if payload.len() != 2 || payload[0] != DIAG_TEST_POLLING {
+            return Err(DriverError::Other(
+                "diagnose polling response invalid".into(),
+            ));
+        }
+        Ok(payload[1])
+    }
+
+    pub fn start_rffe_parameter_mode(&mut self) -> Result<()> {
+        self.end_transparent_session()?;
+        Ok(())
+    }
+
+    pub fn end_rffe_parameter_mode(&mut self) -> Result<()> {
+        self.start_transparent_session(false)
+    }
+
+    pub fn read_rffe_parameter(&mut self, category: u8, selector: u8) -> Result<Vec<u8>> {
+        self.rffe_command(0x61, category, selector, &[])
+    }
+
+    pub fn write_rffe_parameter(
+        &mut self,
+        category: u8,
+        selector: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.rffe_command(0x62, category, selector, data)
+    }
+
     pub fn turn_off_rf(&mut self) -> Result<()> {
         self.manage_session(&[(TURN_OFF_RF_TAG, &[][..])], SLOT_BUSY_RETRY_COUNT)?;
         Ok(())
@@ -160,8 +448,28 @@ impl<T: Transport> Pcsc<T> {
         self.ccid.close().map_err(DriverError::from)
     }
 
-    fn switch_protocol(&mut self, mode: u8, parameter: u8) -> Result<()> {
+    fn exchange<'a, 'b>(
+        &'a mut self,
+        tag: u8,
+        payload: &'b [u8],
+    ) -> TransparentExchange<'a, 'b, T> {
+        TransparentExchange::new(self, tag, payload)
+    }
+
+    fn switch_protocol(
+        &mut self,
+        mode: u8,
+        parameter: u8,
+        fsdi: Option<u8>,
+        cid: Option<u8>,
+    ) -> Result<()> {
         let mut payload = Vec::new();
+        if let Some(value) = fsdi {
+            payload.extend_from_slice(&[0xFF, 0x6E, 0x03, 0x01, 0x01, value]);
+        }
+        if let Some(value) = cid {
+            payload.extend_from_slice(&[0xFF, 0x6E, 0x03, 0x08, 0x01, value]);
+        }
         payload.push(SWITCH_PROTOCOL_METADATA_TAG);
         payload.push(2);
         payload.push(mode);
@@ -177,6 +485,34 @@ impl<T: Transport> Pcsc<T> {
         Self::parse_status_block(tlv)?;
         sleep(SWITCH_PROTOCOL_GUARD_TIME);
         Ok(())
+    }
+
+    fn send_escape_command(&mut self, command: EscapeCommand<'_>) -> Result<Vec<u8>> {
+        let frame = command.into_bytes();
+        let response = self
+            .ccid
+            .escape(&frame, self.receive_timeout, SLOT_BUSY_RETRY_COUNT)?;
+        Self::verify_status(&response)?;
+        Ok(response[..response.len() - 2].to_vec())
+    }
+
+    fn send_extended_escape(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
+        let response = self
+            .ccid
+            .escape(frame, self.receive_timeout, SLOT_BUSY_RETRY_COUNT)?;
+        Self::verify_status(&response)?;
+        Ok(response[..response.len() - 2].to_vec())
+    }
+
+    fn rffe_command(
+        &mut self,
+        ins: u8,
+        category: u8,
+        selector: u8,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let command = EscapeCommand::with_data(ins, category, selector, payload);
+        self.send_escape_command(command)
     }
 
     fn manage_session(
@@ -205,21 +541,23 @@ impl<T: Transport> Pcsc<T> {
         tag: u8,
         payload: &[u8],
         timeout: Duration,
-        flags: &TransmissionFlags,
-    ) -> Result<Vec<u8>> {
+        flags: Option<&TransmissionFlags>,
+    ) -> Result<TransparentExchangeResult> {
         let mut fields = Vec::new();
-        let mask = Self::build_flag_mask(flags);
-        if mask != 0 {
-            fields.push(TRANSMISSION_AND_RECEPTION_FLAG_TAG);
-            fields.push(2);
-            fields.push((mask >> 8) as u8);
-            fields.push((mask & 0xFF) as u8);
-        }
-        if let Some(bits) = flags.tx_valid_bits {
-            let value = bits.min(7);
-            fields.push(TRANSMISSION_BIT_FRAMING_TAG);
-            fields.push(1);
-            fields.push(value);
+        if let Some(flags) = flags {
+            let mask = Self::build_flag_mask(flags);
+            if mask != 0 {
+                fields.push(TRANSMISSION_AND_RECEPTION_FLAG_TAG);
+                fields.push(2);
+                fields.push((mask >> 8) as u8);
+                fields.push((mask & 0xFF) as u8);
+            }
+            if let Some(bits) = flags.tx_valid_bits {
+                let value = bits.min(7);
+                fields.push(TRANSMISSION_BIT_FRAMING_TAG);
+                fields.push(1);
+                fields.push(value);
+            }
         }
         if timeout > Duration::from_millis(0) {
             let micros = (timeout.as_millis() as u128 * 1_000).min(u32::MAX as u128) as u32;
@@ -344,9 +682,9 @@ impl<T: Transport> Pcsc<T> {
         Ok(())
     }
 
-    fn parse_transparent_response(data: &[u8]) -> Result<Vec<u8>> {
+    fn parse_transparent_response(data: &[u8]) -> Result<TransparentExchangeResult> {
         let mut idx = 0;
-        let mut response = Vec::new();
+        let mut result = TransparentExchangeResult::default();
         while idx + 1 <= data.len() {
             let tag = data[idx];
             idx += 1;
@@ -366,17 +704,37 @@ impl<T: Transport> Pcsc<T> {
                         return Err(Self::status_error(value));
                     }
                 }
-                RESPONSE_BIT_FRAMING_TAG | RESPONSE_STATUS_TAG => {
+                RESPONSE_BIT_FRAMING_TAG => {
                     if idx >= data.len() {
-                        return Err(DriverError::Other("response TLV truncated".into()));
+                        return Err(DriverError::Other("bit framing TLV truncated".into()));
                     }
                     let len = data[idx] as usize;
-                    idx += 1 + len;
-                    if idx > data.len() {
+                    idx += 1;
+                    if len != 1 || idx + len > data.len() {
                         return Err(DriverError::Other(
-                            "response TLV length out of range".into(),
+                            "bit framing TLV length out of range".into(),
                         ));
                     }
+                    let mut bits = data[idx];
+                    if bits == 0 {
+                        bits = 8;
+                    }
+                    result.valid_bits = Some(bits);
+                    idx += len;
+                }
+                RESPONSE_STATUS_TAG => {
+                    if idx >= data.len() {
+                        return Err(DriverError::Other("response status TLV truncated".into()));
+                    }
+                    let len = data[idx] as usize;
+                    idx += 1;
+                    if len != 2 || idx + len > data.len() {
+                        return Err(DriverError::Other(
+                            "response status TLV length out of range".into(),
+                        ));
+                    }
+                    result.rf_status = Some(data[idx]);
+                    idx += len;
                 }
                 RESPONSE_DATA_TAG => {
                     if idx >= data.len() {
@@ -387,7 +745,7 @@ impl<T: Transport> Pcsc<T> {
                     if idx + len > data.len() {
                         return Err(DriverError::Other("data TLV length out of range".into()));
                     }
-                    response.extend_from_slice(&data[idx..idx + len]);
+                    result.payload.extend_from_slice(&data[idx..idx + len]);
                     idx += len;
                 }
                 VENDOR_SPECIFIC_TAG => {
@@ -417,7 +775,7 @@ impl<T: Transport> Pcsc<T> {
                 }
             }
         }
-        Ok(response)
+        Ok(result)
     }
 
     fn parse_length(data: &[u8]) -> Result<(usize, usize)> {
@@ -644,5 +1002,89 @@ impl CcidResponse {
             _ => CommandStatus::Failure(error),
         };
         Ok((Self { length }, status))
+    }
+}
+#[allow(dead_code)]
+const FDT_MIN_MICROS: u32 = 6780; // ISO14443-4 default FDT in microseconds
+
+struct EscapeCommand<'a> {
+    ins: u8,
+    p1: u8,
+    p2: u8,
+    data: Cow<'a, [u8]>,
+}
+
+impl<'a> EscapeCommand<'a> {
+    fn new(ins: u8, p1: u8, p2: u8) -> Self {
+        Self {
+            ins,
+            p1,
+            p2,
+            data: Cow::Borrowed(&[]),
+        }
+    }
+
+    fn with_data(ins: u8, p1: u8, p2: u8, data: &'a [u8]) -> Self {
+        Self {
+            ins,
+            p1,
+            p2,
+            data: Cow::Borrowed(data),
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let mut frame = vec![0xFF, self.ins, self.p1, self.p2];
+        if !self.data.is_empty() {
+            frame.push(self.data.len() as u8);
+            frame.extend_from_slice(&self.data);
+        }
+        frame
+    }
+}
+
+#[derive(Default)]
+struct TransparentExchangeResult {
+    payload: Vec<u8>,
+    rf_status: Option<u8>,
+    valid_bits: Option<u8>,
+}
+
+struct TransparentExchange<'a, 'b, T: Transport> {
+    pcsc: &'a mut Pcsc<T>,
+    tag: u8,
+    payload: &'b [u8],
+    flags: Option<TransmissionFlags>,
+    timeout: Duration,
+}
+
+impl<'a, 'b, T: Transport> TransparentExchange<'a, 'b, T> {
+    fn new(pcsc: &'a mut Pcsc<T>, tag: u8, payload: &'b [u8]) -> Self {
+        Self {
+            pcsc,
+            tag,
+            payload,
+            flags: None,
+            timeout: Duration::from_millis(0),
+        }
+    }
+
+    fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn flags(mut self, flags: TransmissionFlags) -> Self {
+        self.flags = Some(flags);
+        self
+    }
+
+    fn execute(self) -> Result<TransparentExchangeResult> {
+        self.pcsc
+            .transparent_exchange(self.tag, self.payload, self.timeout, self.flags.as_ref())
+    }
+
+    fn execute_payload(self) -> Result<Vec<u8>> {
+        self.execute().map(|result| result.payload)
     }
 }
