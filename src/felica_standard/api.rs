@@ -131,7 +131,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .request_service_timeout_ms(service_codes.len());
 
         let response = self.execute_command(
-            "request service",
+            "Request Service",
             FelicaStandardCommand::RequestService {
                 idm,
                 service_codes: service_codes.to_vec(),
@@ -151,7 +151,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let timeout_ms = self.polling_result.request_response_timeout_ms();
 
         let response = self.execute_command(
-            "request response",
+            "Request Response",
             FelicaStandardCommand::RequestResponse { idm },
             timeout_ms,
         )?;
@@ -182,7 +182,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .read_without_encryption_timeout_ms(block_list.len());
 
         let response = self.execute_command(
-            "read without encryption",
+            "Read Without Encryption",
             FelicaStandardCommand::ReadWithoutEncryption {
                 idm,
                 service_codes: service_codes.to_vec(),
@@ -200,7 +200,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "read without encryption",
+                        "Read Without Encryption",
                         status_flag1,
                         status_flag2,
                     ))
@@ -234,7 +234,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .write_without_encryption_timeout_ms(block_list.len());
 
         let response = self.execute_command(
-            "write without encryption",
+            "Write Without Encryption",
             FelicaStandardCommand::WriteWithoutEncryption {
                 idm,
                 service_codes: service_codes.to_vec(),
@@ -252,7 +252,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "write without encryption",
+                        "Write Without Encryption",
                         status_flag1,
                         status_flag2,
                     ))
@@ -272,7 +272,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let timeout_ms = self.polling_result.search_service_code_timeout_ms();
 
         let response = self.execute_command(
-            "search service code",
+            "Search Service Code",
             FelicaStandardCommand::SearchServiceCode { idm, service_index },
             timeout_ms,
         )?;
@@ -295,7 +295,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .request_block_information_timeout_ms(node_codes.len());
 
         let response = self.execute_command(
-            "request block information",
+            "Request Block Information",
             FelicaStandardCommand::RequestBlockInformation {
                 idm,
                 node_codes: node_codes.to_vec(),
@@ -331,7 +331,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let node_count = areas.len() + services.len();
         let timeout_ms = self.polling_result.authentication1_timeout_ms(node_count);
         let response = self.execute_command(
-            "authentication1",
+            "Authentication1",
             FelicaStandardCommand::Authentication1 {
                 idm,
                 areas: areas.to_vec(),
@@ -359,7 +359,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
         let timeout_ms = self.polling_result.authentication2_timeout_ms();
         let response = self.execute_command(
-            "authentication2",
+            "Authentication2",
             FelicaStandardCommand::Authentication2 {
                 idm,
                 challenge_2b: *challenge_2b,
@@ -395,7 +395,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let (challenge_1b, challenge_2a) = self.authentication1(areas, services, &challenge_1a)?;
         if !context.verify_challenge1(&random_1, &challenge_1b) {
             return Err(FelicaStandardError::AuthenticationFailed(
-                "authentication1 verification failed".into(),
+                "Authentication1 verification failed".into(),
             ));
         }
 
@@ -405,7 +405,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let payload = auth2_response.decrypt_payload(&random_2)?;
         if payload.len() < 24 {
             return Err(FelicaStandardError::Protocol(
-                "authentication2 response payload too short".into(),
+                "Authentication2 response payload too short".into(),
             ));
         }
         let transaction_number = u16::from_le_bytes([payload[0], payload[1]]);
@@ -415,7 +415,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         expected_id.copy_from_slice(&random_1[2..8]);
         if transaction_id != expected_id {
             return Err(FelicaStandardError::AuthenticationFailed(
-                "authentication2 transaction ID mismatch".into(),
+                "Authentication2 transaction ID mismatch".into(),
             ));
         }
         let mut issue_id = [0u8; 8];
@@ -516,7 +516,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .read_without_encryption_timeout_ms(block_list.len());
 
         let response = self.execute_command(
-            "read",
+            "Read",
             FelicaStandardCommand::Read {
                 block_list: block_list.to_vec(),
             },
@@ -531,7 +531,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 ..
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error("read", status_flag1, status_flag2))
+                    Err(Self::status_error("Read", status_flag1, status_flag2))
                 } else if blocks.len() != block_list.len() {
                     Err(FelicaStandardError::Protocol(
                         "encrypted read response block count mismatch".into(),
@@ -557,7 +557,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .write_without_encryption_timeout_ms(block_list.len());
 
         let response = self.execute_command(
-            "write",
+            "Write",
             FelicaStandardCommand::Write {
                 block_list: block_list.to_vec(),
                 data: data.to_vec(),
@@ -571,7 +571,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error("write", status_flag1, status_flag2))
+                    Err(Self::status_error("Write", status_flag1, status_flag2))
                 } else {
                     Ok(())
                 }
@@ -616,7 +616,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .request_service_timeout_ms(service_codes.len());
 
         let response = self.execute_command(
-            "request service v2",
+            "Request Service v2",
             FelicaStandardCommand::RequestServiceV2 {
                 idm,
                 service_codes: service_codes.to_vec(),
@@ -633,13 +633,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "request service v2",
+                        "Request Service v2",
                         status_flag1,
                         status_flag2,
                     ))
                 } else if key_versions.len() != service_codes.len() {
                     Err(FelicaStandardError::Protocol(
-                        "request service v2 key version count mismatch".into(),
+                        "Request Service v2 key version count mismatch".into(),
                     ))
                 } else {
                     Ok(key_versions)
@@ -668,7 +668,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
-            "register issue id",
+            "Register Issue ID",
             FelicaStandardCommand::RegisterIssueId {
                 issue_id: *issue_id,
                 issue_parameter: *issue_parameter,
@@ -685,7 +685,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "register issue id",
+                        "Register Issue ID",
                         status_flag1,
                         status_flag2,
                     ))
@@ -724,7 +724,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
-            "register area",
+            "Register Area",
             FelicaStandardCommand::RegisterArea { area_code, package },
             timeout_ms,
         )?;
@@ -736,7 +736,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "register area",
+                        "Register Area",
                         status_flag1,
                         status_flag2,
                     ))
@@ -767,7 +767,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
-            "register service",
+            "Register Service",
             FelicaStandardCommand::RegisterService {
                 service_code,
                 package,
@@ -783,7 +783,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "register service",
+                        "Register Service",
                         status_flag1,
                         status_flag2,
                     ))
@@ -798,7 +798,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
     pub fn commit_registration(&mut self) -> Result<(), FelicaStandardError> {
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
-            "commit registration",
+            "Commit Registration",
             FelicaStandardCommand::CommitRegistration,
             timeout_ms,
         )?;
@@ -810,7 +810,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "commit registration",
+                        "Commit Registration",
                         status_flag1,
                         status_flag2,
                     ))
