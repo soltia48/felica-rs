@@ -1,5 +1,5 @@
 use super::errors::{CommunicationFault, DriverError, Result, ensure_status_ok};
-use crate::port100::frame::{Frame, FrameType};
+use crate::driver::port100::frame::{Frame, FrameType};
 use crate::transport::Transport;
 use log::{debug, warn};
 use std::collections::VecDeque;
