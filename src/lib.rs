@@ -1,6 +1,7 @@
 pub mod clf;
 pub mod driver;
 pub mod felica_standard;
+pub mod reader;
 pub mod transport;
 
 pub use clf::{errors::*, targets::*};
@@ -14,4 +15,5 @@ pub use felica_standard::{
     AuthenticatedContext, BlockListElement, FelicaStandard, FelicaStandardError,
     MutualAuthenticationResult, SearchServiceCodeResult, ServiceCode,
 };
+pub use reader::{Reader, ReaderPreference, open_reader};
 pub use transport::usb::UsbTransport;
