@@ -20,6 +20,28 @@ impl ServiceCode {
         (self.0 & 0x3F) as u8
     }
 
+    pub fn attributes_description(&self) -> Option<&'static str> {
+        match self.attributes() {
+            0b001000 => Some("Random read/write with key"),
+            0b001001 => Some("Random read/write without key"),
+            0b001010 => Some("Random read-only with key"),
+            0b001011 => Some("Random read-only without key"),
+            0b001100 => Some("Cyclic read/write with key"),
+            0b001101 => Some("Cyclic read/write without key"),
+            0b001110 => Some("Cyclic read-only with key"),
+            0b001111 => Some("Cyclic read-only without key"),
+            0b010000 => Some("Purse direct with key"),
+            0b010001 => Some("Purse direct without key"),
+            0b010010 => Some("Purse cashback with key"),
+            0b010011 => Some("Purse cashback without key"),
+            0b010100 => Some("Purse decrement with key"),
+            0b010101 => Some("Purse decrement without key"),
+            0b010110 => Some("Purse read-only with key"),
+            0b010111 => Some("Purse read-only without key"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn to_le_bytes(&self) -> [u8; 2] {
         self.0.to_le_bytes()
     }

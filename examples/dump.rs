@@ -49,7 +49,15 @@ struct AreaNode {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum AreaChild {
     Area(AreaNode),
-    Service(ServiceSummary),
+    ServiceGroup(ServiceGroupSummary),
+}
+
+#[derive(Debug, Serialize)]
+struct ServiceGroupSummary {
+    number: u16,
+    number_hex: String,
+    services: Vec<ServiceSummary>,
+    read_without_encryption_blocks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,8 +69,8 @@ struct ServiceSummary {
     code_hex: String,
     number: u16,
     attributes_hex: String,
+    attributes_description: Option<String>,
     key_version: Option<KeyVersionSummary>,
-    read_without_encryption_blocks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -253,15 +261,20 @@ fn collect_area<D: FelicaDriver + ?Sized>(
         match felica.search_service_code(index)? {
             Some(SearchServiceCodeResult::Service(service_code)) => {
                 register_service_code(key_request_codes, seen_codes, service_code.raw());
-                children.push(AreaChild::Service(ServiceSummary {
-                    service_code_raw: service_code.raw(),
-                    attributes_raw: service_code.attributes(),
-                    code_hex: hex_u16(service_code.raw()),
-                    number: service_code.number(),
-                    attributes_hex: hex_u8(service_code.attributes()),
-                    key_version: None,
-                    read_without_encryption_blocks: None,
-                }));
+                append_service_child(
+                    &mut children,
+                    ServiceSummary {
+                        service_code_raw: service_code.raw(),
+                        attributes_raw: service_code.attributes(),
+                        code_hex: hex_u16(service_code.raw()),
+                        number: service_code.number(),
+                        attributes_hex: hex_u8(service_code.attributes()),
+                        attributes_description: service_code
+                            .attributes_description()
+                            .map(|desc| desc.to_string()),
+                        key_version: None,
+                    },
+                );
                 index = index.saturating_add(1);
             }
             Some(SearchServiceCodeResult::Area {
@@ -305,6 +318,23 @@ fn collect_area<D: FelicaDriver + ?Sized>(
     ))
 }
 
+fn append_service_child(children: &mut Vec<AreaChild>, summary: ServiceSummary) {
+    if let Some(group) = children.iter_mut().find_map(|child| match child {
+        AreaChild::ServiceGroup(group) if group.number == summary.number => Some(group),
+        _ => None,
+    }) {
+        group.services.push(summary);
+    } else {
+        let number = summary.number;
+        children.push(AreaChild::ServiceGroup(ServiceGroupSummary {
+            number,
+            number_hex: hex_u16(number),
+            services: vec![summary],
+            read_without_encryption_blocks: None,
+        }));
+    }
+}
+
 fn register_service_code(
     service_codes: &mut Vec<ServiceCode>,
     seen_codes: &mut HashSet<u16>,
@@ -335,11 +365,18 @@ fn assign_area_key_versions(
     for child in &mut area.children {
         match child {
             AreaChild::Area(child_area) => assign_area_key_versions(child_area, key_versions),
-            AreaChild::Service(service) => {
-                if let Some(summary) = key_versions.remove(&service.service_code_raw) {
-                    service.key_version = Some(summary);
-                }
-            }
+            AreaChild::ServiceGroup(group) => assign_group_key_versions(group, key_versions),
+        }
+    }
+}
+
+fn assign_group_key_versions(
+    group: &mut ServiceGroupSummary,
+    key_versions: &mut HashMap<u16, KeyVersionSummary>,
+) {
+    for service in &mut group.services {
+        if let Some(summary) = key_versions.remove(&service.service_code_raw) {
+            service.key_version = Some(summary);
         }
     }
 }
@@ -393,11 +430,23 @@ fn collect_plaintext_children(
     for child in children {
         match child {
             AreaChild::Area(area) => collect_plaintext_children(&area.children, targets, seen),
-            AreaChild::Service(service) => {
-                if service.attributes_raw & 0x01 == 0x01 && seen.insert(service.service_code_raw) {
-                    targets.push(service.service_code_raw);
-                }
-            }
+            AreaChild::ServiceGroup(group) => collect_plaintext_service_group(group, targets, seen),
+        }
+    }
+}
+
+fn collect_plaintext_service_group(
+    group: &ServiceGroupSummary,
+    targets: &mut Vec<u16>,
+    seen: &mut HashSet<u16>,
+) {
+    if let Some(service) = group
+        .services
+        .iter()
+        .find(|service| service.attributes_raw & 0x01 == 0x01)
+    {
+        if seen.insert(service.service_code_raw) {
+            targets.push(service.service_code_raw);
         }
     }
 }
@@ -447,11 +496,22 @@ fn assign_read_blocks_in_area(area: &mut AreaNode, results: &mut HashMap<u16, Ve
     for child in &mut area.children {
         match child {
             AreaChild::Area(child_area) => assign_read_blocks_in_area(child_area, results),
-            AreaChild::Service(service) => {
-                if let Some(blocks) = results.remove(&service.service_code_raw) {
-                    service.read_without_encryption_blocks = Some(blocks);
-                }
-            }
+            AreaChild::ServiceGroup(group) => assign_read_blocks_in_group(group, results),
+        }
+    }
+}
+
+fn assign_read_blocks_in_group(
+    group: &mut ServiceGroupSummary,
+    results: &mut HashMap<u16, Vec<String>>,
+) {
+    if group.read_without_encryption_blocks.is_some() {
+        return;
+    }
+    for service in &group.services {
+        if let Some(blocks) = results.remove(&service.service_code_raw) {
+            group.read_without_encryption_blocks = Some(blocks);
+            break;
         }
     }
 }
