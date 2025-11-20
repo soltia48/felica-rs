@@ -1,5 +1,5 @@
 use super::errors::{CommunicationFault, DriverError, Result, ensure_status_ok};
-use crate::driver::port100::frame::{Frame, FrameType};
+use crate::driver::port100::frame::{self, Frame, FrameType};
 use crate::transport::Transport;
 use log::{debug, warn};
 use std::collections::VecDeque;
@@ -21,7 +21,7 @@ pub struct Chipset<T: Transport> {
 }
 
 impl<T: Transport> Chipset<T> {
-    pub const ACK: [u8; 6] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+    pub const ACK: [u8; 6] = frame::ACK_BYTES;
     const ACK_TIMEOUT: Duration = Duration::from_millis(1_000);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
     const BUFFER_CLEAR_TIMEOUT: Duration = Duration::from_millis(50);
@@ -71,37 +71,9 @@ impl<T: Transport> Chipset<T> {
     }
 
     fn send_command(&mut self, code: u8, payload: &[u8]) -> Result<Vec<u8>> {
-        let mut data = Vec::with_capacity(payload.len() + 2);
-        data.push(0xD6);
-        data.push(code);
-        data.extend_from_slice(payload);
-        let frame = Frame::build(&data);
-        if let Err(err) = self.transport.write(frame.as_bytes()) {
-            let driver_err = DriverError::from(err);
-            self.recover_after_error(false);
-            return Err(driver_err);
-        }
-
-        if let Err(err) = self.read_ack_frame() {
-            self.recover_after_error(false);
-            return Err(err);
-        }
-
-        let rsp = match self.read_response_frame() {
-            Ok(frame) => frame,
-            Err(err) => {
-                self.recover_after_error(true);
-                return Err(err);
-            }
-        };
-
-        if let FrameType::Data(payload) = rsp.frame_type() {
-            if payload.get(0) == Some(&0xD7) && payload.get(1) == Some(&code.wrapping_add(1)) {
-                return Ok(payload[2..].to_vec());
-            }
-        }
-
-        Err(DriverError::Other("unexpected response".into()))
+        let frame = Frame::build(&Self::build_command_payload(code, payload));
+        self.write_frame(&frame)?;
+        self.read_command_response(code)
     }
 
     pub fn set_command_type(&mut self, value: u8) -> Result<()> {
@@ -325,25 +297,18 @@ impl<T: Transport> Chipset<T> {
 
     fn read_frame_bytes(&mut self, deadline: Instant) -> Result<Vec<u8>> {
         let mut frame = self.read_exact(5, deadline)?;
-        if &frame[0..3] != [0x00, 0x00, 0xFF] {
+        if frame.get(0..3) != Some(&frame::PREAMBLE) {
             return Err(DriverError::Other("invalid frame preamble".into()));
         }
 
-        if frame[3] == 0xFF && frame[4] == 0xFF {
+        let len = if frame[3] == 0xFF && frame[4] == 0xFF {
             let extended = self.read_exact(3, deadline)?;
-            let mut len_bytes = [0u8; 2];
-            len_bytes.copy_from_slice(&extended[0..2]);
-            let len = u16::from_le_bytes(len_bytes) as usize;
             frame.extend_from_slice(&extended);
-            let remaining = len
-                .checked_add(2)
-                .ok_or_else(|| DriverError::Other("frame length overflow".into()))?;
-            let tail = self.read_exact(remaining, deadline)?;
-            frame.extend_from_slice(&tail);
-            return Ok(frame);
-        }
+            u16::from_le_bytes([extended[0], extended[1]]) as usize
+        } else {
+            frame[3] as usize
+        };
 
-        let len = frame[3] as usize;
         let remaining = len
             .checked_add(2)
             .ok_or_else(|| DriverError::Other("frame length overflow".into()))?;
@@ -355,34 +320,16 @@ impl<T: Transport> Chipset<T> {
     fn read_exact(&mut self, len: usize, deadline: Instant) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len);
         while out.len() < len {
-            while out.len() < len {
-                if let Some(byte) = self.read_buffer.pop_front() {
-                    out.push(byte);
-                } else {
-                    break;
-                }
-            }
+            self.take_from_buffer(&mut out, len);
             if out.len() == len {
                 break;
             }
-            let now = Instant::now();
-            let Some(remaining) = deadline.checked_duration_since(now) else {
-                return Err(DriverError::Io(io::Error::new(
-                    ErrorKind::TimedOut,
-                    "timeout while waiting for data",
-                )));
-            };
-            if remaining.as_nanos() == 0 {
-                return Err(DriverError::Io(io::Error::new(
-                    ErrorKind::TimedOut,
-                    "timeout while waiting for data",
-                )));
-            }
+            let remaining =
+                remaining_until(deadline).ok_or_else(|| DriverError::Io(timeout_error()))?;
             let chunk = self.transport.read(remaining)?;
-            if chunk.is_empty() {
-                continue;
+            if !chunk.is_empty() {
+                self.read_buffer.extend(chunk);
             }
-            self.read_buffer.extend(chunk);
         }
         Ok(out)
     }
@@ -401,13 +348,9 @@ impl<T: Transport> Chipset<T> {
         self.read_buffer.clear();
         let deadline = Instant::now() + timeout;
         loop {
-            let now = Instant::now();
-            let Some(remaining) = deadline.checked_duration_since(now) else {
+            let Some(remaining) = remaining_until(deadline) else {
                 break;
             };
-            if remaining.as_nanos() == 0 {
-                break;
-            }
             match self.transport.read(remaining) {
                 Ok(bytes) => {
                     if bytes.is_empty() {
@@ -419,6 +362,64 @@ impl<T: Transport> Chipset<T> {
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    fn read_command_response(&mut self, code: u8) -> Result<Vec<u8>> {
+        self.with_recovery(false, |chipset| chipset.read_ack_frame())?;
+        let response = self.with_recovery(true, |chipset| chipset.read_response_frame())?;
+        Self::extract_response_payload(response, code)
+    }
+
+    fn write_frame(&mut self, frame: &Frame) -> Result<()> {
+        self.with_recovery(false, |chipset| {
+            chipset
+                .transport
+                .write(frame.as_bytes())
+                .map_err(DriverError::from)
+        })
+    }
+
+    fn extract_response_payload(frame: Frame, code: u8) -> Result<Vec<u8>> {
+        let payload = frame
+            .into_payload()
+            .ok_or_else(|| DriverError::Other("unexpected frame type".into()))?;
+        if payload.get(0) == Some(&0xD7) && payload.get(1) == Some(&code.wrapping_add(1)) {
+            Ok(payload[2..].to_vec())
+        } else {
+            Err(DriverError::Other("unexpected response".into()))
+        }
+    }
+
+    fn build_command_payload(code: u8, payload: &[u8]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(payload.len() + 2);
+        data.push(0xD6);
+        data.push(code);
+        data.extend_from_slice(payload);
+        data
+    }
+
+    fn take_from_buffer(&mut self, out: &mut Vec<u8>, len: usize) {
+        while out.len() < len {
+            if let Some(byte) = self.read_buffer.pop_front() {
+                out.push(byte);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn with_recovery<R>(
+        &mut self,
+        drain_buffer: bool,
+        action: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<R> {
+        match action(self) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                self.recover_after_error(drain_buffer);
+                Err(err)
             }
         }
     }
@@ -457,4 +458,14 @@ fn target_param_index(name: &str) -> Option<u8> {
         "continuous_receive_mode" => Some(2),
         _ => None,
     }
+}
+
+fn remaining_until(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| d.as_nanos() != 0)
+}
+
+fn timeout_error() -> io::Error {
+    io::Error::new(ErrorKind::TimedOut, "timeout while waiting for data")
 }

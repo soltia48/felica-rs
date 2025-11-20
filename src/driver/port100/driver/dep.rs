@@ -10,27 +10,8 @@ impl<T: Transport> Device<T> {
         brty: &str,
         data: &[u8],
         cmd_set: &[u8],
-    ) -> Option<Vec<u8>> {
-        let offset = if brty == "106A" { 1 } else { 0 };
-        if brty == "106A" && data.get(0) != Some(&0xF0) {
-            warn!("received frame has invalid start byte");
-            return None;
-        }
-        let length = data.get(offset)?;
-        if *length as usize != data.len() - offset {
-            warn!("received frame has incorrect length byte");
-            return None;
-        }
-        if data.get(offset + 1) != Some(&0xD4) {
-            warn!("received frame command byte 1 is not D4h");
-            return None;
-        }
-        let code = data.get(offset + 2).copied()?;
-        if !cmd_set.contains(&code) {
-            warn!("received frame command byte 2 not in {:?}", cmd_set);
-            return None;
-        }
-        Some(data[offset + 1..].to_vec())
+    ) -> Option<DepFrame> {
+        dep_parse_frame(brty, data, cmd_set)
     }
 
     pub(super) fn dep_send_frame(
@@ -39,15 +20,7 @@ impl<T: Transport> Device<T> {
         payload: Option<&[u8]>,
         timeout: u16,
     ) -> Result<Option<Vec<u8>>> {
-        let tx = payload.map(|data| {
-            let mut frame = Vec::new();
-            if brty == "106A" {
-                frame.push(0xF0);
-            }
-            frame.push((data.len() + 1) as u8);
-            frame.extend_from_slice(data);
-            frame
-        });
+        let tx = payload.map(|data| dep_build_frame(brty, data));
         let response = self.chipset.target_exchange_rf(
             0,
             0xFFFF,
@@ -63,7 +36,9 @@ impl<T: Transport> Device<T> {
             return Ok(None);
         }
         let payload = response.get(7..).unwrap_or(&[]);
-        Ok(self.dep_verify_frame(brty, payload, &[0, 4, 6, 8, 10]))
+        Ok(self
+            .dep_verify_frame(brty, payload, &[0, 4, 6, 8, 10])
+            .map(|frame| frame.payload))
     }
 
     pub(super) fn dep_handle_psl(
@@ -100,12 +75,70 @@ impl<T: Transport> Device<T> {
         code: u8,
         data: &[u8],
     ) -> Result<()> {
-        let mut frame = vec![0xD5, code];
-        if let Some(byte) = data.get(2) {
-            frame.push(*byte);
-        }
-        debug!("{} send {}", brty, hex::encode(&frame));
-        self.dep_send_frame(brty, Some(&frame), 0)?;
+        let payload = dep_simple_response_payload(code, data);
+        debug!("{} send {}", brty, hex::encode(&payload));
+        self.dep_send_frame(brty, Some(&payload), 0)?;
         Ok(())
     }
+}
+
+fn dep_parse_frame(brty: &str, data: &[u8], cmd_set: &[u8]) -> Option<DepFrame> {
+    let offset = dep_offset(brty);
+    if brty == "106A" && data.get(0) != Some(&0xF0) {
+        dep_warn(brty, "received frame has invalid start byte");
+        return None;
+    }
+    let length = data.get(offset)?;
+    if *length as usize != data.len().saturating_sub(offset) {
+        dep_warn(brty, "received frame has incorrect length byte");
+        return None;
+    }
+    if data.get(offset + 1) != Some(&0xD4) {
+        dep_warn(brty, "received frame command byte 1 is not D4h");
+        return None;
+    }
+    let code = data.get(offset + 2).copied()?;
+    if !cmd_set.contains(&code) {
+        dep_warn(
+            brty,
+            &format!("received frame command byte 2 not in {:?}", cmd_set),
+        );
+        return None;
+    }
+    Some(DepFrame {
+        code,
+        payload: data[offset + 1..].to_vec(),
+    })
+}
+
+fn dep_build_frame(brty: &str, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 2);
+    if brty == "106A" {
+        frame.push(0xF0);
+    }
+    frame.push((payload.len() + 1) as u8);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn dep_offset(brty: &str) -> usize {
+    usize::from(brty == "106A")
+}
+
+fn dep_simple_response_payload(code: u8, data: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0xD5, code];
+    if let Some(byte) = data.get(2) {
+        frame.push(*byte);
+    }
+    frame
+}
+
+fn dep_warn(brty: &str, message: &str) {
+    warn!("{brty}: {message}");
+}
+
+pub(super) struct DepFrame {
+    #[allow(unused)]
+    pub code: u8,
+    pub payload: Vec<u8>,
 }

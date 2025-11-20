@@ -1,5 +1,10 @@
 use std::convert::TryInto;
 
+pub const PREAMBLE: [u8; 3] = [0x00, 0x00, 0xFF];
+pub const ACK_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+pub const ERROR_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00];
+const EXTENDED_LENGTH_MARKER: [u8; 2] = [0xFF, 0xFF];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameType {
     Ack,
@@ -16,15 +21,15 @@ pub struct Frame {
 
 impl Frame {
     pub fn build(payload: &[u8]) -> Self {
-        let mut frame = vec![0x00, 0x00, 0xFF, 0xFF, 0xFF];
+        let mut frame = Vec::with_capacity(payload.len() + 9);
+        frame.extend_from_slice(&PREAMBLE);
+        frame.extend_from_slice(&EXTENDED_LENGTH_MARKER);
         let len = payload.len() as u16;
         frame.extend_from_slice(&len.to_le_bytes());
-        let lcs = len_checksum(&len.to_le_bytes());
-        frame.push(lcs);
+        frame.push(checksum(&len.to_le_bytes()));
         let data_start = frame.len();
         frame.extend_from_slice(payload);
-        let dcs = data_checksum(&frame[data_start..]);
-        frame.push(dcs);
+        frame.push(checksum(&frame[data_start..]));
         frame.push(0x00);
         Self {
             raw: frame,
@@ -33,76 +38,15 @@ impl Frame {
     }
 
     pub fn parse(data: &[u8]) -> Option<Self> {
-        if data.len() < 5 || &data[0..3] != [0x00, 0x00, 0xFF] {
+        if !has_preamble(data) {
             return None;
         }
 
-        if data == [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00] {
-            return Some(Self {
-                raw: data.to_vec(),
-                frame_type: FrameType::Ack,
-            });
-        }
+        let frame_type = classify_frame(data)?;
 
-        if data == [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00] {
-            return Some(Self {
-                raw: data.to_vec(),
-                frame_type: FrameType::Error,
-            });
-        }
-
-        if data.get(3..5) == Some(&[0xFF, 0xFF]) {
-            if data.len() < 9 {
-                return None;
-            }
-            let length = u16::from_le_bytes(data[5..7].try_into().ok()?) as usize;
-            let lcs = data[7];
-            if !checksum_matches(&data[5..7], lcs) {
-                return None;
-            }
-            let data_start: usize = 8;
-            let data_end = data_start.checked_add(length)?;
-            if data.len() < data_end + 2 {
-                return None;
-            }
-            let payload = data[data_start..data_end].to_vec();
-            let dcs = data[data_end];
-            if !checksum_matches(&payload, dcs) {
-                return None;
-            }
-            if data[data_end + 1] != 0x00 {
-                return None;
-            }
-            return Some(Self {
-                raw: data.to_vec(),
-                frame_type: FrameType::Data(payload),
-            });
-        }
-
-        if data.len() < 7 {
-            return None;
-        }
-        let len = data[3] as usize;
-        let lcs = data[4];
-        if !checksum_matches(&data[3..4], lcs) {
-            return None;
-        }
-        let data_start: usize = 5;
-        let data_end = data_start.checked_add(len)?;
-        if data.len() < data_end + 2 {
-            return None;
-        }
-        let payload = data[data_start..data_end].to_vec();
-        let dcs = data[data_end];
-        if !checksum_matches(&payload, dcs) {
-            return None;
-        }
-        if data[data_end + 1] != 0x00 {
-            return None;
-        }
         Some(Self {
             raw: data.to_vec(),
-            frame_type: FrameType::Data(payload),
+            frame_type,
         })
     }
 
@@ -129,17 +73,87 @@ impl Frame {
     }
 }
 
-fn len_checksum(len_bytes: &[u8]) -> u8 {
-    let sum: u16 = len_bytes.iter().map(|b| *b as u16).sum();
-    ((256 - (sum % 256)) % 256) as u8
+fn classify_frame(data: &[u8]) -> Option<FrameType> {
+    if data == ACK_BYTES {
+        return Some(FrameType::Ack);
+    }
+    if data == ERROR_BYTES {
+        return Some(FrameType::Error);
+    }
+    let layout = DataFrameLayout::parse(data)?;
+    parse_data_frame(layout, data)
 }
 
-fn data_checksum(data: &[u8]) -> u8 {
-    let sum: u16 = data.iter().map(|b| *b as u16).sum();
+fn parse_data_frame(layout: DataFrameLayout<'_>, data: &[u8]) -> Option<FrameType> {
+    if !checksum_matches(layout.length_bytes, layout.lcs) {
+        return None;
+    }
+    let data_range = layout.payload_range()?;
+    let payload = data.get(data_range.clone())?;
+    let (dcs_index, postamble_index) = layout.trailer_indexes()?;
+    if !checksum_matches(payload, *data.get(dcs_index)?) {
+        return None;
+    }
+    if data.get(postamble_index) != Some(&0x00) {
+        return None;
+    }
+    Some(FrameType::Data(payload.to_vec()))
+}
+
+fn checksum(bytes: &[u8]) -> u8 {
+    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
     ((256 - (sum % 256)) % 256) as u8
 }
 
 fn checksum_matches(bytes: &[u8], checksum: u8) -> bool {
     let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    ((sum + checksum as u16) % 256) == 0
+    (sum + checksum as u16) % 256 == 0
+}
+
+fn has_preamble(data: &[u8]) -> bool {
+    data.len() >= 5 && data.get(0..3) == Some(&PREAMBLE)
+}
+
+struct DataFrameLayout<'a> {
+    length: usize,
+    length_bytes: &'a [u8],
+    lcs: u8,
+    data_start: usize,
+}
+
+impl<'a> DataFrameLayout<'a> {
+    fn parse(data: &'a [u8]) -> Option<Self> {
+        if data.get(3..5) == Some(&EXTENDED_LENGTH_MARKER) {
+            let length_bytes: [u8; 2] = data.get(5..7)?.try_into().ok()?;
+            Some(Self {
+                length: u16::from_le_bytes(length_bytes) as usize,
+                length_bytes: &data[5..7],
+                lcs: *data.get(7)?,
+                data_start: 8,
+            })
+        } else {
+            Some(Self {
+                length: *data.get(3)? as usize,
+                length_bytes: &data[3..4],
+                lcs: *data.get(4)?,
+                data_start: 5,
+            })
+        }
+    }
+
+    fn payload_range(&self) -> Option<std::ops::Range<usize>> {
+        let end = self.data_end()?;
+        Some(self.data_start..end)
+    }
+
+    fn trailer_indexes(&self) -> Option<(usize, usize)> {
+        let data_end = self.data_end()?;
+        let dcs_index = data_end;
+        let postamble_index = data_end.checked_add(1)?;
+        Some((dcs_index, postamble_index))
+    }
+
+    fn data_end(&self) -> Option<usize> {
+        self.data_start.checked_add(self.length)
+    }
 }

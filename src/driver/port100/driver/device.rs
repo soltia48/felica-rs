@@ -100,28 +100,21 @@ impl<T: Transport> Device<T> {
         data: &[u8],
         timeout_ms: u16,
     ) -> Result<Option<Vec<u8>>> {
-        let result = self.chipset.target_exchange_rf(
-            500,
-            0xFFFF,
-            false,
-            &[],
-            &[],
-            false,
-            false,
-            timeout_ms,
-            Some(data),
-        );
-        match result {
-            Ok(payload) => {
-                if payload.len() > 7 {
-                    Ok(Some(payload[7..].to_vec()))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(DriverError::Fault(fault)) => Err(convert_fault_to_comm_error(fault, true)),
-            Err(err) => Err(err),
-        }
+        let payload = Self::map_fault(
+            self.chipset.target_exchange_rf(
+                500,
+                0xFFFF,
+                false,
+                &[],
+                &[],
+                false,
+                false,
+                timeout_ms,
+                Some(data),
+            ),
+            true,
+        )?;
+        Ok(payload.get(7..).map(|bytes| bytes.to_vec()))
     }
 
     fn prepare_initiator_exchange(
@@ -150,11 +143,7 @@ impl<T: Transport> Device<T> {
     }
 
     fn exchange_as_initiator(&mut self, data: &[u8], timeout: u16) -> Result<Vec<u8>> {
-        match self.chipset.initiator_exchange_rf(data, timeout) {
-            Ok(response) => Ok(response),
-            Err(DriverError::Fault(fault)) => Err(convert_fault_to_comm_error(fault, false)),
-            Err(err) => Err(err),
-        }
+        Self::map_fault(self.chipset.initiator_exchange_rf(data, timeout), false)
     }
 
     fn transceive_type2_with_crc(&mut self, data: &[u8], timeout: u16) -> Result<Vec<u8>> {
@@ -254,4 +243,16 @@ fn is_type2_target(target: &RemoteTarget) -> bool {
             .and_then(|bytes| bytes.first())
             .map(|b| b & 0x60 == 0x00)
             .unwrap_or(false)
+}
+
+impl<T: Transport> Device<T> {
+    fn map_fault<U>(
+        result: std::result::Result<U, DriverError>,
+        treat_rf_off_as_broken: bool,
+    ) -> Result<U> {
+        result.map_err(|error| match error {
+            DriverError::Fault(fault) => convert_fault_to_comm_error(fault, treat_rf_off_as_broken),
+            other => other,
+        })
+    }
 }
