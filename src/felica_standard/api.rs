@@ -807,22 +807,22 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
-    pub fn commit_registration(&mut self) -> Result<(), FelicaStandardError> {
+    pub fn change_system_block(&mut self) -> Result<(), FelicaStandardError> {
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
-            "Commit Registration",
-            FelicaStandardCommand::CommitRegistration,
+            "Change System Block",
+            FelicaStandardCommand::ChangeSystemBlock,
             timeout_ms,
         )?;
 
         match response {
-            FelicaStandardResponse::CommitRegistration {
+            FelicaStandardResponse::ChangeSystemBlock {
                 status_flag1,
                 status_flag2,
             } => {
                 if status_flag1 != 0 || status_flag2 != 0 {
                     Err(Self::status_error(
-                        "Commit Registration",
+                        "Change System Block",
                         status_flag1,
                         status_flag2,
                     ))
@@ -830,7 +830,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                     Ok(())
                 }
             }
-            _ => Err(unexpected_response("Commit Registration")),
+            _ => Err(unexpected_response("Change System Block")),
         }
     }
 }

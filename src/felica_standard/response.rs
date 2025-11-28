@@ -1,5 +1,5 @@
 use super::{
-    Authentication2Response, BLOCK_SIZE, COMMIT_REGISTRATION_COMMAND_CODE, MAX_BLOCK_LIST_LEN,
+    Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, MAX_BLOCK_LIST_LEN,
     MAX_SERVICE_CODES, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, RequestServiceV2KeyVersion,
     SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
@@ -80,7 +80,7 @@ pub enum FelicaStandardResponse {
         status_flag2: u8,
         remaining_blocks: u16,
     },
-    CommitRegistration {
+    ChangeSystemBlock {
         status_flag1: u8,
         status_flag2: u8,
     },
@@ -121,7 +121,7 @@ impl FelicaStandardResponse {
             REGISTER_ISSUE_ID_COMMAND_CODE => Self::parse_register_issue_id(data),
             REGISTER_AREA_COMMAND_CODE => Self::parse_register_area(data),
             REGISTER_SERVICE_COMMAND_CODE => Self::parse_register_service(data),
-            COMMIT_REGISTRATION_COMMAND_CODE => Self::parse_commit_registration(data),
+            CHANGE_SYSTEM_BLOCK_COMMAND_CODE => Self::parse_change_system_block(data),
             _ => Err(DriverError::Other(
                 "unsupported secure Felica command response".into(),
             )),
@@ -443,13 +443,13 @@ impl FelicaStandardResponse {
         })
     }
 
-    fn parse_commit_registration(data: &[u8]) -> DriverResult<Self> {
+    fn parse_change_system_block(data: &[u8]) -> DriverResult<Self> {
         if data.len() < 2 {
             return Err(DriverError::Other(
                 "commit registration response shorter than status flags".into(),
             ));
         }
-        Ok(FelicaStandardResponse::CommitRegistration {
+        Ok(FelicaStandardResponse::ChangeSystemBlock {
             status_flag1: data[0],
             status_flag2: data[1],
         })

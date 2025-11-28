@@ -31,4 +31,4 @@ pub(crate) const WRITE_COMMAND_CODE: u8 = 0x16;
 pub(crate) const REGISTER_ISSUE_ID_COMMAND_CODE: u8 = 0x80;
 pub(crate) const REGISTER_AREA_COMMAND_CODE: u8 = 0x82;
 pub(crate) const REGISTER_SERVICE_COMMAND_CODE: u8 = 0x84;
-pub(crate) const COMMIT_REGISTRATION_COMMAND_CODE: u8 = 0x8E;
+pub(crate) const CHANGE_SYSTEM_BLOCK_COMMAND_CODE: u8 = 0x8E;

@@ -1,5 +1,5 @@
 use super::{
-    BLOCK_SIZE, BlockListElement, COMMIT_REGISTRATION_COMMAND_CODE, IDM_LEN, MAX_BLOCK_LIST_LEN,
+    BLOCK_SIZE, BlockListElement, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, IDM_LEN, MAX_BLOCK_LIST_LEN,
     MAX_NODE_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, READ_COMMAND_CODE,
     REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
     ServiceCode, WRITE_COMMAND_CODE,
@@ -74,7 +74,7 @@ pub enum FelicaStandardCommand {
         service_code: u16,
         package: Vec<u8>,
     },
-    CommitRegistration,
+    ChangeSystemBlock,
 }
 
 struct PayloadBuilder {
@@ -327,8 +327,8 @@ impl FelicaStandardCommand {
                     payload,
                 }
             }
-            FelicaStandardCommand::CommitRegistration => CommandEncoding::Secure {
-                opcode: COMMIT_REGISTRATION_COMMAND_CODE,
+            FelicaStandardCommand::ChangeSystemBlock => CommandEncoding::Secure {
+                opcode: CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
                 payload: Vec::new(),
             },
         }
