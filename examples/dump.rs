@@ -31,6 +31,7 @@ struct SystemSummary {
     pmm: String,
     system_code_hex: String,
     system_key: Option<KeyVersionSummary>,
+    system_services: Vec<ServiceGroupSummary>,
     areas: Vec<AreaNode>,
     warnings: Vec<String>,
 }
@@ -143,17 +144,20 @@ fn summarize_system(
     let mut key_request_codes = Vec::new();
     register_service_code(&mut key_request_codes, &mut seen_codes, SYSTEM_SERVICE_CODE);
 
-    let (mut areas, mut warnings) =
+    let (mut areas, mut system_services, mut warnings) =
         collect_system_areas(&mut felica, &mut key_request_codes, &mut seen_codes)?;
 
     let mut key_versions = fetch_key_versions(&mut felica, &key_request_codes, &mut warnings);
 
     let system_key = key_versions.remove(&SYSTEM_SERVICE_CODE);
+    assign_system_key_versions(&mut system_services, &mut key_versions);
     for area in &mut areas {
         assign_area_key_versions(area, &mut key_versions);
     }
 
-    if let Err(err) = read_plaintext_services(&mut felica, &mut areas, &mut warnings) {
+    if let Err(err) =
+        read_plaintext_services(&mut felica, &mut areas, &mut system_services, &mut warnings)
+    {
         warnings.push(format!(
             "Reading plaintext blocks failed for system 0x{:04X}: {}",
             system_code, err
@@ -177,6 +181,7 @@ fn summarize_system(
         pmm,
         system_code_hex: hex_u16(system_code),
         system_key,
+        system_services,
         areas,
         warnings,
     })
@@ -208,8 +213,9 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
     felica: &mut FelicaStandard<'_, D>,
     key_request_codes: &mut Vec<ServiceCode>,
     seen_codes: &mut HashSet<u16>,
-) -> Result<(Vec<AreaNode>, Vec<String>), FelicaStandardError> {
+) -> Result<(Vec<AreaNode>, Vec<ServiceGroupSummary>, Vec<String>), FelicaStandardError> {
     let mut areas = Vec::new();
+    let mut system_services = Vec::new();
     let mut warnings = Vec::new();
     let mut index = 0x00u16;
     while index <= 0x00FF {
@@ -233,16 +239,30 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
             }
             Some(SearchServiceCodeResult::Service(service_code)) => {
                 warnings.push(format!(
-                    "Service 0x{:04X} at index 0x{:02X} has no parent area",
+                    "Service 0x{:04X} at index 0x{:02X} has no parent area; treating as system-level service",
                     service_code.raw(),
                     index
                 ));
                 register_service_code(key_request_codes, seen_codes, service_code.raw());
+                append_service_group(
+                    &mut system_services,
+                    ServiceSummary {
+                        service_code_raw: service_code.raw(),
+                        attributes_raw: service_code.attributes(),
+                        code_hex: hex_u16(service_code.raw()),
+                        number: service_code.number(),
+                        attributes_hex: hex_u8(service_code.attributes()),
+                        attributes_description: service_code
+                            .attributes_description()
+                            .map(|desc| desc.to_string()),
+                        key_version: None,
+                    },
+                );
                 index = index.saturating_add(1);
             }
         }
     }
-    Ok((areas, warnings))
+    Ok((areas, system_services, warnings))
 }
 
 fn collect_area<D: FelicaDriver + ?Sized>(
@@ -335,6 +355,23 @@ fn append_service_child(children: &mut Vec<AreaChild>, summary: ServiceSummary) 
     }
 }
 
+fn append_service_group(groups: &mut Vec<ServiceGroupSummary>, summary: ServiceSummary) {
+    if let Some(group) = groups
+        .iter_mut()
+        .find(|group| group.number == summary.number)
+    {
+        group.services.push(summary);
+    } else {
+        let number = summary.number;
+        groups.push(ServiceGroupSummary {
+            number,
+            number_hex: hex_u16(number),
+            services: vec![summary],
+            read_without_encryption_blocks: None,
+        });
+    }
+}
+
 fn register_service_code(
     service_codes: &mut Vec<ServiceCode>,
     seen_codes: &mut HashSet<u16>,
@@ -370,6 +407,15 @@ fn assign_area_key_versions(
     }
 }
 
+fn assign_system_key_versions(
+    system_services: &mut [ServiceGroupSummary],
+    key_versions: &mut HashMap<u16, KeyVersionSummary>,
+) {
+    for group in system_services {
+        assign_group_key_versions(group, key_versions);
+    }
+}
+
 fn assign_group_key_versions(
     group: &mut ServiceGroupSummary,
     key_versions: &mut HashMap<u16, KeyVersionSummary>,
@@ -384,11 +430,12 @@ fn assign_group_key_versions(
 fn read_plaintext_services<D: FelicaDriver + ?Sized>(
     felica: &mut FelicaStandard<'_, D>,
     areas: &mut [AreaNode],
+    system_services: &mut [ServiceGroupSummary],
     warnings: &mut Vec<String>,
 ) -> Result<(), FelicaStandardError> {
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
-    collect_plaintext_service_codes(areas, &mut targets, &mut seen);
+    collect_plaintext_service_codes(areas, system_services, &mut targets, &mut seen);
     if targets.is_empty() {
         return Ok(());
     }
@@ -408,17 +455,21 @@ fn read_plaintext_services<D: FelicaDriver + ?Sized>(
         }
     }
 
-    assign_read_blocks(areas, &mut read_results);
+    assign_read_blocks(areas, system_services, &mut read_results);
     Ok(())
 }
 
 fn collect_plaintext_service_codes(
     areas: &[AreaNode],
+    system_services: &[ServiceGroupSummary],
     targets: &mut Vec<u16>,
     seen: &mut HashSet<u16>,
 ) {
     for area in areas {
         collect_plaintext_children(&area.children, targets, seen);
+    }
+    for group in system_services {
+        collect_plaintext_service_group(group, targets, seen);
     }
 }
 
@@ -486,9 +537,16 @@ fn read_service_blocks<D: FelicaDriver + ?Sized>(
     Ok(blocks_hex)
 }
 
-fn assign_read_blocks(areas: &mut [AreaNode], results: &mut HashMap<u16, Vec<String>>) {
+fn assign_read_blocks(
+    areas: &mut [AreaNode],
+    system_services: &mut [ServiceGroupSummary],
+    results: &mut HashMap<u16, Vec<String>>,
+) {
     for area in areas {
         assign_read_blocks_in_area(area, results);
+    }
+    for group in system_services {
+        assign_read_blocks_in_group(group, results);
     }
 }
 
