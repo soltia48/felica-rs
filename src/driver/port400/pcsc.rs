@@ -210,7 +210,7 @@ impl<T: Transport> Pcsc<T> {
 
     pub fn card_baudrate(&mut self) -> Result<Option<u32>> {
         let data = self.get_data(GET_CARD_BAUDRATE_SELECTOR)?;
-        let rate = data.get(0).and_then(|code| match code {
+        let rate = data.first().and_then(|code| match code {
             1 => Some(106),
             2 => Some(212),
             3 => Some(424),
@@ -568,7 +568,7 @@ impl<T: Transport> Pcsc<T> {
             }
         }
         if timeout > Duration::from_millis(0) {
-            let micros = (timeout.as_millis() as u128 * 1_000).min(u32::MAX as u128) as u32;
+            let micros = (timeout.as_millis() * 1_000).min(u32::MAX as u128) as u32;
             fields.push(0x5F);
             fields.push(0x46);
             fields.push(4);
@@ -693,7 +693,7 @@ impl<T: Transport> Pcsc<T> {
     fn parse_transparent_response(data: &[u8]) -> Result<TransparentExchangeResult> {
         let mut idx = 0;
         let mut result = TransparentExchangeResult::default();
-        while idx + 1 <= data.len() {
+        while idx < data.len() {
             let tag = data[idx];
             idx += 1;
             match tag {
@@ -817,7 +817,7 @@ impl<T: Transport> Pcsc<T> {
     fn status_error(value: &[u8]) -> DriverError {
         let text = format!(
             "status {:02X}{:02X}{:02X}",
-            value.get(0).copied().unwrap_or_default(),
+            value.first().copied().unwrap_or_default(),
             value.get(1).copied().unwrap_or_default(),
             value.get(2).copied().unwrap_or_default()
         );

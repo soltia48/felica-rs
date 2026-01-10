@@ -1,5 +1,6 @@
 use crate::clf::errors::UnsupportedTargetError;
 
+/// Validates a bitrate string (e.g., "106A", "212F").
 fn validate_brty(part: &str) -> bool {
     if part.len() < 2 {
         return false;
@@ -8,6 +9,7 @@ fn validate_brty(part: &str) -> bool {
     digits.chars().all(|c| c.is_ascii_digit()) && suffix.chars().all(|c| c.is_ascii_uppercase())
 }
 
+/// Parses a bitrate specification which may contain send/receive rates separated by '/'.
 fn parse_brty(value: &str) -> Result<(String, String), UnsupportedTargetError> {
     let mut parts = value.splitn(2, '/');
     let send = parts
@@ -17,46 +19,21 @@ fn parse_brty(value: &str) -> Result<(String, String), UnsupportedTargetError> {
     if !validate_brty(send) {
         return Err(UnsupportedTargetError(format!("invalid bitrate: {}", send)));
     }
-    if let Some(recv) = parts.next() {
-        if !validate_brty(recv) {
+    let recv = match parts.next() {
+        Some(recv) if !validate_brty(recv) => {
             return Err(UnsupportedTargetError(format!(
                 "invalid receive bitrate: {}",
                 recv
             )));
         }
-        Ok((send.to_string(), recv.to_string()))
-    } else {
-        Ok((send.to_string(), send.to_string()))
-    }
+        Some(recv) => recv.to_string(),
+        None => send.to_string(),
+    };
+    Ok((send.to_string(), recv))
 }
 
-fn default_target() -> TargetData {
-    TargetData {
-        sens_req: None,
-        sens_res: None,
-        sel_req: None,
-        sel_res: None,
-        sdd_res: None,
-        rid_res: None,
-        sensb_req: None,
-        sensb_res: None,
-        sensf_req: None,
-        sensf_res: None,
-        rats_res: None,
-        rats_cmd: None,
-        psl_req: None,
-        atr_req: None,
-        atr_res: None,
-        tt2_cmd: None,
-        tt3_cmd: None,
-        tt4_cmd: None,
-        dep_req: None,
-        mf_halted: false,
-        arae: false,
-    }
-}
-
-#[derive(Debug, Clone)]
+/// NFC target data fields for various protocols.
+#[derive(Debug, Clone, Default)]
 pub struct TargetData {
     pub sens_req: Option<Vec<u8>>,
     pub sens_res: Option<Vec<u8>>,
@@ -81,12 +58,6 @@ pub struct TargetData {
     pub arae: bool,
 }
 
-impl Default for TargetData {
-    fn default() -> Self {
-        default_target()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RemoteTarget {
     brty_send: String,
@@ -101,7 +72,7 @@ impl RemoteTarget {
         Ok(Self {
             brty_send,
             brty_recv,
-            data: default_target(),
+            data: TargetData::default(),
         })
     }
 
@@ -142,7 +113,7 @@ impl LocalTarget {
         Ok(Self {
             brty_send: brty.clone(),
             brty_recv: brty,
-            data: default_target(),
+            data: TargetData::default(),
         })
     }
 
@@ -183,6 +154,6 @@ impl LocalTarget {
 
 impl TargetData {
     pub fn reset(&mut self) {
-        *self = default_target();
+        *self = Self::default();
     }
 }

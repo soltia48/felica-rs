@@ -1,6 +1,6 @@
 use crate::driver::errors::DriverError;
-use crate::driver::port100::driver::{Device as Port100Driver, open_port100_device};
-use crate::driver::port400::driver::{Device as Port400Driver, open_port400_device};
+use crate::driver::port100::{Device as Port100Driver, open_port100_device};
+use crate::driver::port400::{Device as Port400Driver, open_port400_device};
 use crate::felica_standard::FelicaDriver;
 use crate::transport::usb::UsbTransport;
 

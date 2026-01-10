@@ -1,7 +1,7 @@
-use super::device::Device;
-use super::errors::{DriverError, Result};
 use crate::clf::errors::UnsupportedTargetError;
 use crate::clf::targets::{LocalTarget, RemoteTarget};
+use crate::driver::errors::{DriverError, Result};
+use crate::driver::port100::device::Device;
 use crate::felica_standard::{
     FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult,
 };
@@ -222,13 +222,9 @@ impl<T: Transport> Device<T> {
         };
         let frame = command.to_frame();
         debug!("send SENSF_REQ {}", hex::encode(&frame));
-        let response = match self
+        let response = self
             .chipset
-            .initiator_exchange_rf(&frame, timeout_ms as u16)
-        {
-            Ok(data) => data,
-            Err(err) => return Err(err),
-        };
+            .initiator_exchange_rf(&frame, timeout_ms as u16)?;
 
         match FelicaStandardResponse::from_bytes(&response) {
             Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {
@@ -509,7 +505,7 @@ impl<T: Transport> Device<T> {
             debug!("T({}) = {}", params.len(), hex::encode(params));
         }
         let did_supported = tc.map(|value| value & 0x02 != 0).unwrap_or(true);
-        let cmd_with_did = cmd.get(0).map(|value| value & 0x08 != 0).unwrap_or(false);
+        let cmd_with_did = cmd.first().map(|value| value & 0x08 != 0).unwrap_or(false);
         (cmd_with_did && did_supported && cmd.get(1).copied() == Some(did))
             || (did == 0 && !cmd_with_did)
     }
@@ -565,17 +561,18 @@ impl<T: Transport> Device<T> {
 
             let frame = exchange.payload();
 
-            if exchange.len_matches_len_byte() {
-                if let Some(ref req) = sensf_req {
-                    if frame.len() >= 18 && frame.len() > 10 && frame[2..10] == sensf_res[1..9] {
-                        device.chipset.configure_target(&[("rf_off_error", 1)])?;
-                        let mut local = LocalTarget::new(target.brty_send())?;
-                        local.data.sensf_req = Some(req.clone());
-                        local.data.sensf_res = Some(sensf_res.clone());
-                        local.data.tt3_cmd = Some(frame[1..].to_vec());
-                        return Ok(Some(local));
-                    }
-                }
+            if exchange.len_matches_len_byte()
+                && let Some(ref req) = sensf_req
+                && frame.len() >= 18
+                && frame.len() > 10
+                && frame[2..10] == sensf_res[1..9]
+            {
+                device.chipset.configure_target(&[("rf_off_error", 1)])?;
+                let mut local = LocalTarget::new(target.brty_send())?;
+                local.data.sensf_req = Some(req.clone());
+                local.data.sensf_res = Some(sensf_res.clone());
+                local.data.tt3_cmd = Some(frame[1..].to_vec());
+                return Ok(Some(local));
             }
 
             if exchange.raw().len() == 13
@@ -886,7 +883,7 @@ impl<T: Transport> Device<T> {
 }
 
 fn ensure_supported_bitrate(brty: &str, allowed: &[&str], error_prefix: &str) -> Result<()> {
-    if allowed.iter().any(|&candidate| candidate == brty) {
+    if allowed.contains(&brty) {
         Ok(())
     } else {
         Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
@@ -913,6 +910,7 @@ fn cascade_uid(uid: &[u8]) -> Vec<u8> {
     out
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Tt4Step {
     Continue,
     QueueResponse(Vec<u8>),
@@ -1029,7 +1027,7 @@ impl<'a> ExchangeView<'a> {
     }
 
     fn decode_bitrate(data: &[u8]) -> Bitrate {
-        data.get(0)
+        data.first()
             .copied()
             .map(Self::decode_target_bitrate)
             .unwrap_or(Bitrate::Unknown(0))

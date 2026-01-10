@@ -42,7 +42,7 @@ impl ServiceCode {
         }
     }
 
-    pub(crate) fn to_le_bytes(&self) -> [u8; 2] {
+    pub(crate) fn to_le_bytes(self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
 }

@@ -1,8 +1,8 @@
-use super::chipset::Chipset;
-use super::errors::{DriverError, Result, convert_fault_to_comm_error};
 use crate::clf::crc;
 use crate::clf::errors::CommunicationError;
 use crate::clf::targets::RemoteTarget;
+use crate::driver::errors::{DriverError, Result, convert_fault_to_comm_error};
+use crate::driver::port100::chipset::Chipset;
 use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::io::{self, ErrorKind};
 
 pub struct Device<T: Transport> {
-    pub(super) chipset: Chipset<T>,
+    pub(crate) chipset: Chipset<T>,
     vendor_name: Option<String>,
     product_name: Option<String>,
     chipset_name: String,

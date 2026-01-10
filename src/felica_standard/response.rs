@@ -283,7 +283,7 @@ impl FelicaStandardResponse {
     fn parse_search_service_code(idm: Vec<u8>, data: &[u8]) -> DriverResult<Self> {
         Self::ensure_response_len(data, 12, "short search service code response")?;
         let payload = &data[10..];
-        let result = if payload == &[0xFF, 0xFF] {
+        let result = if payload == [0xFF, 0xFF] {
             None
         } else if payload.len() == 2 {
             Some(SearchServiceCodeResult::Service(ServiceCode::new(

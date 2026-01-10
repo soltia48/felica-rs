@@ -59,20 +59,17 @@ impl UsbTransport {
             }
         }
 
-        let in_ep =
-            in_ep.ok_or_else(|| Error::new(ErrorKind::Other, "missing bulk IN endpoint"))?;
-        let out_ep =
-            out_ep.ok_or_else(|| Error::new(ErrorKind::Other, "missing bulk OUT endpoint"))?;
+        let in_ep = in_ep.ok_or_else(|| Error::other("missing bulk IN endpoint"))?;
+        let out_ep = out_ep.ok_or_else(|| Error::other("missing bulk OUT endpoint"))?;
         let interface = interface_number.unwrap_or(0);
 
         let device_handle = handle;
         if device_handle
             .kernel_driver_active(interface)
             .unwrap_or(false)
+            && let Err(err) = device_handle.detach_kernel_driver(interface)
         {
-            if let Err(err) = device_handle.detach_kernel_driver(interface) {
-                debug!("failed to detach kernel driver: {:?}", err);
-            }
+            debug!("failed to detach kernel driver: {:?}", err);
         }
         device_handle
             .claim_interface(interface)
@@ -107,7 +104,7 @@ impl Transport for UsbTransport {
         handle
             .write_bulk(self.out_ep, data, DEFAULT_TIMEOUT)
             .map_err(rusb_to_io_error)?;
-        if self.max_packet_size > 0 && (data.len() as u16) % self.max_packet_size == 0 {
+        if self.max_packet_size > 0 && (data.len() as u16).is_multiple_of(self.max_packet_size) {
             handle
                 .write_bulk(self.out_ep, &[], DEFAULT_TIMEOUT)
                 .map_err(rusb_to_io_error)?;
@@ -169,8 +166,8 @@ fn rusb_to_io_error(err: rusb::Error) -> io::Error {
     match err {
         rusb::Error::Timeout => Error::new(ErrorKind::TimedOut, err),
         rusb::Error::NoDevice => Error::new(ErrorKind::NotFound, err),
-        rusb::Error::Busy => Error::new(ErrorKind::Other, err),
+        rusb::Error::Busy => Error::other(err),
         rusb::Error::Access => Error::new(ErrorKind::PermissionDenied, err),
-        other => Error::new(ErrorKind::Other, other),
+        other => Error::other(other),
     }
 }

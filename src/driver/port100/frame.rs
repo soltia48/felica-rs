@@ -107,7 +107,7 @@ fn checksum(bytes: &[u8]) -> u8 {
 
 fn checksum_matches(bytes: &[u8], checksum: u8) -> bool {
     let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    (sum + checksum as u16) % 256 == 0
+    (sum + checksum as u16).is_multiple_of(256)
 }
 
 fn has_preamble(data: &[u8]) -> bool {

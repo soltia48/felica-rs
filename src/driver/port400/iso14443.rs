@@ -121,7 +121,7 @@ impl IsoDepConfig {
     }
 
     pub fn update_pcd_ifs(&mut self, ifs: u8) {
-        let clamped = ifs.max(16).min(255);
+        let clamped = ifs.clamp(16, 255);
         self.fsdi = bytes_to_fdsi(clamped as usize);
     }
 
@@ -452,7 +452,7 @@ pub fn next_iso_dep_i_frame(
     let chunk = &payload[*offset..*offset + take];
     *offset += take;
     let has_more = *offset < payload.len();
-    let block_chaining = has_more || (!has_more && chaining);
+    let block_chaining = has_more || chaining;
     let frame = build_iso_dep_i_block(state, chunk, block_chaining);
     Some(IsoDepIFrame {
         frame,
@@ -471,10 +471,10 @@ pub fn parse_iso_dep_response(state: &IsoDepState, data: &[u8]) -> Result<IsoDep
         let cid = *data
             .get(offset)
             .ok_or_else(|| DriverError::Other("ISO-DEP response missing CID".into()))?;
-        if let Some(expected) = state.cid() {
-            if cid != expected {
-                return Err(DriverError::Other("ISO-DEP CID mismatch".into()));
-            }
+        if let Some(expected) = state.cid()
+            && cid != expected
+        {
+            return Err(DriverError::Other("ISO-DEP CID mismatch".into()));
         }
         offset += 1;
     }

@@ -884,7 +884,7 @@ fn generate_registration_package(
     package_plain: &[u8],
     package_key: &[u8; DES_BLOCK_SIZE],
 ) -> Result<Vec<u8>, FelicaStandardError> {
-    if package_plain.is_empty() || package_plain.len() % DES_BLOCK_SIZE != 0 {
+    if package_plain.is_empty() || !package_plain.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err(FelicaStandardError::InvalidParameter(
             "registration package must be multiple of 8 bytes".into(),
         ));

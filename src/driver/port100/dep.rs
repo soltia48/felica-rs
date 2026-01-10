@@ -1,11 +1,11 @@
-use super::device::Device;
-use super::errors::{DriverError, Result};
 use crate::clf::errors::CommunicationError;
+use crate::driver::errors::{DriverError, Result};
+use crate::driver::port100::device::Device;
 use crate::transport::Transport;
 use log::{debug, warn};
 
 impl<T: Transport> Device<T> {
-    pub(super) fn dep_verify_frame(
+    pub(crate) fn dep_verify_frame(
         &self,
         brty: &str,
         data: &[u8],
@@ -14,7 +14,7 @@ impl<T: Transport> Device<T> {
         dep_parse_frame(brty, data, cmd_set)
     }
 
-    pub(super) fn dep_send_frame(
+    pub(crate) fn dep_send_frame(
         &mut self,
         brty: &str,
         payload: Option<&[u8]>,
@@ -41,7 +41,7 @@ impl<T: Transport> Device<T> {
             .map(|frame| frame.payload))
     }
 
-    pub(super) fn dep_handle_psl(
+    pub(crate) fn dep_handle_psl(
         &mut self,
         brty: &str,
         data: &[u8],
@@ -69,7 +69,7 @@ impl<T: Transport> Device<T> {
         Ok(Some((new_brty.to_string(), data.to_vec())))
     }
 
-    pub(super) fn dep_send_simple_response(
+    pub(crate) fn dep_send_simple_response(
         &mut self,
         brty: &str,
         code: u8,
@@ -84,7 +84,7 @@ impl<T: Transport> Device<T> {
 
 fn dep_parse_frame(brty: &str, data: &[u8], cmd_set: &[u8]) -> Option<DepFrame> {
     let offset = dep_offset(brty);
-    if brty == "106A" && data.get(0) != Some(&0xF0) {
+    if brty == "106A" && data.first() != Some(&0xF0) {
         dep_warn(brty, "received frame has invalid start byte");
         return None;
     }
@@ -137,7 +137,7 @@ fn dep_warn(brty: &str, message: &str) {
     warn!("{brty}: {message}");
 }
 
-pub(super) struct DepFrame {
+pub(crate) struct DepFrame {
     #[allow(unused)]
     pub code: u8,
     pub payload: Vec<u8>,

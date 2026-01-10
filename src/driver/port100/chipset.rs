@@ -1,4 +1,4 @@
-use super::errors::{CommunicationFault, DriverError, Result, ensure_status_ok};
+use crate::driver::errors::{CommunicationFault, DriverError, Result, ensure_status_ok};
 use crate::driver::port100::frame::{self, Frame, FrameType};
 use crate::transport::Transport;
 use log::{debug, warn};
@@ -15,7 +15,7 @@ const IN_SET_PROTOCOL_DEFAULTS: [u8; 38] = [
 const TG_SET_PROTOCOL_DEFAULTS: [u8; 6] = [0x00, 0x01, 0x01, 0x01, 0x02, 0x07];
 
 pub struct Chipset<T: Transport> {
-    pub(super) transport: T,
+    pub(crate) transport: T,
     firmware_version: (u8, u8),
     read_buffer: VecDeque<u8>,
 }
@@ -239,10 +239,11 @@ impl<T: Transport> Chipset<T> {
         }
 
         let rsp = self.send_command(0x48, &payload)?;
-        if rsp.len() >= 7 && rsp[3..7] != [0, 0, 0, 0] {
-            if let Some(fault) = CommunicationFault::from_status(&rsp[3..7]) {
-                return Err(DriverError::Fault(fault));
-            }
+        if rsp.len() >= 7
+            && rsp[3..7] != [0, 0, 0, 0]
+            && let Some(fault) = CommunicationFault::from_status(&rsp[3..7])
+        {
+            return Err(DriverError::Fault(fault));
         }
         Ok(rsp)
     }
@@ -385,7 +386,7 @@ impl<T: Transport> Chipset<T> {
         let payload = frame
             .into_payload()
             .ok_or_else(|| DriverError::Other("unexpected frame type".into()))?;
-        if payload.get(0) == Some(&0xD7) && payload.get(1) == Some(&code.wrapping_add(1)) {
+        if payload.first() == Some(&0xD7) && payload.get(1) == Some(&code.wrapping_add(1)) {
             Ok(payload[2..].to_vec())
         } else {
             Err(DriverError::Other("unexpected response".into()))

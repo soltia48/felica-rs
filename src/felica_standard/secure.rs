@@ -165,7 +165,7 @@ impl<'a> SecureResponse<'a> {
 impl Authentication2Response {
     pub fn decrypt_payload(&self, session_key: &[u8; 8]) -> Result<Vec<u8>, FelicaStandardError> {
         let plaintext = decrypt_des_cbc_zero_iv(&self.encrypted_payload, session_key)
-            .map_err(|e| FelicaStandardError::SecureSession(e))?;
+            .map_err(FelicaStandardError::SecureSession)?;
         if !check_packet_mac(&plaintext, 0x13) {
             return Err(FelicaStandardError::SecureSession(
                 "authentication2 response MAC verification failed".into(),
@@ -238,7 +238,7 @@ fn decrypt_3des_block(data: &[u8; 8], key1: &[u8; 8], key2: &[u8; 8]) -> [u8; 8]
 }
 
 pub(crate) fn encrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<u8>, String> {
-    if data.len() % DES_BLOCK_SIZE != 0 {
+    if !data.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("secure command payload length must be multiple of 8 bytes".into());
     }
     let cipher = des_cipher(key);
@@ -259,7 +259,7 @@ pub(crate) fn encrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
 }
 
 fn decrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<u8>, String> {
-    if data.len() % DES_BLOCK_SIZE != 0 {
+    if !data.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("authentication2 response length must be multiple of 8 bytes".into());
     }
     let cipher = des_cipher(key);
@@ -307,7 +307,7 @@ pub fn generate_service_keys(
 }
 
 fn calculate_command_mac(command_code: u8, payload: &[u8]) -> Result<[u8; DES_BLOCK_SIZE], String> {
-    if payload.len() % DES_BLOCK_SIZE != 0 {
+    if !payload.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("secure command payload must be multiple of 8 bytes".into());
     }
     let total_length = 2 + payload.len() + DES_BLOCK_SIZE;
@@ -326,7 +326,7 @@ fn calculate_command_mac(command_code: u8, payload: &[u8]) -> Result<[u8; DES_BL
 }
 
 fn check_packet_mac(data: &[u8], expected_response_code: u8) -> bool {
-    if data.len() % DES_BLOCK_SIZE != 0 || data.len() < 16 {
+    if !data.len().is_multiple_of(DES_BLOCK_SIZE) || data.len() < 16 {
         return false;
     }
     let (payload, mac) = data.split_at(data.len() - 8);

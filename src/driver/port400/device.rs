@@ -1,12 +1,12 @@
-use super::iso14443::{
+use crate::clf::errors::UnsupportedTargetError;
+use crate::clf::targets::RemoteTarget;
+use crate::driver::errors::{DriverError, Result};
+use crate::driver::port400::iso14443::{
     ISO_DEP_S_DESELECT, ISO_DEP_S_IFS, ISO_DEP_S_WTX, IsoDepBlockType, IsoDepConfig, IsoDepIFrame,
     IsoDepSession, IsoDepState, build_iso_dep_r_block, build_iso_dep_s_block, extend_timeout,
     next_iso_dep_i_frame, parse_iso_dep_response, wtx_multiplier,
 };
-use super::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
-use crate::clf::errors::UnsupportedTargetError;
-use crate::clf::targets::RemoteTarget;
-use crate::driver::errors::{DriverError, Result};
+use crate::driver::port400::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
 use crate::felica_standard::{
     FelicaDriver, FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult,
 };
@@ -32,7 +32,6 @@ const RFFE_PARAM_PD_SC_DPC: u8 = 0x02;
 const RFFE_PARAM_PROTOCOL_CONFIGURATION: u8 = 0x03;
 const DIAG_COMMUNICATION_LINE_SIZE_MAX: usize = 500;
 const DIAG_POLLING_COUNT_MIN: u8 = 1;
-const DIAG_POLLING_COUNT_MAX: u8 = 255;
 
 pub struct Device<T: Transport> {
     pcsc: Pcsc<T>,
@@ -43,8 +42,9 @@ pub struct Device<T: Transport> {
     iso_dep_protocol: Option<ThroughProtocol>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ThroughProtocol {
+    #[default]
     Felica,
     Iso14443TypeA,
     Iso14443TypeB,
@@ -60,12 +60,6 @@ pub struct ThroughOptions {
     pub expect_parity: Option<bool>,
     pub append_protocol_prologue: Option<bool>,
     pub tx_valid_bits: Option<u8>,
-}
-
-impl Default for ThroughProtocol {
-    fn default() -> Self {
-        ThroughProtocol::Felica
-    }
 }
 
 impl ThroughProtocol {
@@ -327,9 +321,7 @@ impl<T: Transport> Device<T> {
 
     pub fn detect_type_b(&mut self, options: Option<TypeBDetectOptions>) -> Result<Vec<u8>> {
         let opts = options.unwrap_or_default();
-        let mut config = opts
-            .iso_dep
-            .unwrap_or_else(|| IsoDepConfig::type_b_defaults());
+        let mut config = opts.iso_dep.unwrap_or_else(IsoDepConfig::type_b_defaults);
         let info = self.prepare_type_b_link(&mut config, &opts)?;
         self.start_iso_dep_session(ThroughProtocol::Iso14443TypeB, config);
         self.refresh_card_baudrate()?;
@@ -365,9 +357,7 @@ impl<T: Transport> Device<T> {
         options: Option<TypeBDetectOptions>,
     ) -> Result<TypeBCardInfo> {
         let opts = options.unwrap_or_default();
-        let mut config = opts
-            .iso_dep
-            .unwrap_or_else(|| IsoDepConfig::type_b_defaults());
+        let mut config = opts.iso_dep.unwrap_or_else(IsoDepConfig::type_b_defaults);
         let info = self.prepare_type_b_link(&mut config, &opts)?;
         let (dri, dsi) = data_rate_symbols(&config);
         let attrib_cmd = build_type_b_attrib_command(&info, &config, dri, dsi);
@@ -599,7 +589,7 @@ impl<T: Transport> Device<T> {
         match code {
             ISO_DEP_S_WTX => {
                 let wtxm = payload
-                    .get(0)
+                    .first()
                     .copied()
                     .ok_or_else(|| DriverError::Other("Invalid WTX block".into()))?;
                 state.record_wtx_attempt(session.config().max_try_s_wtx)?;
@@ -613,7 +603,7 @@ impl<T: Transport> Device<T> {
             }
             ISO_DEP_S_IFS => {
                 let new_ifs = payload
-                    .get(0)
+                    .first()
                     .copied()
                     .ok_or_else(|| DriverError::Other("Invalid IFS block".into()))?;
                 session.config_mut().update_pcd_ifs(new_ifs);
@@ -733,7 +723,7 @@ impl<T: Transport> Device<T> {
                 Ok(DiagnoseResult::Ram(result))
             }
             DiagnoseCommand::Polling { protocol, count } => {
-                if count < DIAG_POLLING_COUNT_MIN || count > DIAG_POLLING_COUNT_MAX {
+                if count < DIAG_POLLING_COUNT_MIN {
                     return Err(DriverError::Other(
                         "diagnostic polling count out of range".into(),
                     ));
@@ -1168,7 +1158,7 @@ fn next_cascade_code(sel_code: u8) -> Result<u8> {
 }
 
 fn append_uid_block(uid: &mut Vec<u8>, block: &[u8]) {
-    if block.get(0) == Some(&0x88) && block.len() >= 4 {
+    if block.first() == Some(&0x88) && block.len() >= 4 {
         uid.extend_from_slice(&block[1..4]);
     } else {
         uid.extend_from_slice(block);

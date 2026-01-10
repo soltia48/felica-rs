@@ -1,19 +1,68 @@
+//! # nfc-rs
+//!
+//! A Rust library for interacting with NFC (Near Field Communication) devices,
+//! with support for Sony's NFC Port-100 (RC-S380) and Port-400 readers.
+//!
+//! ## Features
+//!
+//! - Support for NFC Port-100 (RC-S380) readers
+//! - Support for NFC Port-400 readers
+//! - FeliCa Standard protocol implementation
+//! - USB transport layer
+//!
+//! ## Quick Start
+//!
+//! ```no_run
+//! use nfc_rs::prelude::*;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Open the first available reader
+//!     let mut reader = open_reader(ReaderPreference::Auto)?;
+//!
+//!     println!("Reader: {} - {}",
+//!         reader.vendor_name().unwrap_or("Unknown"),
+//!         reader.product_name().unwrap_or("Unknown"));
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Module Structure
+//!
+//! - [`clf`] - Contactless Frontend utilities (CRC, errors, targets)
+//! - [`driver`] - Hardware driver implementations for NFC readers
+//! - [`felica_standard`] - FeliCa Standard protocol implementation
+//! - [`reader`] - High-level reader abstraction
+//! - [`transport`] - Transport layer abstractions (USB)
+//! - [`prelude`] - Convenient re-exports of common types
+
 pub mod clf;
 pub mod driver;
 pub mod felica_standard;
+pub mod prelude;
 pub mod reader;
 pub mod transport;
 
-pub use clf::{errors::*, targets::*};
-pub use driver::port100;
-pub use driver::port100::driver::{Chipset, Device, init as init_port100, open_port100_device};
-pub use driver::port400;
-pub use driver::port400::driver::{
-    Device as Port400Device, init as init_port400, open_port400_device,
-};
+// Re-export error types at crate root
+pub use clf::errors::{CommunicationError, UnsupportedTargetError};
+
+// Re-export target types at crate root
+pub use clf::targets::{LocalTarget, RemoteTarget, TargetData};
+
+// Re-export reader types at crate root
+pub use reader::{Reader, ReaderPreference, open_reader};
+
+// Re-export transport types
+pub use transport::usb::UsbTransport;
+
+// Re-export FeliCa Standard types
 pub use felica_standard::{
-    AuthenticatedContext, BlockListElement, FelicaStandard, FelicaStandardError,
+    AuthenticatedContext, BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError,
     MutualAuthenticationResult, SearchServiceCodeResult, ServiceCode,
 };
-pub use reader::{Reader, ReaderPreference, open_reader};
-pub use transport::usb::UsbTransport;
+
+// Re-export driver modules and key types
+pub use driver::port100::{self, Chipset, Device, init as init_port100, open_port100_device};
+pub use driver::port400::{
+    self, Device as Port400Device, init as init_port400, open_port400_device,
+};

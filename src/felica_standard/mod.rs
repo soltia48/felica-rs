@@ -1,5 +1,34 @@
+//! FeliCa Standard protocol implementation.
+//!
+//! This module provides a complete implementation of the FeliCa Standard protocol
+//! for communicating with FeliCa cards (Type 3 NFC tags).
+//!
+//! ## Key Types
+//!
+//! - [`FelicaStandard`] - Main interface for FeliCa card operations
+//! - [`FelicaDriver`] - Trait implemented by NFC reader drivers
+//! - [`ServiceCode`] - FeliCa service code representation
+//! - [`BlockListElement`] - Block list element for read/write operations
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use nfc_rs::prelude::*;
+//!
+//! fn read_card(reader: &mut Reader) -> Result<(), FelicaStandardError> {
+//!     // Poll for a FeliCa card with any system code
+//!     let (mut felica, polling) = FelicaStandard::polling(
+//!         reader.driver_mut(), "212F", 0xFFFF, 0x00, 0x00
+//!     )?;
+//!     
+//!     println!("Found card with IDm: {:02X?}", felica.idm());
+//!     Ok(())
+//! }
+//! ```
+
 mod api;
 mod command;
+mod constants;
 mod error;
 mod response;
 mod secure;
@@ -18,17 +47,4 @@ pub use types::{
 };
 
 pub(crate) use command::frame_with_length_prefix;
-
-pub(crate) const IDM_LEN: usize = 8;
-pub(crate) const MAX_SERVICE_CODES: usize = 0x20;
-pub(crate) const MAX_RW_SERVICE_CODES: usize = 0x10;
-pub(crate) const MAX_BLOCK_LIST_LEN: usize = 0xFF;
-pub(crate) const MAX_NODE_CODES: usize = 0x20;
-pub(crate) const BLOCK_SIZE: usize = 16;
-pub(crate) const DES_BLOCK_SIZE: usize = 8;
-pub(crate) const READ_COMMAND_CODE: u8 = 0x14;
-pub(crate) const WRITE_COMMAND_CODE: u8 = 0x16;
-pub(crate) const REGISTER_ISSUE_ID_COMMAND_CODE: u8 = 0x80;
-pub(crate) const REGISTER_AREA_COMMAND_CODE: u8 = 0x82;
-pub(crate) const REGISTER_SERVICE_COMMAND_CODE: u8 = 0x84;
-pub(crate) const CHANGE_SYSTEM_BLOCK_COMMAND_CODE: u8 = 0x8E;
+pub(crate) use constants::*;
