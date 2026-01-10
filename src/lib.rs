@@ -66,3 +66,4 @@ pub use driver::port100::{self, Chipset, Device, init as init_port100, open_port
 pub use driver::port400::{
     self, Device as Port400Device, init as init_port400, open_port400_device,
 };
+pub use driver::remote::{self, RemoteDriver, RemoteRequest, RemoteResponse, RemoteResponseData};
