@@ -1,6 +1,6 @@
 # nfc-rs
 
-A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380) and Port-400 readers.
+A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380) and Port-400 (Sony RC-S300) readers.
 
 ## Features
 
