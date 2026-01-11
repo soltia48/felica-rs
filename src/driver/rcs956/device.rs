@@ -30,8 +30,9 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
 /// Opens an RC-S956 device (RC-S330/RC-S360/RC-S370).
 pub fn open_rcs956_device() -> Result<Device<UsbTransport>> {
     const SONY_VID: u16 = 0x054C;
-    // RC-S330: 0x01BB, RC-S360: 0x02E1, RC-S370: 0x02E1
-    const PRODUCT_IDS: [u16; 3] = [0x01BB, 0x02E1, 0x0193];
+    // RC-S330: 0x02E1, RC-S360/RC-S370: 0x02E1, 0x0193
+    // Note: 0x01BB is RC-S320, which uses a different protocol
+    const PRODUCT_IDS: [u16; 2] = [0x02E1, 0x0193];
 
     let mut last_error: Option<io::Error> = None;
     for pid in PRODUCT_IDS {

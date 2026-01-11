@@ -106,46 +106,50 @@ impl<T: Transport> Device<T> {
             system_code, request_code, time_slots
         );
 
-        // Build SENSF_REQ (Polling command)
-        // Format: [len, cmd, SC_hi, SC_lo, RC, TSN]
+        // Build Polling command (5 bytes, no length prefix)
+        // The RC-S320 hardware adds the length byte when sending to card
+        // Format: [cmd, SC_hi, SC_lo, RFU, TSN]
         let sc_bytes = system_code.to_be_bytes();
-        let sensf_req = [
-            6, // Length including this byte
-            felica_cmd::POLLING,
-            sc_bytes[0],
-            sc_bytes[1],
-            request_code,
-            time_slots,
+        let polling_cmd = [
+            felica_cmd::POLLING,  // 0x00
+            sc_bytes[0],          // System code high byte
+            sc_bytes[1],          // System code low byte
+            request_code,         // RFU (Request code)
+            time_slots,           // Time slot
         ];
 
-        let timeout = Duration::from_millis(500);
-        let response = self.chipset.communicate_thru(&sensf_req, timeout)?;
+        let timeout = Duration::from_millis(1000);
+        let response = self.chipset.communicate_thru(&polling_cmd, timeout)?;
 
-        // Parse SENSF_RES
-        // Format: [len, cmd, IDm(8), PMm(8), RD(optional)]
+        // Parse Polling response
+        // Response format from card: [cmd, IDm(8), PMm(8), RD(optional)]
+        // (no length byte in response from RC-S320)
         if response.is_empty() {
             return Err(DriverError::Communication(CommunicationError::timeout(
                 "no FeliCa card found",
             )));
         }
 
-        let len = response[0] as usize;
-        if len < 18 || response.len() < len {
-            return Err(DriverError::Other("SENSF_RES too short".into()));
-        }
-
-        if response.get(1) != Some(&felica_cmd::POLLING_RES) {
+        if response.first() != Some(&felica_cmd::POLLING_RES) {
             return Err(DriverError::Other(format!(
                 "unexpected response code: {:02X}",
-                response.get(1).unwrap_or(&0xFF)
+                response.first().unwrap_or(&0xFF)
             )));
         }
 
-        let idm = response[2..10].to_vec();
-        let pmm = response[10..18].to_vec();
+        // Response: [01, IDm(8), PMm(8), RD(optional)]
+        if response.len() < 17 {
+            return Err(DriverError::Other(format!(
+                "polling response too short: {} bytes",
+                response.len()
+            )));
+        }
 
-        let optional = if len > 18 && response.len() >= len {
-            response[18..len].to_vec()
+        let idm = response[1..9].to_vec();
+        let pmm = response[9..17].to_vec();
+
+        let optional = if response.len() > 17 {
+            response[17..].to_vec()
         } else {
             Vec::new()
         };
@@ -164,11 +168,35 @@ impl<T: Transport> Device<T> {
     ) -> Result<Vec<u8>> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(1000) as u64 + 100);
 
-        // The data should already include the length byte as per FeliCa protocol
-        let response = self.chipset.communicate_thru(data, timeout)?;
+        // FelicaStandard sends data WITH a length prefix: [len, cmd, ...]
+        // But RC-S320 expects data WITHOUT length prefix: [cmd, ...]
+        // The RC-S320 hardware adds the length when sending to the card
+        if data.is_empty() {
+            return Err(DriverError::Other("empty transceive data".into()));
+        }
 
-        // Return the response (includes length byte)
-        Ok(response)
+        // Strip the length byte from the front of the data
+        let card_data = if data[0] as usize == data.len() {
+            // First byte is length - strip it
+            &data[1..]
+        } else {
+            // Data doesn't have length prefix, use as-is
+            data
+        };
+
+        debug!("RC-S320 transceive: sending {:02X?}", card_data);
+
+        let response = self.chipset.communicate_thru(card_data, timeout)?;
+
+        // RC-S320 response doesn't include length byte
+        // We need to add it back for FelicaStandard compatibility
+        let mut result = Vec::with_capacity(response.len() + 1);
+        result.push((response.len() + 1) as u8);
+        result.extend_from_slice(&response);
+
+        debug!("RC-S320 transceive: received {:02X?}", result);
+
+        Ok(result)
     }
 }
 

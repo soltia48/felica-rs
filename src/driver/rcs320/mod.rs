@@ -1,6 +1,6 @@
-//! Driver for Sony RC-S320 PaSoRi contactless reader.
+//! Driver for Sony RC-S320 contactless reader.
 //!
-//! This module provides support for the Sony RC-S320 PaSoRi reader,
+//! This module provides support for the Sony RC-S320 reader,
 //! which is an older generation USB contactless card reader.
 //!
 //! The RC-S320 uses a different communication protocol from the newer

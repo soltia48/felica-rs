@@ -90,8 +90,8 @@ impl Rcs320Transport {
             .and_then(|idx| device_handle.read_string_descriptor_ascii(idx).ok());
 
         debug!(
-            "opened RC-S320: interrupt_ep_in=0x{:02X}, interface={}",
-            interrupt_ep_in, interface
+            "opened RC-S320: interrupt_ep_in=0x{:02X}, interface={}, manufacturer={:?}, product={:?}",
+            interrupt_ep_in, interface, manufacturer, product
         );
 
         Ok(Self {
@@ -146,11 +146,7 @@ impl Rcs320Transport {
             .read_interrupt(self.interrupt_ep_in, &mut buffer, timeout)
             .map_err(rusb_to_io_error)?;
 
-        debug!(
-            "RC-S320 interrupt recv {} bytes: {:02X?}",
-            len,
-            &buffer[..len]
-        );
+        debug!("RC-S320 interrupt recv {} bytes: {:02X?}", len, &buffer[..len]);
 
         if len == 0 {
             return Err(Error::new(

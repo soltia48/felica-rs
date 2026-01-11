@@ -8,7 +8,7 @@
 //!
 //! - Support for NFC Port-100 (RC-S380) readers
 //! - Support for NFC Port-400 readers
-//! - Support for RC-S320 PaSoRi readers
+//! - Support for RC-S320 readers
 //! - Support for RC-S956 (RC-S330/RC-S360/RC-S370) readers
 //! - FeliCa Standard protocol implementation
 //! - USB transport layer

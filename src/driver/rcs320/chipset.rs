@@ -85,7 +85,8 @@ pub struct Chipset<T: Transport> {
 impl<T: Transport> Chipset<T> {
     const ACK: [u8; 6] = ACK_BYTES;
     const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
-    const ACK_TIMEOUT: Duration = Duration::from_millis(100);
+    /// ACK timeout - must be long enough for card operations
+    const ACK_TIMEOUT: Duration = Duration::from_millis(1000);
 
     /// Creates a new chipset handler with the given transport.
     pub fn new(transport: T) -> Result<Self> {
@@ -149,10 +150,7 @@ impl<T: Transport> Chipset<T> {
         // Get firmware version
         let version = self.get_firmware_version()?;
         self.firmware_version = version;
-        debug!(
-            "RC-S320 firmware version: {}.{}",
-            version.0, version.1
-        );
+        debug!("RC-S320 firmware version: {}.{}", version.0, version.1);
 
         Ok(())
     }
@@ -212,10 +210,24 @@ impl<T: Transport> Chipset<T> {
 
     /// Receives data from a FeliCa card.
     pub fn recv_from_card(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let response = self.packet_read(timeout)?;
+        let response = match self.packet_read(timeout) {
+            Ok(response) => response,
+            Err(DriverError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // Timeout during card read typically means no card present
+                return Err(DriverError::Communication(
+                    crate::clf::errors::CommunicationError::timeout("no card found"),
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+
+        debug!("RC-S320 card response: {:02X?}", response);
 
         if response.first() != Some(&cmd::SEND_PACKET_RES) {
-            return Err(DriverError::Other("invalid card response".into()));
+            return Err(DriverError::Other(format!(
+                "invalid card response, expected 0x5D, got: {:02X?}",
+                response.first()
+            )));
         }
 
         if response.len() < 2 {
@@ -223,13 +235,15 @@ impl<T: Transport> Chipset<T> {
         }
 
         // Response format: [0x5D, length, data...]
+        // Per libpafe: length is the count of data bytes, data starts at offset 2
         let len = response[1] as usize;
-        if response.len() < 2 + len {
-            return Err(DriverError::Other("card response length mismatch".into()));
-        }
 
-        // Return data without length byte (card data includes its own length)
-        Ok(response[2..2 + len].to_vec())
+        // Return all data after the 2-byte header
+        // The actual data length is min(len, available bytes)
+        let available = response.len() - 2;
+        let data_len = std::cmp::min(len, available);
+
+        Ok(response[2..2 + data_len].to_vec())
     }
 
     /// Performs a communicate thru operation (send and receive from card).
