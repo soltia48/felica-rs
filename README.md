@@ -1,11 +1,13 @@
 # nfc-rs
 
-A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380) and Port-400 (Sony RC-S300) readers.
+A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380), Port-400 (RC-S300), RC-S320, and RC-S330/RC-S360/RC-S370 PaSoRi readers.
 
 ## Features
 
 - **Port-100 (RC-S380) Support** - Full support for Sony RC-S380 NFC readers
 - **Port-400 (RC-S300) Support** - Support for Sony RC-S300 NFC readers
+- **RC-S320 PaSoRi Support** - Support for older Sony RC-S320 PaSoRi readers
+- **RC-S956 (RC-S330/RC-S360/RC-S370) Support** - Support for RC-S956-based readers
 - **FeliCa Standard Protocol** - Complete implementation of the FeliCa Standard protocol
 - **USB Transport Layer** - Direct USB communication with NFC readers
 - **Remote Client/Server** - Network-based NFC operations via TCP
@@ -104,6 +106,8 @@ Available commands:
 | `driver` | Hardware driver implementations for NFC readers |
 | `driver::port100` | Sony Port-100 (RC-S380) driver |
 | `driver::port400` | Sony Port-400 (RC-S300) driver |
+| `driver::rcs320` | Sony RC-S320 PaSoRi driver |
+| `driver::rcs956` | Sony RC-S956 (RC-S330/RC-S360/RC-S370) driver |
 | `driver::remote` | Remote driver for network-based NFC operations |
 | `felica_standard` | FeliCa Standard protocol implementation |
 | `reader` | High-level reader abstraction |
@@ -123,6 +127,8 @@ let reader = open_reader(ReaderPreference::Auto)?;
 // Force specific reader type
 let reader = open_reader(ReaderPreference::ForcePort100)?;
 let reader = open_reader(ReaderPreference::ForcePort400)?;
+let reader = open_reader(ReaderPreference::ForceRcs320)?;
+let reader = open_reader(ReaderPreference::ForceRcs956)?;
 ```
 
 ### FeliCa Standard Operations
@@ -164,6 +170,8 @@ let result = felica.search_service_code(0)?;
 |--------|---------|--------|
 | Sony RC-S380 (Port-100) | 054C:06C1, 054C:06C3 | ✅ Supported |
 | Sony RC-S300 (Port-400) | 054C:0DC8, 054C:0DC9, 054C:0D8F | ✅ Supported |
+| Sony RC-S320 PaSoRi | 054C:01BB | ✅ Supported |
+| Sony RC-S330/RC-S360/RC-S370 (RC-S956) | 054C:02E1, 054C:0193 | ✅ Supported |
 
 ## License
 

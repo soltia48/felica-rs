@@ -1,12 +1,15 @@
 //! # nfc-rs
 //!
 //! A Rust library for interacting with NFC (Near Field Communication) devices,
-//! with support for Sony's NFC Port-100 (RC-S380) and Port-400 readers.
+//! with support for Sony's NFC Port-100 (RC-S380), Port-400, RC-S320, and
+//! RC-S330/RC-S360/RC-S370 PaSoRi readers.
 //!
 //! ## Features
 //!
 //! - Support for NFC Port-100 (RC-S380) readers
 //! - Support for NFC Port-400 readers
+//! - Support for RC-S320 PaSoRi readers
+//! - Support for RC-S956 (RC-S330/RC-S360/RC-S370) readers
 //! - FeliCa Standard protocol implementation
 //! - USB transport layer
 //!
@@ -65,5 +68,12 @@ pub use felica_standard::{
 pub use driver::port100::{self, Chipset, Device, init as init_port100, open_port100_device};
 pub use driver::port400::{
     self, Device as Port400Device, init as init_port400, open_port400_device,
+};
+pub use driver::rcs320::{
+    self as rcs320, Device as Rcs320Device, init as init_rcs320, open_rcs320_device,
+    Rcs320Transport,
+};
+pub use driver::rcs956::{
+    self as rcs956, Device as Rcs956Device, init as init_rcs956, open_rcs956_device,
 };
 pub use driver::remote::{self, RemoteDriver, RemoteRequest, RemoteResponse, RemoteResponseData};
