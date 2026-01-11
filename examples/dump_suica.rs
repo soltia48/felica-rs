@@ -517,6 +517,7 @@ fn print_usage() {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
+    env_logger::init();
 
     // Parse arguments
     let mut keys_path: Option<String> = None;
