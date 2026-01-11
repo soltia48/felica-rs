@@ -3,7 +3,7 @@
 //! This module provides low-level communication with the RC-S956 chipset.
 
 use crate::driver::errors::{DriverError, Result, StatusError};
-use crate::driver::rcs956::frame::{self, CONTROLLER_TO_HOST, Frame, FrameType};
+use crate::driver::rcs956::frame::{self, CONTROLLER_TO_HOST, Frame};
 use crate::transport::Transport;
 use log::{debug, warn};
 use std::collections::VecDeque;
@@ -160,6 +160,7 @@ pub struct Chipset<T: Transport> {
 impl<T: Transport> Chipset<T> {
     /// ACK frame bytes.
     pub const ACK: [u8; 6] = frame::ACK_BYTES;
+    #[allow(dead_code)]
     const ACK_TIMEOUT: Duration = Duration::from_millis(100);
     #[allow(dead_code)]
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_000);
@@ -225,12 +226,14 @@ impl<T: Transport> Chipset<T> {
     /// Sends a command and receives the response.
     fn command(&mut self, cmd_code: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>> {
         let frame = Frame::build_command(cmd_code, data);
+        debug!("CMD {:02X} data={:?}", cmd_code, hex::encode(data));
         self.write_frame(&frame)?;
         self.read_command_response(cmd_code, timeout)
     }
 
     /// Writes a frame to the transport.
     fn write_frame(&mut self, frame: &Frame) -> Result<()> {
+        debug!("TX: {:?}", hex::encode(frame.as_bytes()));
         self.with_recovery(false, |chipset| {
             chipset
                 .transport
@@ -240,82 +243,104 @@ impl<T: Transport> Chipset<T> {
     }
 
     /// Reads the ACK and response for a command.
+    /// 
+    /// This follows nfcpy's logic:
+    /// 1. Read a complete frame with 100ms timeout
+    /// 2. If it's not ACK, log warning but use it as the response
+    /// 3. If it is ACK, keep reading until we get a non-ACK frame
     fn read_command_response(&mut self, cmd_code: u8, timeout: Duration) -> Result<Vec<u8>> {
-        self.with_recovery(false, |chipset| chipset.read_ack_frame())?;
-        let response = self.with_recovery(true, |chipset| chipset.read_response_frame(timeout))?;
-        Self::extract_response_payload(response, cmd_code)
-    }
+        // First read with 100ms timeout for ACK
+        let mut frame_bytes = self.read_frame_from_transport(Duration::from_millis(100))?;
+        debug!("RX: {:?}", hex::encode(&frame_bytes));
 
-    /// Reads and verifies an ACK frame.
-    fn read_ack_frame(&mut self) -> Result<()> {
-        let deadline = Instant::now() + Self::ACK_TIMEOUT;
-        let bytes = self.read_exact(Self::ACK.len(), deadline)?;
-        let frame =
-            Frame::parse(&bytes).ok_or_else(|| DriverError::Other("invalid ack frame".into()))?;
-        if frame.frame_type() != &FrameType::Ack {
-            return Err(DriverError::Other("expected ack frame".into()));
-        }
-        Ok(())
-    }
-
-    /// Reads a response frame.
-    fn read_response_frame(&mut self, timeout: Duration) -> Result<Frame> {
-        let deadline = Instant::now() + timeout;
-        let bytes = self.read_frame_bytes(deadline)?;
-        Frame::parse(&bytes).ok_or_else(|| DriverError::Other("invalid response frame".into()))
-    }
-
-    /// Reads the raw bytes of a frame.
-    fn read_frame_bytes(&mut self, deadline: Instant) -> Result<Vec<u8>> {
-        let mut frame = self.read_exact(5, deadline)?;
-        if frame.get(0..3) != Some(&frame::SOF) {
-            return Err(DriverError::Other("invalid frame preamble".into()));
+        // Check if it starts with SOF
+        if frame_bytes.get(0..3) != Some(&frame::SOF) {
+            self.recover_after_error(true);
+            return Err(DriverError::Other("invalid frame start sequence".into()));
         }
 
-        let len = if frame[3] == 0xFF && frame[4] == 0xFF {
-            // Extended frame
-            let extended = self.read_exact(3, deadline)?;
-            frame.extend_from_slice(&extended);
-            u16::from_be_bytes([extended[0], extended[1]]) as usize
+        // Check if it's ACK (nfcpy compares the whole 6-byte ACK frame)
+        if frame_bytes.get(0..6) != Some(&Self::ACK) {
+            // Not ACK - nfcpy logs a warning but continues with this frame
+            warn!("missing ack frame");
         } else {
-            frame[3] as usize
-        };
-
-        let remaining = len
-            .checked_add(2)
-            .ok_or_else(|| DriverError::Other("frame length overflow".into()))?;
-        let tail = self.read_exact(remaining, deadline)?;
-        frame.extend_from_slice(&tail);
-        Ok(frame)
-    }
-
-    /// Reads exactly `len` bytes from the buffer/transport.
-    fn read_exact(&mut self, len: usize, deadline: Instant) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(len);
-        while out.len() < len {
-            self.take_from_buffer(&mut out, len);
-            if out.len() == len {
-                break;
-            }
-            let remaining =
-                remaining_until(deadline).ok_or_else(|| DriverError::Io(timeout_error()))?;
-            let chunk = self.transport.read(remaining)?;
-            if !chunk.is_empty() {
-                self.read_buffer.extend(chunk);
+            // It's ACK - keep reading until we get a non-ACK frame
+            let deadline = Instant::now() + timeout;
+            loop {
+                let remaining = remaining_until(deadline).ok_or_else(|| {
+                    // Timeout - send ACK to cancel command
+                    let _ = self.transport.write(&Self::ACK);
+                    DriverError::Io(timeout_error())
+                })?;
+                
+                frame_bytes = self.read_frame_from_transport(remaining)?;
+                debug!("RX: {:?}", hex::encode(&frame_bytes));
+                
+                if frame_bytes.get(0..6) != Some(&Self::ACK) {
+                    break;
+                }
             }
         }
-        Ok(out)
+
+        // Parse and validate the response frame
+        let frame = self.parse_response_frame(&frame_bytes)?;
+        Self::extract_response_payload(frame, cmd_code)
     }
 
-    /// Takes bytes from the read buffer.
-    fn take_from_buffer(&mut self, out: &mut Vec<u8>, len: usize) {
-        while out.len() < len {
-            if let Some(byte) = self.read_buffer.pop_front() {
-                out.push(byte);
-            } else {
-                break;
+    /// Reads a complete frame from the transport (as a USB packet).
+    fn read_frame_from_transport(&mut self, timeout: Duration) -> Result<Vec<u8>> {
+        // First, try to use any buffered data
+        if !self.read_buffer.is_empty() {
+            let bytes: Vec<u8> = self.read_buffer.drain(..).collect();
+            return Ok(bytes);
+        }
+
+        // Read from transport - USB reads return complete packets
+        let bytes = self.transport.read(timeout)?;
+        if bytes.is_empty() {
+            return Err(DriverError::Io(timeout_error()));
+        }
+        Ok(bytes)
+    }
+
+    /// Parses and validates a response frame.
+    fn parse_response_frame(&self, frame_bytes: &[u8]) -> Result<Frame> {
+        // Check for extended frame
+        if frame_bytes.get(3..5) == Some(&[0xFF, 0xFF]) {
+            // Extended frame: SOF(3) + FF FF(2) + LEN(2) + LCS(1) + DATA + DCS(1) + POSTAMBLE(1)
+            if frame_bytes.len() < 10 {
+                return Err(DriverError::Other("extended frame too short".into()));
+            }
+            // Verify length checksum
+            let lcs_sum = (frame_bytes[5] as u16 + frame_bytes[6] as u16 + frame_bytes[7] as u16) % 256;
+            if lcs_sum != 0 {
+                return Err(DriverError::Other("frame length checksum error".into()));
+            }
+            let data_len = u16::from_be_bytes([frame_bytes[5], frame_bytes[6]]) as usize;
+            if data_len != frame_bytes.len() - 10 {
+                return Err(DriverError::Other("frame length value mismatch".into()));
+            }
+        } else {
+            // Normal frame: SOF(3) + LEN(1) + LCS(1) + DATA + DCS(1) + POSTAMBLE(1)
+            if frame_bytes.len() < 7 {
+                return Err(DriverError::Other("normal frame too short".into()));
+            }
+            // Verify length checksum
+            let lcs_sum = (frame_bytes[3] as u16 + frame_bytes[4] as u16) % 256;
+            if lcs_sum != 0 {
+                return Err(DriverError::Other("frame length checksum error".into()));
+            }
+            let data_len = frame_bytes[3] as usize;
+            if data_len != frame_bytes.len() - 7 {
+                return Err(DriverError::Other(format!(
+                    "frame length value mismatch: expected {}, got {}",
+                    data_len,
+                    frame_bytes.len() - 7
+                )));
             }
         }
+
+        Frame::parse(frame_bytes).ok_or_else(|| DriverError::Other("invalid response frame".into()))
     }
 
     /// Extracts the response payload from a frame.
