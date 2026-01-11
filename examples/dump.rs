@@ -1,9 +1,24 @@
+//! NFC-F Card Dump Utility
+//!
+//! This utility dumps the structure and readable data from NFC-F cards.
+//! It supports both local USB readers and remote readers via network.
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Local reader (auto-detect)
+//! cargo run --example dump
+//!
+//! # Remote reader
+//! cargo run --example dump -- --remote 127.0.0.1:7878
+//! ```
+
 use hex::encode;
 use nfc_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, SearchServiceCodeResult,
     ServiceCode,
 };
-use nfc_rs::{Reader, ReaderPreference, open_reader};
+use nfc_rs::{Reader, ReaderPreference, RemoteDriver, open_reader};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -14,7 +29,10 @@ const SYSTEM_SERVICE_CODE: u16 = 0xFFFF;
 
 #[derive(Debug, Serialize)]
 struct DumpOutput {
-    reader: ReaderInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reader: Option<ReaderInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<RemoteInfo>,
     systems: Vec<SystemSummary>,
 }
 
@@ -23,6 +41,11 @@ struct ReaderInfo {
     vendor: String,
     product: String,
     chipset: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteInfo {
+    address: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,24 +103,90 @@ struct KeyVersionSummary {
     des_key_version_hex: Option<String>,
 }
 
+fn print_usage() {
+    eprintln!("NFC-F Card Dump Utility");
+    eprintln!();
+    eprintln!("Usage:");
+    eprintln!("  dump                         Use local reader (auto-detect)");
+    eprintln!("  dump --remote <address:port> Use remote reader");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  cargo run --example dump");
+    eprintln!("  cargo run --example dump -- --remote 127.0.0.1:7878");
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let preference = ReaderPreference::Auto;
-    let mut reader = open_reader(preference).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    let args: Vec<String> = std::env::args().collect();
 
-    let reader_info = build_reader_info(&reader);
-    let system_codes =
-        discover_system_codes(&mut reader).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
-    let systems = collect_system_summaries(&mut reader, &system_codes)
-        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    // Parse arguments
+    let mut remote_addr: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--remote" | "-r" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --remote requires an address argument");
+                    print_usage();
+                    std::process::exit(1);
+                }
+                remote_addr = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            _ => {
+                eprintln!("Error: Unknown argument: {}", args[i]);
+                print_usage();
+                std::process::exit(1);
+            }
+        }
+    }
 
-    let output = DumpOutput {
-        reader: reader_info,
-        systems,
+    let output = if let Some(addr) = remote_addr {
+        run_remote_dump(&addr)?
+    } else {
+        run_local_dump()?
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())
+}
+
+fn run_local_dump() -> Result<DumpOutput, Box<dyn Error>> {
+    let preference = ReaderPreference::Auto;
+    let mut reader = open_reader(preference).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+
+    let reader_info = build_reader_info(&reader);
+    let system_codes = discover_system_codes(reader.driver_mut())
+        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    let systems = collect_system_summaries(reader.driver_mut(), &system_codes)
+        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+
+    Ok(DumpOutput {
+        reader: Some(reader_info),
+        remote: None,
+        systems,
+    })
+}
+
+fn run_remote_dump(addr: &str) -> Result<DumpOutput, Box<dyn Error>> {
+    let mut driver = RemoteDriver::connect(addr)?;
+
+    let system_codes =
+        discover_system_codes(&mut driver).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    let systems = collect_system_summaries(&mut driver, &system_codes)
+        .map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+
+    Ok(DumpOutput {
+        reader: None,
+        remote: Some(RemoteInfo {
+            address: addr.to_string(),
+        }),
+        systems,
+    })
 }
 
 fn build_reader_info(reader: &Reader) -> ReaderInfo {
@@ -114,29 +203,29 @@ fn build_reader_info(reader: &Reader) -> ReaderInfo {
     }
 }
 
-fn discover_system_codes(reader: &mut Reader) -> Result<Vec<u16>, FelicaStandardError> {
-    let (mut felica, _polling) =
-        FelicaStandard::polling(reader.driver_mut(), "212F", 0xFFFF, 0x00, 0x00)?;
+fn discover_system_codes<D: FelicaDriver + ?Sized>(
+    driver: &mut D,
+) -> Result<Vec<u16>, FelicaStandardError> {
+    let (mut felica, _polling) = FelicaStandard::polling(driver, "212F", 0xFFFF, 0x00, 0x00)?;
     felica.request_system_code()
 }
 
-fn collect_system_summaries(
-    reader: &mut Reader,
+fn collect_system_summaries<D: FelicaDriver + ?Sized>(
+    driver: &mut D,
     system_codes: &[u16],
 ) -> Result<Vec<SystemSummary>, FelicaStandardError> {
     let mut systems = Vec::with_capacity(system_codes.len());
     for &system_code in system_codes {
-        systems.push(summarize_system(reader, system_code)?);
+        systems.push(summarize_system(driver, system_code)?);
     }
     Ok(systems)
 }
 
-fn summarize_system(
-    reader: &mut Reader,
+fn summarize_system<D: FelicaDriver + ?Sized>(
+    driver: &mut D,
     system_code: u16,
 ) -> Result<SystemSummary, FelicaStandardError> {
-    let (mut felica, _polling) =
-        FelicaStandard::polling(reader.driver_mut(), "212F", system_code, 0x00, 0x00)?;
+    let (felica, _polling) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
     let idm = encode(felica.idm()).to_uppercase();
     let pmm = encode(felica.pmm()).to_uppercase();
 
@@ -145,9 +234,10 @@ fn summarize_system(
     register_service_code(&mut key_request_codes, &mut seen_codes, SYSTEM_SERVICE_CODE);
 
     let (mut areas, mut system_services, mut warnings) =
-        collect_system_areas(&mut felica, &mut key_request_codes, &mut seen_codes)?;
+        collect_system_areas(driver, system_code, &mut key_request_codes, &mut seen_codes)?;
 
-    let mut key_versions = fetch_key_versions(&mut felica, &key_request_codes, &mut warnings);
+    let mut key_versions =
+        fetch_key_versions(driver, system_code, &key_request_codes, &mut warnings);
 
     let system_key = key_versions.remove(&SYSTEM_SERVICE_CODE);
     assign_system_key_versions(&mut system_services, &mut key_versions);
@@ -155,9 +245,13 @@ fn summarize_system(
         assign_area_key_versions(area, &mut key_versions);
     }
 
-    if let Err(err) =
-        read_plaintext_services(&mut felica, &mut areas, &mut system_services, &mut warnings)
-    {
+    if let Err(err) = read_plaintext_services(
+        driver,
+        system_code,
+        &mut areas,
+        &mut system_services,
+        &mut warnings,
+    ) {
         warnings.push(format!(
             "Reading plaintext blocks failed for system 0x{:04X}: {}",
             system_code, err
@@ -188,13 +282,14 @@ fn summarize_system(
 }
 
 fn fetch_key_versions<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<'_, D>,
+    driver: &mut D,
+    system_code: u16,
     key_request_codes: &[ServiceCode],
     warnings: &mut Vec<String>,
 ) -> HashMap<u16, KeyVersionSummary> {
     let mut key_versions = HashMap::new();
     for chunk in key_request_codes.chunks(MAX_SERVICE_CODES_PER_REQUEST) {
-        match request_key_versions(felica, chunk) {
+        match request_key_versions(driver, system_code, chunk) {
             Ok((summaries, warning)) => {
                 store_key_versions(&mut key_versions, chunk, summaries);
                 if let Some(message) = warning {
@@ -210,7 +305,8 @@ fn fetch_key_versions<D: FelicaDriver + ?Sized>(
 }
 
 fn collect_system_areas<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<'_, D>,
+    driver: &mut D,
+    system_code: u16,
     key_request_codes: &mut Vec<ServiceCode>,
     seen_codes: &mut HashSet<u16>,
 ) -> Result<(Vec<AreaNode>, Vec<ServiceGroupSummary>, Vec<String>), FelicaStandardError> {
@@ -219,6 +315,7 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
     let mut warnings = Vec::new();
     let mut index = 0x00u16;
     while index <= 0x00FF {
+        let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
         match felica.search_service_code(index)? {
             None => break,
             Some(SearchServiceCodeResult::Area {
@@ -226,7 +323,8 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
                 end_service_index,
             }) => {
                 let (area, next_index) = collect_area(
-                    felica,
+                    driver,
+                    system_code,
                     area_code,
                     end_service_index,
                     index.saturating_add(1),
@@ -266,7 +364,8 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
 }
 
 fn collect_area<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<'_, D>,
+    driver: &mut D,
+    system_code: u16,
     area_code: u16,
     end_service_index: u16,
     mut index: u16,
@@ -278,6 +377,7 @@ fn collect_area<D: FelicaDriver + ?Sized>(
 
     let mut children = Vec::new();
     while index <= end_service_index {
+        let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
         match felica.search_service_code(index)? {
             Some(SearchServiceCodeResult::Service(service_code)) => {
                 register_service_code(key_request_codes, seen_codes, service_code.raw());
@@ -309,7 +409,8 @@ fn collect_area<D: FelicaDriver + ?Sized>(
                     break;
                 }
                 let (child_area, next_index) = collect_area(
-                    felica,
+                    driver,
+                    system_code,
                     child_code,
                     child_end,
                     index.saturating_add(1),
@@ -428,7 +529,8 @@ fn assign_group_key_versions(
 }
 
 fn read_plaintext_services<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<'_, D>,
+    driver: &mut D,
+    system_code: u16,
     areas: &mut [AreaNode],
     system_services: &mut [ServiceGroupSummary],
     warnings: &mut Vec<String>,
@@ -442,7 +544,7 @@ fn read_plaintext_services<D: FelicaDriver + ?Sized>(
 
     let mut read_results: HashMap<u16, Vec<String>> = HashMap::new();
     for code in targets {
-        match read_service_blocks(felica, code) {
+        match read_service_blocks(driver, system_code, code) {
             Ok(blocks) => {
                 if !blocks.is_empty() {
                     read_results.insert(code, blocks);
@@ -503,7 +605,8 @@ fn collect_plaintext_service_group(
 }
 
 fn read_service_blocks<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<'_, D>,
+    driver: &mut D,
+    system_code: u16,
     service_code_raw: u16,
 ) -> Result<Vec<String>, FelicaStandardError> {
     let service = ServiceCode::new(service_code_raw);
@@ -512,6 +615,7 @@ fn read_service_blocks<D: FelicaDriver + ?Sized>(
     let mut block_number: u16 = 0;
 
     loop {
+        let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
         let mut block_list = Vec::with_capacity(BLOCKS_PER_READ_ATTEMPT);
         for offset in 0..BLOCKS_PER_READ_ATTEMPT {
             let number = block_number.wrapping_add(offset as u16);
@@ -575,13 +679,15 @@ fn assign_read_blocks_in_group(
 }
 
 fn request_key_versions<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<'_, D>,
+    driver: &mut D,
+    system_code: u16,
     service_codes: &[ServiceCode],
 ) -> Result<(Vec<KeyVersionSummary>, Option<String>), FelicaStandardError> {
     if service_codes.is_empty() {
         return Ok((Vec::new(), None));
     }
 
+    let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
     match felica.request_service_v2(service_codes) {
         Ok(key_versions) => Ok((
             key_versions
@@ -595,6 +701,7 @@ fn request_key_versions<D: FelicaDriver + ?Sized>(
         )),
         Err(err) => {
             let warning = format!("Request Service v2 failed: {}", err);
+            let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
             let fallback_versions = felica.request_service(service_codes)?;
             Ok((
                 fallback_versions
