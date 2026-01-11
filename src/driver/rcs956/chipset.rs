@@ -243,7 +243,7 @@ impl<T: Transport> Chipset<T> {
     }
 
     /// Reads the ACK and response for a command.
-    /// 
+    ///
     /// This follows nfcpy's logic:
     /// 1. Read a complete frame with 100ms timeout
     /// 2. If it's not ACK, log warning but use it as the response
@@ -272,10 +272,10 @@ impl<T: Transport> Chipset<T> {
                     let _ = self.transport.write(&Self::ACK);
                     DriverError::Io(timeout_error())
                 })?;
-                
+
                 frame_bytes = self.read_frame_from_transport(remaining)?;
                 debug!("RX: {:?}", hex::encode(&frame_bytes));
-                
+
                 if frame_bytes.get(0..6) != Some(&Self::ACK) {
                     break;
                 }
@@ -312,7 +312,8 @@ impl<T: Transport> Chipset<T> {
                 return Err(DriverError::Other("extended frame too short".into()));
             }
             // Verify length checksum
-            let lcs_sum = (frame_bytes[5] as u16 + frame_bytes[6] as u16 + frame_bytes[7] as u16) % 256;
+            let lcs_sum =
+                (frame_bytes[5] as u16 + frame_bytes[6] as u16 + frame_bytes[7] as u16) % 256;
             if lcs_sum != 0 {
                 return Err(DriverError::Other("frame length checksum error".into()));
             }

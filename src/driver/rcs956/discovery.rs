@@ -304,8 +304,12 @@ fn brty_code(brty: &str) -> Result<u8> {
     }
 }
 
-/// Builds a SENSF_REQ frame.
+/// Builds a SENSF_REQ initiator data for InListPassiveTarget.
+///
+/// The format follows nfcpy: [CMD][SC_HI][SC_LO][RC][TS]
+/// where CMD=0x00 is the Polling command code.
 fn build_sensf_req(system_code: u16, request_code: u8, time_slots: u8) -> Vec<u8> {
     let sc_bytes = system_code.to_be_bytes();
-    vec![sc_bytes[0], sc_bytes[1], request_code, time_slots]
+    // First byte 0x00 is the Polling command code (SENSF_REQ command)
+    vec![0x00, sc_bytes[0], sc_bytes[1], request_code, time_slots]
 }
