@@ -27,7 +27,7 @@ use nfc_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, ServiceCode,
     generate_service_keys,
 };
-use nfc_rs::{RemoteDriver, ReaderPreference, open_reader};
+use nfc_rs::{ReaderPreference, RemoteDriver, open_reader};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -287,7 +287,12 @@ impl StationCodeLookup {
         result
     }
 
-    fn search_in_file(&self, csv_path: &str, line_code: u8, station_order: u8) -> Option<StationInfo> {
+    fn search_in_file(
+        &self,
+        csv_path: &str,
+        line_code: u8,
+        station_order: u8,
+    ) -> Option<StationInfo> {
         let file = File::open(csv_path).ok()?;
         let reader = BufReader::new(file);
 
@@ -324,7 +329,10 @@ impl StationCodeLookup {
     /// Format station info as a string
     fn format_station(&self, line_code: u8, station_order: u8) -> String {
         match self.lookup(line_code, station_order) {
-            Some(info) => format!("{} {} {}", info.company_name, info.line_name, info.station_name),
+            Some(info) => format!(
+                "{} {} {}",
+                info.company_name, info.line_name, info.station_name
+            ),
             None => format!(
                 "不明 (線区コード: 0x{:02X}, 駅順コード: 0x{:02X})",
                 line_code, station_order
@@ -349,10 +357,7 @@ fn format_station(line_code: u8, station_order: u8) -> String {
         if let Some(ref lookup) = *lookup.borrow() {
             lookup.format_station(line_code, station_order)
         } else {
-            format!(
-                "線区: 0x{:02X}, 駅順: 0x{:02X}",
-                line_code, station_order
-            )
+            format!("線区: 0x{:02X}, 駅順: 0x{:02X}", line_code, station_order)
         }
     })
 }
@@ -493,7 +498,9 @@ fn print_usage() {
     eprintln!("Suica Card Dump Utility");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  dump_suica --keys <keys.csv> [--station-codes <station_codes.csv>] [--remote <address:port>]");
+    eprintln!(
+        "  dump_suica --keys <keys.csv> [--station-codes <station_codes.csv>] [--remote <address:port>]"
+    );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --keys, -k <file>           Path to CSV file with keys (required)");
@@ -801,7 +808,10 @@ fn print_issue_information<D: FelicaDriver + ?Sized>(
     // Issue station
     let issued_station_line = metadata_block[3];
     let issued_station_order = metadata_block[4];
-    print_item("発行駅", format_station(issued_station_line, issued_station_order));
+    print_item(
+        "発行駅",
+        format_station(issued_station_line, issued_station_order),
+    );
 
     // Issue date
     let issued_at = u16::from_be_bytes([metadata_block[7], metadata_block[8]]);
@@ -882,8 +892,14 @@ fn print_transaction_history<D: FelicaDriver + ?Sized>(
             let entry_station_order = block[7];
             let exit_station_line = block[8];
             let exit_station_order = block[9];
-            print_item("入場駅", format_station(entry_station_line, entry_station_order));
-            print_item("出場駅", format_station(exit_station_line, exit_station_order));
+            print_item(
+                "入場駅",
+                format_station(entry_station_line, entry_station_order),
+            );
+            print_item(
+                "出場駅",
+                format_station(exit_station_line, exit_station_order),
+            );
         }
 
         let amount = u16::from_le_bytes([block[10], block[11]]);
@@ -939,7 +955,10 @@ fn print_last_topup_information<D: FelicaDriver + ?Sized>(
 
     let topup_station_line = detail_block[1];
     let topup_station_order = detail_block[2];
-    print_item("チャージ駅", format_station(topup_station_line, topup_station_order));
+    print_item(
+        "チャージ駅",
+        format_station(topup_station_line, topup_station_order),
+    );
 
     let topup_amount = u16::from_le_bytes([detail_block[5], detail_block[6]]);
     print_item("チャージ金額", format!("{} 円", topup_amount));
@@ -969,19 +988,31 @@ fn print_commuter_pass_information<D: FelicaDriver + ?Sized>(
 
     let start_station_line = primary_block[8];
     let start_station_order = primary_block[9];
-    print_item("始点駅", format_station(start_station_line, start_station_order));
+    print_item(
+        "始点駅",
+        format_station(start_station_line, start_station_order),
+    );
 
     let end_station_line = primary_block[10];
     let end_station_order = primary_block[11];
-    print_item("終点駅", format_station(end_station_line, end_station_order));
+    print_item(
+        "終点駅",
+        format_station(end_station_line, end_station_order),
+    );
 
     let via1_station_line = primary_block[12];
     let via1_station_order = primary_block[13];
-    print_item("経由駅1", format_station(via1_station_line, via1_station_order));
+    print_item(
+        "経由駅1",
+        format_station(via1_station_line, via1_station_order),
+    );
 
     let via2_station_line = primary_block[14];
     let via2_station_order = primary_block[15];
-    print_item("経由駅2", format_station(via2_station_line, via2_station_order));
+    print_item(
+        "経由駅2",
+        format_station(via2_station_line, via2_station_order),
+    );
 
     let issued_at = u16::from_be_bytes([supplemental_block[5], supplemental_block[6]]);
     print_item("発行日", format_date(issued_at));
@@ -1035,7 +1066,10 @@ fn print_gate_in_out_information<D: FelicaDriver + ?Sized>(
 
         let nearest_station_line = block[14];
         let nearest_station_order = block[15];
-        print_item("最寄定期区間の駅", format_station(nearest_station_line, nearest_station_order));
+        print_item(
+            "最寄定期区間の駅",
+            format_station(nearest_station_line, nearest_station_order),
+        );
 
         println!();
     }
@@ -1059,26 +1093,50 @@ fn print_sf_gate_entry_information<D: FelicaDriver + ?Sized>(
 
     let entry_station_line = first_block[0];
     let entry_station_order = first_block[1];
-    print_item("入場駅", format_station(entry_station_line, entry_station_order));
+    print_item(
+        "入場駅",
+        format_station(entry_station_line, entry_station_order),
+    );
 
     let intermediate_date = u16::from_be_bytes([second_block[0], second_block[1]]);
-    print_item("料金収受対象中間改札入出場日付", format_date(intermediate_date));
+    print_item(
+        "料金収受対象中間改札入出場日付",
+        format_date(intermediate_date),
+    );
 
     let entry_time = encode(&second_block[2..4]);
-    print_item("中間改札入場時刻", format!("{}:{}", &entry_time[0..2], &entry_time[2..4]));
+    print_item(
+        "中間改札入場時刻",
+        format!("{}:{}", &entry_time[0..2], &entry_time[2..4]),
+    );
 
     let intermediate_entry_station_line = second_block[4];
     let intermediate_entry_station_order = second_block[5];
-    print_item("中間改札入場駅", format_station(intermediate_entry_station_line, intermediate_entry_station_order));
+    print_item(
+        "中間改札入場駅",
+        format_station(
+            intermediate_entry_station_line,
+            intermediate_entry_station_order,
+        ),
+    );
 
     print_item("不明値1", format!("0x{:02X}", second_block[6]));
 
     let exit_time = encode(&second_block[7..9]);
-    print_item("中間改札出場時刻", format!("{}:{}", &exit_time[0..2], &exit_time[2..4]));
+    print_item(
+        "中間改札出場時刻",
+        format!("{}:{}", &exit_time[0..2], &exit_time[2..4]),
+    );
 
     let intermediate_exit_station_line = second_block[9];
     let intermediate_exit_station_order = second_block[10];
-    print_item("中間改札出場駅", format_station(intermediate_exit_station_line, intermediate_exit_station_order));
+    print_item(
+        "中間改札出場駅",
+        format_station(
+            intermediate_exit_station_line,
+            intermediate_exit_station_order,
+        ),
+    );
 
     print_item("不明値2", format!("0x{:02X}", second_block[11]));
 
