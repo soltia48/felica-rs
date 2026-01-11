@@ -1,0 +1,20 @@
+{
+  // cargo run --example dump     
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "debug dump example",
+      "type": "lldb",
+      "cargo": {
+        "args": ["run", "--example", "dump"],
+        "filter": {
+          "name": "dump",
+          "kind": "example"
+        }
+      },
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
