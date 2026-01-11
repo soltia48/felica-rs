@@ -206,15 +206,18 @@ impl<T: Transport> Device<T> {
         };
 
         // Parse SENSF_RES
+        // Format: [Length][ResponseCode][IDm(8)][PMm(8)][RD(0-2)]
+        // Minimum length is 18 bytes (length byte indicates total size including itself)
         if data.len() < 18 {
             return Err(DriverError::Other("SENSF_RES too short".into()));
         }
 
-        let idm = data[1..9].to_vec();
-        let pmm = data[9..17].to_vec();
+        // Skip length byte [0] and response code [1]
+        let idm = data[2..10].to_vec();
+        let pmm = data[10..18].to_vec();
 
-        let optional = if data.len() >= 19 {
-            data[17..].to_vec()
+        let optional = if data.len() > 18 {
+            data[18..].to_vec()
         } else {
             Vec::new()
         };
