@@ -5,7 +5,7 @@
 //! RC-S330 and later devices.
 
 use crate::driver::errors::{DriverError, Result};
-use crate::driver::rcs320::frame::{Frame, FrameType, ACK_BYTES, SOF};
+use crate::driver::rcs320::frame::{ACK_BYTES, Frame, FrameType, SOF};
 use crate::transport::Transport;
 use log::debug;
 use std::collections::VecDeque;
@@ -175,7 +175,9 @@ impl<T: Transport> Chipset<T> {
         let response = self.packet_read(Self::DEFAULT_TIMEOUT)?;
 
         if response.first() != Some(&cmd::GET_FIRMWARE_VERSION_RES) {
-            return Err(DriverError::Other("invalid firmware version response".into()));
+            return Err(DriverError::Other(
+                "invalid firmware version response".into(),
+            ));
         }
 
         if response.len() < 3 {
@@ -212,12 +214,6 @@ impl<T: Transport> Chipset<T> {
     pub fn recv_from_card(&mut self, timeout: Duration) -> Result<Vec<u8>> {
         let response = match self.packet_read(timeout) {
             Ok(response) => response,
-            Err(DriverError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                // Timeout during card read typically means no card present
-                return Err(DriverError::Communication(
-                    crate::clf::errors::CommunicationError::timeout("no card found"),
-                ));
-            }
             Err(e) => return Err(e),
         };
 

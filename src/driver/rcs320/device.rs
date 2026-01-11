@@ -111,11 +111,11 @@ impl<T: Transport> Device<T> {
         // Format: [cmd, SC_hi, SC_lo, RFU, TSN]
         let sc_bytes = system_code.to_be_bytes();
         let polling_cmd = [
-            felica_cmd::POLLING,  // 0x00
-            sc_bytes[0],          // System code high byte
-            sc_bytes[1],          // System code low byte
-            request_code,         // RFU (Request code)
-            time_slots,           // Time slot
+            felica_cmd::POLLING, // 0x00
+            sc_bytes[0],         // System code high byte
+            sc_bytes[1],         // System code low byte
+            request_code,        // RFU (Request code)
+            time_slots,          // Time slot
         ];
 
         let timeout = Duration::from_millis(1000);

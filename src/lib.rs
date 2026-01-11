@@ -70,8 +70,8 @@ pub use driver::port400::{
     self, Device as Port400Device, init as init_port400, open_port400_device,
 };
 pub use driver::rcs320::{
-    self as rcs320, Device as Rcs320Device, init as init_rcs320, open_rcs320_device,
-    Rcs320Transport,
+    self as rcs320, Device as Rcs320Device, Rcs320Transport, init as init_rcs320,
+    open_rcs320_device,
 };
 pub use driver::rcs956::{
     self as rcs956, Device as Rcs956Device, init as init_rcs956, open_rcs956_device,
