@@ -493,6 +493,9 @@ impl<T: Transport> Chipset<T> {
     }
 
     /// Performs InListPassiveTarget command.
+    ///
+    /// Returns the target data (skipping NbTg and Tg bytes), matching nfcpy's behavior.
+    /// For Type F, the returned data is the raw SENSF_RES.
     pub fn in_list_passive_target(
         &mut self,
         max_tg: u8,
@@ -505,10 +508,13 @@ impl<T: Transport> Chipset<T> {
         data.extend_from_slice(initiator_data);
 
         let response = self.command(cmd::IN_LIST_PASSIVE_TARGET, &data, Duration::from_secs(1))?;
+        // Response format: [NbTg][Tg][...target data...]
+        // nfcpy returns data[2:] which skips both NbTg and Tg
         if response.is_empty() || response[0] == 0 {
             Ok(None)
         } else {
-            Ok(Some(response[1..].to_vec()))
+            // Skip NbTg (response[0]) and Tg (response[1])
+            Ok(Some(response[2..].to_vec()))
         }
     }
 
