@@ -175,24 +175,24 @@ impl<T: Transport> Chipset<T> {
             debug!("cleared garbage {:x?}", data);
         }
 
-        let mut chipset = Self {
+        Ok(Self {
             transport,
             firmware_version: (0, 0, 0),
             read_buffer: VecDeque::new(),
-        };
+        })
+    }
 
-        // Reset the state machine to Mode 0
-        chipset.reset_mode()?;
-
+    /// Initializes the chipset after creation.
+    /// This should be called from Device::new() after reset_mode().
+    pub fn initialize(&mut self) -> Result<()> {
         // Get firmware version
-        let version = chipset.get_firmware_version()?;
-        chipset.firmware_version = version;
+        let version = self.get_firmware_version()?;
+        self.firmware_version = version;
         debug!(
             "firmware version: IC={:02x} Ver={:x}.{:x}",
             version.0, version.1, version.2
         );
-
-        Ok(chipset)
+        Ok(())
     }
 
     /// Returns the firmware version (IC, version, revision).

@@ -50,6 +50,12 @@ pub fn open_rcs956_device() -> Result<Device<UsbTransport>> {
 impl<T: Transport> Device<T> {
     /// Creates a new device with the given chipset.
     pub fn new(mut chipset: Chipset<T>) -> Result<Self> {
+        // Reset the state machine to Mode 0 first (as per nfcpy)
+        chipset.reset_mode()?;
+
+        // Initialize chipset (gets firmware version)
+        chipset.initialize()?;
+
         let version = chipset.firmware_version();
         let chipset_name = format!("RCS956v{:x}.{:x}", version.1, version.2);
         let vendor_name = chipset.manufacturer_name().map(|s| s.to_string());
@@ -57,7 +63,7 @@ impl<T: Transport> Device<T> {
 
         debug!("chipset is a {}", chipset_name);
 
-        // Initialize the device
+        // Mute (turn off RF field)
         chipset.rf_field_off()?;
 
         // Set timeout for PSL_RES, ATR_RES, InDataExchange/InCommunicateThru
@@ -77,6 +83,7 @@ impl<T: Transport> Device<T> {
         chipset.reset_mode()?;
 
         // Set the RFCfg value for RAM-07
+        // RF settings in RAM-07 are used for initial target state
         chipset.write_single_register(0x0328, 0x59)?;
 
         Ok(Self {
