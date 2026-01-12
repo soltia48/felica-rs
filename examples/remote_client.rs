@@ -19,6 +19,7 @@ use std::io::{Write, stdin, stdout};
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
+
     let addr = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:7878".to_string());

@@ -116,8 +116,9 @@ fn print_usage() {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = std::env::args().collect();
     env_logger::init();
+
+    let args: Vec<String> = std::env::args().collect();
 
     // Parse arguments
     let mut remote_addr: Option<String> = None;
