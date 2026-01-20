@@ -42,9 +42,148 @@ impl ServiceCode {
         }
     }
 
+    pub fn requires_key(&self) -> bool {
+        self.0 & 0x0001 == 0
+    }
+
     pub(crate) fn to_le_bytes(self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusFlag1 {
+    NormalCompletion,
+    ErrorNotAssociatedWithList,
+    ErrorAtListIndex(u8),
+}
+
+impl StatusFlag1 {
+    pub fn from_byte(value: u8) -> Self {
+        match value {
+            0x00 => StatusFlag1::NormalCompletion,
+            0xFF => StatusFlag1::ErrorNotAssociatedWithList,
+            other => StatusFlag1::ErrorAtListIndex(other),
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            StatusFlag1::NormalCompletion => "normal completion".to_string(),
+            StatusFlag1::ErrorNotAssociatedWithList => {
+                "error not associated with a specific list entry".to_string()
+            }
+            StatusFlag1::ErrorAtListIndex(index) => format!("error at list index {}", index),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusFlag2 {
+    NormalCompletion,
+    PurseDecrementUnderflowOrCashbackOverflow,
+    CashbackExceedsStoredValue,
+    LimitPurseOutOfRange,
+    MemoryError,
+    MemoryWriteCountExceeded,
+    ServiceOrNodeCountOutOfRange,
+    BlockCountOutOfRange,
+    ServiceListIndexOutOfRange,
+    AreaOrServiceAttributeMismatch,
+    AccessDeniedOrParameterMismatch,
+    ReferencedNodeDoesNotExist,
+    InvalidAccessMode,
+    BlockNumberOutOfRange,
+    IssuingWriteFailure,
+    KeyChangeFailed,
+    PackageParityOrMacInvalid,
+    InvalidParameters,
+    ServiceAlreadyExists,
+    InvalidSystemCode,
+    CyclicServiceWriteOverflow,
+    PackageIdentifierInvalid,
+    PackageParameterMismatch,
+    IssuingCommandDisabled,
+    NodeAttributeMismatch,
+    Unknown(u8),
+}
+
+impl StatusFlag2 {
+    pub fn from_byte(value: u8) -> Self {
+        match value {
+            0x00 => StatusFlag2::NormalCompletion,
+            0x01 => StatusFlag2::PurseDecrementUnderflowOrCashbackOverflow,
+            0x02 => StatusFlag2::CashbackExceedsStoredValue,
+            0x03 => StatusFlag2::LimitPurseOutOfRange,
+            0x70 => StatusFlag2::MemoryError,
+            0x71 => StatusFlag2::MemoryWriteCountExceeded,
+            0xA1 => StatusFlag2::ServiceOrNodeCountOutOfRange,
+            0xA2 => StatusFlag2::BlockCountOutOfRange,
+            0xA3 => StatusFlag2::ServiceListIndexOutOfRange,
+            0xA4 => StatusFlag2::AreaOrServiceAttributeMismatch,
+            0xA5 => StatusFlag2::AccessDeniedOrParameterMismatch,
+            0xA6 => StatusFlag2::ReferencedNodeDoesNotExist,
+            0xA7 => StatusFlag2::InvalidAccessMode,
+            0xA8 => StatusFlag2::BlockNumberOutOfRange,
+            0xA9 => StatusFlag2::IssuingWriteFailure,
+            0xAA => StatusFlag2::KeyChangeFailed,
+            0xAB => StatusFlag2::PackageParityOrMacInvalid,
+            0xAC => StatusFlag2::InvalidParameters,
+            0xAD => StatusFlag2::ServiceAlreadyExists,
+            0xAE => StatusFlag2::InvalidSystemCode,
+            0xAF => StatusFlag2::CyclicServiceWriteOverflow,
+            0xC0 => StatusFlag2::PackageIdentifierInvalid,
+            0xC1 => StatusFlag2::PackageParameterMismatch,
+            0xC2 => StatusFlag2::IssuingCommandDisabled,
+            0xC3 => StatusFlag2::NodeAttributeMismatch,
+            other => StatusFlag2::Unknown(other),
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            StatusFlag2::NormalCompletion => "no additional error detail",
+            StatusFlag2::PurseDecrementUnderflowOrCashbackOverflow => {
+                "purse decrement would underflow or cashback overflow"
+            }
+            StatusFlag2::CashbackExceedsStoredValue => "cashback amount exceeds stored purse value",
+            StatusFlag2::LimitPurseOutOfRange => "limit purse write outside allowed range",
+            StatusFlag2::MemoryError => "memory error",
+            StatusFlag2::MemoryWriteCountExceeded => "memory write count exceeded",
+            StatusFlag2::ServiceOrNodeCountOutOfRange => "service/node count out of range",
+            StatusFlag2::BlockCountOutOfRange => "block count out of range",
+            StatusFlag2::ServiceListIndexOutOfRange => "service list index out of range",
+            StatusFlag2::AreaOrServiceAttributeMismatch => "area or service attribute mismatch",
+            StatusFlag2::AccessDeniedOrParameterMismatch => {
+                "access denied or parameters do not satisfy constraints"
+            }
+            StatusFlag2::ReferencedNodeDoesNotExist => {
+                "referenced service/area/node does not exist"
+            }
+            StatusFlag2::InvalidAccessMode => "invalid access mode",
+            StatusFlag2::BlockNumberOutOfRange => "block number exceeds service size",
+            StatusFlag2::IssuingWriteFailure => "issuing command write failure",
+            StatusFlag2::KeyChangeFailed => "key change failed",
+            StatusFlag2::PackageParityOrMacInvalid => "package parity or MAC invalid",
+            StatusFlag2::InvalidParameters => "invalid parameters",
+            StatusFlag2::ServiceAlreadyExists => "service already exists",
+            StatusFlag2::InvalidSystemCode => "system code invalid",
+            StatusFlag2::CyclicServiceWriteOverflow => {
+                "cyclic service simultaneous writes exceed service blocks"
+            }
+            StatusFlag2::PackageIdentifierInvalid => "package identifier invalid",
+            StatusFlag2::PackageParameterMismatch => "package parameter mismatch",
+            StatusFlag2::IssuingCommandDisabled => "issuing command disabled",
+            StatusFlag2::NodeAttributeMismatch => "node attribute mismatch",
+            StatusFlag2::Unknown(_) => "unknown status flag 2",
+        }
+    }
+}
+
+pub fn status_flag_description(sf1: u8, sf2: u8) -> String {
+    let sf1_desc = StatusFlag1::from_byte(sf1).description();
+    let sf2_desc = StatusFlag2::from_byte(sf2).description();
+    format!("SF1: {sf1_desc}; SF2: {sf2_desc}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -29,6 +29,7 @@
 mod api;
 mod command;
 mod constants;
+mod emulator;
 mod error;
 mod response;
 mod secure;
@@ -37,13 +38,17 @@ mod types;
 
 pub use api::{FelicaDriver, FelicaStandard};
 pub use command::FelicaStandardCommand;
+pub use emulator::{
+    DirectoryEntry, EmulatedArea, EmulatedService, EmulatedSystem, EmulatorConfigError,
+    FelicaStandardEmulator,
+};
 pub use error::FelicaStandardError;
 pub use response::FelicaStandardResponse;
 pub use secure::{AuthenticatedContext, Authentication2Response, generate_service_keys};
 pub use type3::Type3TagPollingResult;
 pub use types::{
     BlockListElement, ChangeKeyParameters, MutualAuthenticationResult, RequestServiceV2KeyVersion,
-    SearchServiceCodeResult, ServiceCode,
+    SearchServiceCodeResult, ServiceCode, StatusFlag1, StatusFlag2, status_flag_description,
 };
 
 pub(crate) use command::frame_with_length_prefix;

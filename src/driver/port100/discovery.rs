@@ -229,7 +229,11 @@ impl<T: Transport> Device<T> {
         match FelicaStandardResponse::from_bytes(&response) {
             Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {
                 debug!("received SENSF_RES {}", hex::encode(&idm));
-                Ok(Type3TagPollingResult { idm, pmm, optional })
+                Ok(Type3TagPollingResult {
+                    idm: idm.to_vec(),
+                    pmm: pmm.to_vec(),
+                    optional,
+                })
             }
             Ok(other) => {
                 debug!("unexpected Felica response {:?}", other);
@@ -563,8 +567,7 @@ impl<T: Transport> Device<T> {
 
             if exchange.len_matches_len_byte()
                 && let Some(ref req) = sensf_req
-                && frame.len() >= 18
-                && frame.len() > 10
+                && frame.len() >= 10
                 && frame[2..10] == sensf_res[1..9]
             {
                 device.chipset.configure_target(&[("rf_off_error", 1)])?;
@@ -580,25 +583,33 @@ impl<T: Transport> Device<T> {
                 && exchange.raw().get(8) == Some(&0)
             {
                 let req = frame.to_vec();
-                if (req[1] == 0xFF || req[1] == sensf_res[17])
-                    && (req[2] == 0xFF || req[2] == sensf_res[18])
-                {
-                    sensf_req = Some(req);
-                    let mut tx = sensf_res[0..17].to_vec();
-                    if frame.get(3) == Some(&1) {
-                        tx.extend_from_slice(&sensf_res[17..19]);
-                    } else if frame.get(3) == Some(&2) {
-                        tx.push(0x00);
-                        tx.push(if target.brty_send() == "424F" {
-                            0x02
-                        } else {
-                            0x01
-                        });
+                if req.len() >= 6 {
+                    let system_code_hi = req[2];
+                    let system_code_lo = req[3];
+                    if (system_code_hi == 0xFF || system_code_hi == sensf_res[17])
+                        && (system_code_lo == 0xFF || system_code_lo == sensf_res[18])
+                    {
+                        sensf_req = Some(req);
+                        let mut tx = sensf_res[0..17].to_vec();
+                        match frame.get(4) {
+                            Some(1) => {
+                                tx.extend_from_slice(&sensf_res[17..19]);
+                            }
+                            Some(2) => {
+                                tx.push(0x00);
+                                tx.push(if target.brty_send() == "424F" {
+                                    0x02
+                                } else {
+                                    0x01
+                                });
+                            }
+                            _ => {}
+                        }
+                        let mut full = Vec::with_capacity(tx.len() + 1);
+                        full.push((tx.len() + 1) as u8);
+                        full.extend_from_slice(&tx);
+                        transmit_data = Some(full);
                     }
-                    let mut full = Vec::with_capacity(tx.len() + 1);
-                    full.push((tx.len() + 1) as u8);
-                    full.extend_from_slice(&tx);
-                    transmit_data = Some(full);
                 }
             }
 

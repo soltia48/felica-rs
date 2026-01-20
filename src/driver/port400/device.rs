@@ -274,7 +274,11 @@ impl<T: Transport> Device<T> {
             .transceive(&frame, Duration::from_millis(timeout_ms), &flags)?;
         match FelicaStandardResponse::from_bytes(&response) {
             Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {
-                Ok(Type3TagPollingResult { idm, pmm, optional })
+                Ok(Type3TagPollingResult {
+                    idm: idm.to_vec(),
+                    pmm: pmm.to_vec(),
+                    optional,
+                })
             }
             Ok(other) => Err(DriverError::Other(format!(
                 "unexpected Felica response: {other:?}"

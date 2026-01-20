@@ -7,7 +7,7 @@ use super::secure::{
 };
 use super::types::{
     BlockListElement, ChangeKeyParameters, MutualAuthenticationResult, RequestServiceV2KeyVersion,
-    SearchServiceCodeResult, ServiceCode,
+    SearchServiceCodeResult, ServiceCode, status_flag_description,
 };
 use super::{
     BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_RW_SERVICE_CODES,
@@ -63,7 +63,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             command,
             status_flag1: sf1,
             status_flag2: sf2,
-            detail: status_flag_description_text(sf1, sf2),
+            detail: status_flag_description(sf1, sf2),
         }
     }
 
@@ -913,41 +913,4 @@ fn generate_registration_package(
 
 fn unexpected_response(command: &'static str) -> FelicaStandardError {
     FelicaStandardError::Protocol(format!("unexpected response for {command} command"))
-}
-
-fn status_flag_description_text(sf1: u8, sf2: u8) -> String {
-    let sf1_desc = match sf1 {
-        0x00 => "normal completion".to_string(),
-        0xFF => "error not associated with a specific list entry".to_string(),
-        other => format!("error at list index {}", other),
-    };
-    let sf2_desc = match sf2 {
-        0x00 => "no additional error detail",
-        0x01 => "purse decrement would underflow or cashback overflow",
-        0x02 => "cashback amount exceeds stored purse value",
-        0x03 => "limit purse write outside allowed range",
-        0x70 => "memory error",
-        0x71 => "memory write count exceeded",
-        0xA1 => "service/node count out of range",
-        0xA2 => "block count out of range",
-        0xA3 => "service list index out of range",
-        0xA4 => "area or service attribute mismatch",
-        0xA5 => "access denied or parameters do not satisfy constraints",
-        0xA6 => "referenced service/area/node does not exist",
-        0xA7 => "invalid access mode",
-        0xA8 => "block number exceeds service size",
-        0xA9 => "issuing command write failure",
-        0xAA => "key change failed",
-        0xAB => "package parity or MAC invalid",
-        0xAC => "invalid parameters",
-        0xAD => "service already exists",
-        0xAE => "system code invalid",
-        0xAF => "cyclic service simultaneous writes exceed service blocks",
-        0xC0 => "package identifier invalid",
-        0xC1 => "package parameter mismatch",
-        0xC2 => "issuing command disabled",
-        0xC3 => "node attribute mismatch",
-        _ => "unknown status flag 2",
-    };
-    format!("SF1: {sf1_desc}; SF2: {sf2_desc}")
 }

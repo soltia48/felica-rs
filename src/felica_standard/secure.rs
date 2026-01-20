@@ -258,7 +258,7 @@ pub(crate) fn encrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
     Ok(out)
 }
 
-fn decrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<u8>, String> {
+pub(crate) fn decrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<u8>, String> {
     if !data.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("authentication2 response length must be multiple of 8 bytes".into());
     }
@@ -306,7 +306,10 @@ pub fn generate_service_keys(
     (group_service_key, user_service_key)
 }
 
-fn calculate_command_mac(command_code: u8, payload: &[u8]) -> Result<[u8; DES_BLOCK_SIZE], String> {
+pub(crate) fn calculate_command_mac(
+    command_code: u8,
+    payload: &[u8],
+) -> Result<[u8; DES_BLOCK_SIZE], String> {
     if !payload.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("secure command payload must be multiple of 8 bytes".into());
     }
@@ -325,7 +328,7 @@ fn calculate_command_mac(command_code: u8, payload: &[u8]) -> Result<[u8; DES_BL
     Ok(mac)
 }
 
-fn check_packet_mac(data: &[u8], expected_response_code: u8) -> bool {
+pub(crate) fn check_packet_mac(data: &[u8], expected_response_code: u8) -> bool {
     if !data.len().is_multiple_of(DES_BLOCK_SIZE) || data.len() < 16 {
         return false;
     }
@@ -362,8 +365,16 @@ impl AuthenticationContext {
         Self { l, alpha, beta }
     }
 
+    pub(crate) fn decrypt_challenge1(&self, challenge_1a: &[u8; 8]) -> [u8; 8] {
+        decrypt_3des_block(challenge_1a, &self.alpha, &self.l)
+    }
+
     pub(crate) fn encrypt_challenge1(&self, random_1: &[u8; 8]) -> [u8; 8] {
         encrypt_3des_block(random_1, &self.alpha, &self.l)
+    }
+
+    pub(crate) fn build_challenge1b(&self, random_1: &[u8; 8]) -> [u8; 8] {
+        encrypt_3des_block(random_1, &self.l, &self.beta)
     }
 
     pub(crate) fn verify_challenge1(&self, random_1: &[u8; 8], challenge_1b: &[u8; 8]) -> bool {
