@@ -620,18 +620,23 @@ impl FelicaStandardResponse {
                     payload.push(key_versions.len() as u8);
                     if matches!(crypto_id, 0x41 | 0x43) {
                         for version in key_versions {
-                            let primary = version.primary();
-                            let secondary = version.secondary().ok_or_else(|| {
-                                FelicaStandardError::Protocol(
+                            if version.secondary_raw().is_none() {
+                                return Err(FelicaStandardError::Protocol(
                                     "request service v2 missing secondary key version".into(),
-                                )
-                            })?;
-                            payload.extend_from_slice(&primary.to_le_bytes());
+                                ));
+                            }
+                        }
+                        for version in key_versions {
+                            payload.extend_from_slice(&version.primary_raw().to_le_bytes());
+                        }
+                        for version in key_versions {
+                            let secondary =
+                                version.secondary_raw().expect("secondary checked above");
                             payload.extend_from_slice(&secondary.to_le_bytes());
                         }
                     } else {
                         for version in key_versions {
-                            payload.extend_from_slice(&version.primary().to_le_bytes());
+                            payload.extend_from_slice(&version.primary_raw().to_le_bytes());
                         }
                     }
                 }

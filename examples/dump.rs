@@ -695,7 +695,7 @@ fn request_key_versions<D: FelicaDriver + ?Sized>(
             key_versions
                 .into_iter()
                 .map(|key_version| KeyVersionSummary {
-                    aes_key_version_hex: hex_opt_u16(Some(key_version.primary())),
+                    aes_key_version_hex: hex_opt_u16(key_version.primary()),
                     des_key_version_hex: key_version.secondary().map(hex_u16),
                 })
                 .collect(),

@@ -252,6 +252,8 @@ pub enum RequestServiceV2KeyVersion {
 }
 
 impl RequestServiceV2KeyVersion {
+    const NO_KEY_VERSION: u16 = 0xFFFF;
+
     pub fn single(value: u16) -> Self {
         RequestServiceV2KeyVersion::Single(value)
     }
@@ -260,17 +262,39 @@ impl RequestServiceV2KeyVersion {
         RequestServiceV2KeyVersion::Dual { aes, des }
     }
 
-    pub fn primary(&self) -> u16 {
+    pub fn primary(&self) -> Option<u16> {
         match self {
-            RequestServiceV2KeyVersion::Single(value) => *value,
-            RequestServiceV2KeyVersion::Dual { aes, .. } => *aes,
+            RequestServiceV2KeyVersion::Single(value) => Self::normalize_key_version(*value),
+            RequestServiceV2KeyVersion::Dual { aes, .. } => Self::normalize_key_version(*aes),
         }
     }
 
     pub fn secondary(&self) -> Option<u16> {
         match self {
             RequestServiceV2KeyVersion::Single(_) => None,
+            RequestServiceV2KeyVersion::Dual { des, .. } => Self::normalize_key_version(*des),
+        }
+    }
+
+    pub(crate) fn primary_raw(&self) -> u16 {
+        match self {
+            RequestServiceV2KeyVersion::Single(value) => *value,
+            RequestServiceV2KeyVersion::Dual { aes, .. } => *aes,
+        }
+    }
+
+    pub(crate) fn secondary_raw(&self) -> Option<u16> {
+        match self {
+            RequestServiceV2KeyVersion::Single(_) => None,
             RequestServiceV2KeyVersion::Dual { des, .. } => Some(*des),
+        }
+    }
+
+    fn normalize_key_version(value: u16) -> Option<u16> {
+        if value == Self::NO_KEY_VERSION {
+            None
+        } else {
+            Some(value)
         }
     }
 }
