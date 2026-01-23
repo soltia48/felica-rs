@@ -65,7 +65,6 @@ pub struct TransmissionFlags {
 #[derive(Debug, Clone)]
 pub struct TypeBInfo {
     pub pupi: [u8; 4],
-    #[allow(dead_code)]
     pub application_data: [u8; 4],
     pub protocol_info: Vec<u8>,
 }
