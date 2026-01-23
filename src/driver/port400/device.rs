@@ -297,7 +297,10 @@ impl<T: Transport> Device<T> {
     ) -> Result<Vec<u8>> {
         let timeout = duration_from_timeout(timeout_ms);
         let flags = TransmissionFlags::felica();
-        self.pcsc.transceive(data, timeout, &flags)
+        debug!("Port-400 transceive TX (FeliCa): {}", encode(data));
+        let response = self.pcsc.transceive(data, timeout, &flags)?;
+        debug!("Port-400 transceive RX (FeliCa): {}", encode(&response));
+        Ok(response)
     }
 
     pub fn communicate_thru(
@@ -309,7 +312,18 @@ impl<T: Transport> Device<T> {
         let opts = options.unwrap_or_default();
         let timeout = duration_from_timeout(timeout_ms);
         let flags = opts.flags();
-        self.pcsc.transceive(data, timeout, &flags)
+        debug!(
+            "Port-400 through TX ({:?}): {}",
+            opts.protocol,
+            encode(data)
+        );
+        let response = self.pcsc.transceive(data, timeout, &flags)?;
+        debug!(
+            "Port-400 through RX ({:?}): {}",
+            opts.protocol,
+            encode(&response)
+        );
+        Ok(response)
     }
 
     pub fn detect_type_a(&mut self, options: Option<TypeADetectOptions>) -> Result<Vec<u8>> {
@@ -789,7 +803,10 @@ impl<T: Transport> Device<T> {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         let flags = protocol.iso_dep_flags();
-        self.pcsc.transceive(frame, timeout, &flags)
+        debug!("Port-400 ISO-DEP TX ({protocol:?}): {}", encode(frame));
+        let response = self.pcsc.transceive(frame, timeout, &flags)?;
+        debug!("Port-400 ISO-DEP RX ({protocol:?}): {}", encode(&response));
+        Ok(response)
     }
 
     fn send_s_block_wtx(

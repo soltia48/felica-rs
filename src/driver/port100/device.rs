@@ -6,6 +6,8 @@ use crate::driver::port100::chipset::Chipset;
 use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
+use hex::encode;
+use log::debug;
 use smallvec::SmallVec;
 use std::io::{self, ErrorKind};
 
@@ -90,9 +92,20 @@ impl<T: Transport> Device<T> {
         data: &[u8],
         timeout_ms: Option<u16>,
     ) -> Result<Vec<u8>> {
+        debug!(
+            "Port-100 transceive TX ({}): {}",
+            target.brty(),
+            encode(data)
+        );
         let timeout_ms = timeout_ms.unwrap_or(0);
         let profile = self.prepare_initiator_exchange(target)?;
-        self.perform_initiator_exchange(data, timeout_ms, &profile)
+        let response = self.perform_initiator_exchange(data, timeout_ms, &profile)?;
+        debug!(
+            "Port-100 transceive RX ({}): {}",
+            target.brty(),
+            encode(&response)
+        );
+        Ok(response)
     }
 
     pub fn send_response_receive_command(
@@ -100,6 +113,7 @@ impl<T: Transport> Device<T> {
         data: &[u8],
         timeout_ms: u16,
     ) -> Result<Option<Vec<u8>>> {
+        debug!("Port-100 target TX: {}", encode(data));
         let payload = Self::map_fault(
             self.chipset.target_exchange_rf(
                 500,
@@ -114,7 +128,11 @@ impl<T: Transport> Device<T> {
             ),
             true,
         )?;
-        Ok(payload.get(7..).map(|bytes| bytes.to_vec()))
+        let response = payload.get(7..).map(|bytes| bytes.to_vec());
+        if let Some(bytes) = response.as_ref() {
+            debug!("Port-100 target RX: {}", encode(bytes));
+        }
+        Ok(response)
     }
 
     fn prepare_initiator_exchange(

@@ -10,6 +10,7 @@ use crate::driver::rcs956::chipset::Chipset;
 use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
+use hex::encode;
 use log::debug;
 use std::io::{self, ErrorKind};
 
@@ -143,20 +144,29 @@ impl<T: Transport> Device<T> {
         data: &[u8],
         timeout_ms: Option<u16>,
     ) -> Result<Vec<u8>> {
+        debug!(
+            "RC-S956 transceive TX ({}): {}",
+            target.brty(),
+            encode(data)
+        );
         let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(1000) as u64 + 100);
 
         // Handle Type 2 Tag (need CRC check since firmware reports CRC errors for ACK/NAK)
-        if is_type2_target(target) {
-            return self.transceive_type2(data, timeout);
-        }
-
-        // Handle Type 1 Tag
-        if target.data.rid_res.is_some() {
-            return self.transceive_type1(data, timeout);
-        }
-
-        // Standard communication
-        self.chipset.in_communicate_thru(data, timeout)
+        let response = if is_type2_target(target) {
+            self.transceive_type2(data, timeout)?
+        } else if target.data.rid_res.is_some() {
+            // Handle Type 1 Tag
+            self.transceive_type1(data, timeout)?
+        } else {
+            // Standard communication
+            self.chipset.in_communicate_thru(data, timeout)?
+        };
+        debug!(
+            "RC-S956 transceive RX ({}): {}",
+            target.brty(),
+            encode(&response)
+        );
+        Ok(response)
     }
 
     fn transceive_type1(&mut self, data: &[u8], timeout: std::time::Duration) -> Result<Vec<u8>> {
