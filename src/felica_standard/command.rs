@@ -734,3 +734,25 @@ fn parse_block_list(
     }
     Ok((blocks, offset))
 }
+
+pub(crate) fn is_secure_command_code(command_code: u8) -> bool {
+    matches!(
+        command_code,
+        READ_COMMAND_CODE
+            | WRITE_COMMAND_CODE
+            | REGISTER_ISSUE_ID_COMMAND_CODE
+            | REGISTER_AREA_COMMAND_CODE
+            | REGISTER_SERVICE_COMMAND_CODE
+            | CHANGE_SYSTEM_BLOCK_COMMAND_CODE
+    )
+}
+
+pub(crate) fn is_register_command(command_code: u8) -> bool {
+    matches!(
+        command_code,
+        REGISTER_ISSUE_ID_COMMAND_CODE
+            | REGISTER_AREA_COMMAND_CODE
+            | REGISTER_SERVICE_COMMAND_CODE
+            | CHANGE_SYSTEM_BLOCK_COMMAND_CODE
+    )
+}

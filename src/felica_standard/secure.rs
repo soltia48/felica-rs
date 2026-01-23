@@ -1,4 +1,4 @@
-use super::{DES_BLOCK_SIZE, FelicaStandardError};
+use super::{DES_BLOCK_SIZE, FelicaStandardError, frame_with_length_prefix};
 use des::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use des::{Des, TdesEde3};
 
@@ -48,6 +48,30 @@ impl AuthenticatedContext {
     pub fn set_transaction_number(&mut self, value: u16) {
         self.transaction_number = value;
     }
+}
+
+pub(crate) fn build_authentication2_payload(
+    transaction_number: u16,
+    transaction_id: &[u8; 6],
+    idi: &[u8; 8],
+    pmi: &[u8; 8],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(24);
+    payload.extend_from_slice(&transaction_number.to_le_bytes());
+    payload.extend_from_slice(transaction_id);
+    payload.extend_from_slice(idi);
+    payload.extend_from_slice(pmi);
+    payload
+}
+
+pub(crate) fn encrypt_authentication2_payload(
+    payload: &[u8],
+    session_key: &[u8; 8],
+) -> Option<Vec<u8>> {
+    let mut padded = pad_to_des_block_size(payload.to_vec());
+    let mac = calculate_command_mac(0x13, &padded).ok()?;
+    padded.extend_from_slice(&mac);
+    encrypt_des_cbc_zero_iv(&padded, session_key).ok()
 }
 
 pub(crate) struct SecureCommandContext {
@@ -289,6 +313,23 @@ fn pad_to_des_block_size(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
+pub(crate) fn strip_secure_padding(data: &mut Vec<u8>) {
+    let Some(&pad_len) = data.last() else {
+        return;
+    };
+    if pad_len == 0 || pad_len as usize >= DES_BLOCK_SIZE {
+        return;
+    }
+    let pad_len = pad_len as usize;
+    if pad_len <= data.len()
+        && data[data.len() - pad_len..]
+            .iter()
+            .all(|&b| b == pad_len as u8)
+    {
+        data.truncate(data.len() - pad_len);
+    }
+}
+
 pub fn generate_service_keys(
     system_key: &[u8; 8],
     area_keys: &[[u8; 8]],
@@ -345,6 +386,27 @@ pub(crate) fn check_packet_mac(data: &[u8], expected_response_code: u8) -> bool 
         current = decrypt_des_block(&current, &block_arr);
     }
     current[0] == (data.len() as u8 + 2) && current[1] == expected_response_code
+}
+
+pub(crate) fn build_secure_response_frame(
+    response_code: u8,
+    transaction_number: u16,
+    transaction_id: &[u8; 6],
+    transaction_key: &[u8; 8],
+    response_payload: &[u8],
+) -> Option<Vec<u8>> {
+    let mut payload = Vec::with_capacity(8 + response_payload.len());
+    payload.extend_from_slice(&transaction_number.to_le_bytes());
+    payload.extend_from_slice(transaction_id);
+    payload.extend_from_slice(response_payload);
+    let mut padded = pad_to_des_block_size(payload);
+    let mac = calculate_command_mac(response_code, &padded).ok()?;
+    padded.extend_from_slice(&mac);
+    let encrypted = encrypt_des_cbc_zero_iv(&padded, transaction_key).ok()?;
+    let mut frame_payload = Vec::with_capacity(1 + encrypted.len());
+    frame_payload.push(response_code);
+    frame_payload.extend_from_slice(&encrypted);
+    Some(frame_with_length_prefix(&frame_payload))
 }
 
 pub(crate) struct AuthenticationContext {

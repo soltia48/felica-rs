@@ -198,14 +198,18 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 blocks,
                 ..
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
+                if status_flag1 != 0 {
                     Err(Self::status_error(
                         "Read Without Encryption",
                         status_flag1,
                         status_flag2,
                     ))
                 } else {
-                    Ok(blocks)
+                    blocks.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Read Without Encryption missing block data".into(),
+                        )
+                    })
                 }
             }
             _ => Err(unexpected_response("Read Without Encryption")),
@@ -544,14 +548,19 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 blocks,
                 ..
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
+                if status_flag1 != 0 {
                     Err(Self::status_error("Read", status_flag1, status_flag2))
-                } else if blocks.len() != block_list.len() {
-                    Err(FelicaStandardError::Protocol(
-                        "encrypted read response block count mismatch".into(),
-                    ))
                 } else {
-                    Ok(blocks)
+                    let blocks = blocks.ok_or_else(|| {
+                        FelicaStandardError::Protocol("Read missing block data".into())
+                    })?;
+                    if blocks.len() != block_list.len() {
+                        Err(FelicaStandardError::Protocol(
+                            "encrypted read response block count mismatch".into(),
+                        ))
+                    } else {
+                        Ok(blocks)
+                    }
                 }
             }
             _ => Err(unexpected_response("Read")),
@@ -643,18 +652,25 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 key_versions,
                 ..
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
+                if status_flag1 != 0 {
                     Err(Self::status_error(
                         "Request Service v2",
                         status_flag1,
                         status_flag2,
                     ))
-                } else if key_versions.len() != service_codes.len() {
-                    Err(FelicaStandardError::Protocol(
-                        "Request Service v2 key version count mismatch".into(),
-                    ))
                 } else {
-                    Ok(key_versions)
+                    let key_versions = key_versions.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Request Service v2 missing key version list".into(),
+                        )
+                    })?;
+                    if key_versions.len() != service_codes.len() {
+                        Err(FelicaStandardError::Protocol(
+                            "Request Service v2 key version count mismatch".into(),
+                        ))
+                    } else {
+                        Ok(key_versions)
+                    }
                 }
             }
             _ => Err(unexpected_response("Request Service V2")),
@@ -695,14 +711,18 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 remaining_blocks,
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
+                if status_flag1 != 0 {
                     Err(Self::status_error(
                         "Register Issue ID",
                         status_flag1,
                         status_flag2,
                     ))
                 } else {
-                    Ok(remaining_blocks)
+                    remaining_blocks.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Register Issue ID missing remaining block count".into(),
+                        )
+                    })
                 }
             }
             _ => Err(unexpected_response("Register Issue ID")),
@@ -793,14 +813,18 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 remaining_blocks,
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
+                if status_flag1 != 0 {
                     Err(Self::status_error(
                         "Register Service",
                         status_flag1,
                         status_flag2,
                     ))
                 } else {
-                    Ok(remaining_blocks)
+                    remaining_blocks.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Register Service missing remaining block count".into(),
+                        )
+                    })
                 }
             }
             _ => Err(unexpected_response("Register Service")),

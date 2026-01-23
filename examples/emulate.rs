@@ -3,9 +3,9 @@
 //! Usage:
 //!   cargo run --example felica_emulate_port100
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use nfc_rs::felica_standard::{
-    EmulatedArea, EmulatedService, EmulatedSystem, FelicaStandardCommand, FelicaStandardEmulator,
+    EmulatedArea, EmulatedService, EmulatedSystem, FelicaStandardEmulator,
 };
 use nfc_rs::{LocalTarget, ServiceCode, open_port100_device};
 use std::error::Error;
@@ -71,15 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut next_frame = Some(frame_with_length_prefix(&first_payload));
 
         while let Some(frame) = next_frame {
-            let command = match FelicaStandardCommand::parse_frame(&frame) {
-                Ok(cmd) => cmd,
-                Err(err) => {
-                    warn!("failed to parse FeliCa command: {}", err);
-                    break;
-                }
-            };
-
-            let response = match emulator.handle_command(command) {
+            let response = match emulator.handle_frame(&frame) {
                 Some(response) => response,
                 None => {
                     debug!("no response for command, ending session");
