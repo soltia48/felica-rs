@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let idm_b: [u8; 8] = [0x11, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
     let pmm_b: [u8; 8] = [0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
-    let mut system_a = EmulatedSystem::new(0x1234, idm_a, pmm_a)?;
+    let mut system_a = EmulatedSystem::new(0x0123, idm_a, pmm_a)?;
     let mut area_a = EmulatedArea::new(0x0008, 0x000F)?;
     area_a.add_service(EmulatedService::new(ServiceCode::new(0x0009), 16))?;
     // Same service number (0x0000) with a different attribute shares blocks.
@@ -36,8 +36,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     system_a.add_area(area_a)?;
     // Same service number (0x0000) as 0x0009/0x000B, so keep block count aligned.
     system_a.add_service(EmulatedService::new(ServiceCode::new(0x0011), 16))?;
+    // Authentication-required service (LSB = 0) with its own key.
+    let mut auth_service = EmulatedService::with_key_version(ServiceCode::new(0x0048), 0x0000, 8);
+    auth_service.set_key([0x00; 8]);
+    system_a.add_service(auth_service)?;
 
-    let mut system_b = EmulatedSystem::new(0x5678, idm_b, pmm_b)?;
+    let mut system_b = EmulatedSystem::new(0x4567, idm_b, pmm_b)?;
     let mut area_b = EmulatedArea::new(0x0100, 0x010F)?;
     area_b.add_service(EmulatedService::new(ServiceCode::new(0x0109), 12))?;
     system_b.add_area(area_b)?;

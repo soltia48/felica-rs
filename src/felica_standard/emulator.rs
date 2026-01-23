@@ -9,13 +9,16 @@ use super::{
     FelicaStandardResponse, RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode,
 };
 use rand::{RngCore, rngs::OsRng};
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 const ROOT_AREA_CODE: u16 = 0x0000;
 const ROOT_END_SERVICE_CODE: u16 = 0xFFFE;
 const DEFAULT_CRYPTO_ID: u8 = 0x43;
 const STATUS_UNSUPPORTED_SF1: u8 = 0xFF;
 const STATUS_UNSUPPORTED_SF2: u8 = 0xC2;
+type SharedBlocks = Rc<RefCell<Vec<[u8; BLOCK_SIZE]>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmulatorConfigError {
@@ -314,7 +317,11 @@ impl FelicaStandardEmulator {
                     }
                 };
             let service = system.find_service(service_code).unwrap();
-            blocks.push(service.blocks[block_number]);
+            let block_data = {
+                let shared = service.blocks.borrow();
+                shared[block_number]
+            };
+            blocks.push(block_data);
         }
         encode_response_frame(FelicaStandardResponse::ReadWithoutEncryption {
             idm,
@@ -360,10 +367,12 @@ impl FelicaStandardEmulator {
             updates.push((service_code, block_number, block_data));
         }
 
-        let mut shared_blocks = BTreeMap::new();
+        let mut shared_blocks: BTreeMap<u16, SharedBlocks> = BTreeMap::new();
         for (service_code, block_number, block_data) in updates {
             let service_number = service_code.number();
-            if !shared_blocks.contains_key(&service_number) {
+            let shared = if let Some(shared) = shared_blocks.get(&service_number) {
+                shared.clone()
+            } else {
                 let Some(service) = system.find_service(service_code) else {
                     return encode_response_frame(FelicaStandardResponse::WriteWithoutEncryption {
                         idm,
@@ -371,17 +380,14 @@ impl FelicaStandardEmulator {
                         status_flag2: 0xA6,
                     });
                 };
-                shared_blocks.insert(service_number, service.blocks.clone());
+                let shared = service.blocks.clone();
+                shared_blocks.insert(service_number, shared.clone());
+                shared
+            };
+            let mut blocks = shared.borrow_mut();
+            if let Some(slot) = blocks.get_mut(block_number) {
+                *slot = block_data;
             }
-            if let Some(blocks) = shared_blocks.get_mut(&service_number) {
-                if let Some(slot) = blocks.get_mut(block_number) {
-                    *slot = block_data;
-                }
-            }
-        }
-
-        for (service_number, blocks) in shared_blocks {
-            system.sync_blocks_by_number(service_number, &blocks);
         }
 
         encode_response_frame(FelicaStandardResponse::WriteWithoutEncryption {
@@ -664,7 +670,8 @@ impl EmulatedSystem {
         }
 
         let block_number = block.block_number_or_key_version as usize;
-        if block_number >= service.blocks.len() {
+        let block_count = service.blocks.borrow().len();
+        if block_number >= block_count {
             return Err((list_error_index(index), 0xA8));
         }
 
@@ -694,7 +701,8 @@ impl EmulatedSystem {
         }
 
         let block_number = block.block_number_or_key_version as usize;
-        if block_number >= service.blocks.len() {
+        let block_count = service.blocks.borrow().len();
+        if block_number >= block_count {
             return Err((list_error_index(index), 0xA8));
         }
 
@@ -704,7 +712,8 @@ impl EmulatedSystem {
     fn block_count_for_node(&self, node_code: u16) -> u16 {
         let service_code = ServiceCode::new(node_code);
         if let Some(service) = self.find_service(service_code) {
-            return service.blocks.len().min(u16::MAX as usize) as u16;
+            let block_count = service.blocks.borrow().len();
+            return block_count.min(u16::MAX as usize) as u16;
         }
         if let Some(area) = self.find_area(node_code) {
             return area.total_block_count().min(u16::MAX as usize) as u16;
@@ -721,10 +730,6 @@ impl EmulatedSystem {
     fn sync_overlapping_services(&mut self) {
         let mut registry = BTreeMap::new();
         self.root_area.sync_overlapping_services(&mut registry);
-    }
-
-    fn sync_blocks_by_number(&mut self, service_number: u16, blocks: &[[u8; BLOCK_SIZE]]) {
-        self.root_area.sync_blocks_by_number(service_number, blocks);
     }
 
     fn handle_secure_frame(
@@ -839,7 +844,11 @@ impl EmulatedSystem {
                     }
                 };
             let service = self.find_service(service_code).unwrap();
-            blocks.push(service.blocks[block_number]);
+            let block_data = {
+                let shared = service.blocks.borrow();
+                shared[block_number]
+            };
+            blocks.push(block_data);
         }
         FelicaStandardResponse::Read {
             status_flag1: 0x00,
@@ -879,27 +888,26 @@ impl EmulatedSystem {
             updates.push((service_code, block_number, block_data));
         }
 
-        let mut shared_blocks = BTreeMap::new();
+        let mut shared_blocks: BTreeMap<u16, SharedBlocks> = BTreeMap::new();
         for (service_code, block_number, block_data) in updates {
             let service_number = service_code.number();
-            if !shared_blocks.contains_key(&service_number) {
+            let shared = if let Some(shared) = shared_blocks.get(&service_number) {
+                shared.clone()
+            } else {
                 let Some(service) = self.find_service(service_code) else {
                     return FelicaStandardResponse::Write {
                         status_flag1: 0xFF,
                         status_flag2: 0xA6,
                     };
                 };
-                shared_blocks.insert(service_number, service.blocks.clone());
+                let shared = service.blocks.clone();
+                shared_blocks.insert(service_number, shared.clone());
+                shared
+            };
+            let mut blocks = shared.borrow_mut();
+            if let Some(slot) = blocks.get_mut(block_number) {
+                *slot = block_data;
             }
-            if let Some(blocks) = shared_blocks.get_mut(&service_number) {
-                if let Some(slot) = blocks.get_mut(block_number) {
-                    *slot = block_data;
-                }
-            }
-        }
-
-        for (service_number, blocks) in shared_blocks {
-            self.sync_blocks_by_number(service_number, &blocks);
         }
 
         FelicaStandardResponse::Write {
@@ -1077,44 +1085,24 @@ impl EmulatedArea {
                     total = total.saturating_add(area.total_block_count());
                 }
                 AreaChild::Service(service) => {
-                    total = total.saturating_add(service.blocks.len());
+                    let block_count = service.blocks.borrow().len();
+                    total = total.saturating_add(block_count);
                 }
             }
         }
         total
     }
 
-    fn sync_overlapping_services(&mut self, registry: &mut BTreeMap<u16, Vec<[u8; BLOCK_SIZE]>>) {
+    fn sync_overlapping_services(&mut self, registry: &mut BTreeMap<u16, SharedBlocks>) {
         for child in &mut self.children {
             match child {
                 AreaChild::Area(area) => area.sync_overlapping_services(registry),
                 AreaChild::Service(service) => {
                     let number = service.service_code.number();
                     if let Some(shared) = registry.get(&number) {
-                        if service.blocks.len() == shared.len() {
-                            service.blocks.clone_from_slice(shared);
-                        } else {
-                            service.blocks = shared.clone();
-                        }
+                        service.blocks = shared.clone();
                     } else {
                         registry.insert(number, service.blocks.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    fn sync_blocks_by_number(&mut self, service_number: u16, blocks: &[[u8; BLOCK_SIZE]]) {
-        for child in &mut self.children {
-            match child {
-                AreaChild::Area(area) => area.sync_blocks_by_number(service_number, blocks),
-                AreaChild::Service(service) => {
-                    if service.service_code.number() == service_number {
-                        if service.blocks.len() == blocks.len() {
-                            service.blocks.clone_from_slice(blocks);
-                        } else {
-                            service.blocks = blocks.to_vec();
-                        }
                     }
                 }
             }
@@ -1126,7 +1114,7 @@ pub struct EmulatedService {
     service_code: ServiceCode,
     key_version: u16,
     key: Option<[u8; 8]>,
-    blocks: Vec<[u8; BLOCK_SIZE]>,
+    blocks: SharedBlocks,
 }
 
 impl EmulatedService {
@@ -1147,7 +1135,7 @@ impl EmulatedService {
             service_code,
             key_version,
             key: None,
-            blocks,
+            blocks: Rc::new(RefCell::new(blocks)),
         }
     }
 
@@ -1160,7 +1148,7 @@ impl EmulatedService {
             service_code,
             key_version,
             key: None,
-            blocks,
+            blocks: Rc::new(RefCell::new(blocks)),
         }
     }
 
@@ -1181,12 +1169,12 @@ impl EmulatedService {
         self
     }
 
-    pub fn blocks(&self) -> &[[u8; BLOCK_SIZE]] {
-        &self.blocks
+    pub fn blocks(&self) -> Ref<'_, [[u8; BLOCK_SIZE]]> {
+        Ref::map(self.blocks.borrow(), |blocks| blocks.as_slice())
     }
 
-    pub fn blocks_mut(&mut self) -> &mut [[u8; BLOCK_SIZE]] {
-        &mut self.blocks
+    pub fn blocks_mut(&self) -> RefMut<'_, [[u8; BLOCK_SIZE]]> {
+        RefMut::map(self.blocks.borrow_mut(), |blocks| blocks.as_mut_slice())
     }
 }
 
