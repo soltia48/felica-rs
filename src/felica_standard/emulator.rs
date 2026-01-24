@@ -546,7 +546,10 @@ impl EmulatedSystem {
 
     fn node_key_version(&self, node_code: ServiceCode) -> u16 {
         if let Some(service) = self.find_service(node_code) {
-            return service.key_version;
+            if service.service_code.requires_key() {
+                return service.key_version;
+            }
+            return 0xFFFF;
         }
         if let Some(area) = self.find_area(node_code.raw()) {
             return area.key_version;
@@ -577,16 +580,9 @@ impl EmulatedSystem {
             let code = ServiceCode::new(raw);
             let service = self.find_service(code)?;
             if code.requires_key() {
-                let key = *service.key()?;
-                service_keys.push(key);
+                service_keys.push(*service.key());
             }
             service_codes.push(code);
-        }
-        for code in &service_codes {
-            if code.requires_key() {
-                let service = self.find_service(*code)?;
-                service.key()?;
-            }
         }
 
         let (group_key, user_key) = generate_service_keys(&system_key, &area_keys, &service_keys);
@@ -1113,13 +1109,18 @@ impl EmulatedArea {
 pub struct EmulatedService {
     service_code: ServiceCode,
     key_version: u16,
-    key: Option<[u8; 8]>,
+    key: [u8; 8],
     blocks: SharedBlocks,
 }
 
 impl EmulatedService {
     pub fn new(service_code: ServiceCode, block_count: usize) -> Self {
-        Self::with_key_version(service_code, 0x0000, block_count)
+        let key_version = if service_code.requires_key() {
+            0x0000
+        } else {
+            0xFFFF
+        };
+        Self::with_key_version(service_code, key_version, block_count)
     }
 
     pub fn with_key_version(
@@ -1134,7 +1135,7 @@ impl EmulatedService {
         Self {
             service_code,
             key_version,
-            key: None,
+            key: [0x00; 8],
             blocks: Rc::new(RefCell::new(blocks)),
         }
     }
@@ -1147,7 +1148,7 @@ impl EmulatedService {
         Self {
             service_code,
             key_version,
-            key: None,
+            key: [0x00; 8],
             blocks: Rc::new(RefCell::new(blocks)),
         }
     }
@@ -1160,12 +1161,12 @@ impl EmulatedService {
         self.key_version
     }
 
-    pub fn key(&self) -> Option<&[u8; 8]> {
-        self.key.as_ref()
+    pub fn key(&self) -> &[u8; 8] {
+        &self.key
     }
 
     pub fn set_key(&mut self, key: [u8; 8]) -> &mut Self {
-        self.key = Some(key);
+        self.key = key;
         self
     }
 
