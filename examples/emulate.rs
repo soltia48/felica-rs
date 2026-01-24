@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     emulator.add_system(system_a);
     emulator.add_system(system_b);
 
-    let mut target = LocalTarget::new("212F")?;
+    let target = LocalTarget::new("212F")?;
 
     info!("waiting for NFC-F initiator...");
     if let Some(code) = emulator.active_system_code() {
