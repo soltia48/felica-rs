@@ -670,23 +670,28 @@ impl FelicaStandardResponse {
                     payload.push(crypto_id);
                     payload.push(key_versions.len() as u8);
                     if matches!(crypto_id, 0x41 | 0x43) {
+                        let mut secondary_versions = Vec::with_capacity(key_versions.len());
                         for version in key_versions {
-                            if version.secondary_raw().is_none() {
-                                return Err(FelicaStandardError::Protocol(
-                                    "request service v2 missing secondary key version".into(),
-                                ));
-                            }
-                        }
-                        for version in key_versions {
+                            let secondary = version.secondary_raw().ok_or_else(|| {
+                                FelicaStandardError::Protocol(
+                                    "request service v2 dual crypto requires dual key versions"
+                                        .into(),
+                                )
+                            })?;
                             payload.extend_from_slice(&version.primary_raw().to_le_bytes());
+                            secondary_versions.push(secondary);
                         }
-                        for version in key_versions {
-                            let secondary =
-                                version.secondary_raw().expect("secondary checked above");
+                        for secondary in secondary_versions {
                             payload.extend_from_slice(&secondary.to_le_bytes());
                         }
                     } else {
                         for version in key_versions {
+                            if version.secondary_raw().is_some() {
+                                return Err(FelicaStandardError::Protocol(
+                                    "request service v2 single crypto requires single key versions"
+                                        .into(),
+                                ));
+                            }
                             payload.extend_from_slice(&version.primary_raw().to_le_bytes());
                         }
                     }

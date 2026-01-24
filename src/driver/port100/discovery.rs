@@ -11,6 +11,28 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_RATS_RESPONSE: [u8; 5] = [0x05, 0x78, 0x80, 0x70, 0x02];
 
+#[derive(Debug, Clone)]
+pub struct SensfRequest {
+    pub system_code: u16,
+    pub request_code: u8,
+    pub time_slots: u8,
+    pub raw: Vec<u8>,
+}
+
+impl SensfRequest {
+    fn from_frame(frame: &[u8]) -> Option<Self> {
+        if frame.len() < 6 || frame.get(1) != Some(&0x00) {
+            return None;
+        }
+        Some(Self {
+            system_code: u16::from_be_bytes([frame[2], frame[3]]),
+            request_code: frame[4],
+            time_slots: frame[5],
+            raw: frame.to_vec(),
+        })
+    }
+}
+
 impl<T: Transport> Device<T> {
     pub fn detect_type_a(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
         let brty = target.brty();
@@ -302,21 +324,27 @@ impl<T: Transport> Device<T> {
         )))
     }
 
-    pub fn listen_type_f(
+    /// Listen for NFC-F and respond to SENSF_REQ frames using the provided responder.
+    /// The responder receives a parsed SENSF_REQ and should return the polling result
+    /// (IDm/PMm/optional bytes) to use in the SENSF_RES response.
+    pub fn listen_type_f<F>(
         &mut self,
         target: &LocalTarget,
         timeout: f32,
-    ) -> Result<Option<LocalTarget>> {
+        responder: F,
+    ) -> Result<Option<LocalTarget>>
+    where
+        F: FnMut(&SensfRequest) -> Option<Type3TagPollingResult>,
+    {
         ensure_supported_bitrate(
             target.brty_send(),
             &["212F", "424F"],
             "unsupported target bitrate: ",
         )?;
-        let sensf_res = ensure_sensf_res(target)?;
 
         self.configure_target_for_listen(target.brty_send())?;
 
-        self.listen_type_f_loop(target, sensf_res, timeout)
+        self.listen_type_f_loop(target, timeout, responder)
     }
 
     pub fn listen_dep(
@@ -524,14 +552,18 @@ impl<T: Transport> Device<T> {
         Ok(target)
     }
 
-    fn listen_type_f_loop(
+    fn listen_type_f_loop<F>(
         &mut self,
         target: &LocalTarget,
-        sensf_res: Vec<u8>,
         timeout: f32,
-    ) -> Result<Option<LocalTarget>> {
+        mut responder: F,
+    ) -> Result<Option<LocalTarget>>
+    where
+        F: FnMut(&SensfRequest) -> Option<Type3TagPollingResult>,
+    {
         let mut transmit_data: Option<Vec<u8>> = None;
-        let mut sensf_req: Option<Vec<u8>> = None;
+        let mut sensf_req: Option<SensfRequest> = None;
+        let mut sensf_res: Option<Type3TagPollingResult> = None;
 
         self.run_timeout_loop(timeout, |device, recv_timeout, _| {
             if let Some(ref data) = transmit_data {
@@ -567,14 +599,47 @@ impl<T: Transport> Device<T> {
 
             if exchange.len_matches_len_byte()
                 && let Some(ref req) = sensf_req
-                && frame.len() >= 10
-                && frame[2..10] == sensf_res[1..9]
+                && let Some(ref res) = sensf_res
+                && frame.get(2..10) == Some(res.idm.as_slice())
             {
                 device.chipset.configure_target(&[("rf_off_error", 1)])?;
                 let mut local = LocalTarget::new(target.brty_send())?;
-                local.data.sensf_req = Some(req.clone());
-                local.data.sensf_res = Some(sensf_res.clone());
-                local.data.tt3_cmd = Some(frame[1..].to_vec());
+                local.data.sensf_req = Some(req.raw.clone());
+                local.data.sensf_res = Some(build_sensf_res_payload(
+                    res,
+                    req.request_code,
+                    target.brty_send(),
+                ));
+                local.data.tt3_cmd = Some(frame.to_vec());
+                return Ok(Some(local));
+            }
+
+            if exchange.len_matches_len_byte() && frame.len() >= 10 && frame.get(1) != Some(&0x00) {
+                if sensf_req.is_none() {
+                    debug!(
+                        "accepting TT3 command without SENSF_REQ (idm {})",
+                        hex::encode(&frame[2..10])
+                    );
+                } else if let Some(ref res) = sensf_res {
+                    if frame.get(2..10) != Some(res.idm.as_slice()) {
+                        debug!(
+                            "accepting TT3 command with IDm mismatch (req {}, expected {})",
+                            hex::encode(&frame[2..10]),
+                            hex::encode(&res.idm)
+                        );
+                    }
+                }
+                device.chipset.configure_target(&[("rf_off_error", 1)])?;
+                let mut local = LocalTarget::new(target.brty_send())?;
+                local.data.sensf_req = sensf_req.as_ref().map(|req| req.raw.clone());
+                if let (Some(req), Some(res)) = (sensf_req.as_ref(), sensf_res.as_ref()) {
+                    local.data.sensf_res = Some(build_sensf_res_payload(
+                        res,
+                        req.request_code,
+                        target.brty_send(),
+                    ));
+                }
+                local.data.tt3_cmd = Some(frame.to_vec());
                 return Ok(Some(local));
             }
 
@@ -582,29 +647,12 @@ impl<T: Transport> Device<T> {
                 && exchange.raw().get(7) == Some(&6)
                 && exchange.raw().get(8) == Some(&0)
             {
-                let req = frame.to_vec();
-                if req.len() >= 6 {
-                    let system_code_hi = req[2];
-                    let system_code_lo = req[3];
-                    if (system_code_hi == 0xFF || system_code_hi == sensf_res[17])
-                        && (system_code_lo == 0xFF || system_code_lo == sensf_res[18])
-                    {
+                if let Some(req) = SensfRequest::from_frame(frame) {
+                    if let Some(res) = responder(&req) {
+                        let tx =
+                            build_sensf_res_payload(&res, req.request_code, target.brty_send());
                         sensf_req = Some(req);
-                        let mut tx = sensf_res[0..17].to_vec();
-                        match frame.get(4) {
-                            Some(1) => {
-                                tx.extend_from_slice(&sensf_res[17..19]);
-                            }
-                            Some(2) => {
-                                tx.push(0x00);
-                                tx.push(if target.brty_send() == "424F" {
-                                    0x02
-                                } else {
-                                    0x01
-                                });
-                            }
-                            _ => {}
-                        }
+                        sensf_res = Some(res);
                         let mut full = Vec::with_capacity(tx.len() + 1);
                         full.push((tx.len() + 1) as u8);
                         full.extend_from_slice(&tx);
@@ -1109,6 +1157,22 @@ fn clamp_timeout(timeout: f32) -> u16 {
     }
 }
 
+fn build_sensf_res_payload(res: &Type3TagPollingResult, request_code: u8, brty: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(19);
+    payload.push(0x01);
+    payload.extend_from_slice(&res.idm);
+    payload.extend_from_slice(&res.pmm);
+    match request_code {
+        0x01 => payload.extend_from_slice(&res.optional),
+        0x02 => {
+            payload.push(0x00);
+            payload.push(if brty == "424F" { 0x02 } else { 0x01 });
+        }
+        _ => {}
+    }
+    payload
+}
+
 fn nfca_params_from_local(target: &LocalTarget) -> Result<Vec<u8>> {
     let sens_res = expect_exact_field(target.data.sens_res.as_ref(), "sens_res", 2)?;
     let sdd_res = expect_exact_field(target.data.sdd_res.as_ref(), "sdd_res", 4)?;
@@ -1135,16 +1199,4 @@ fn expect_exact_field<'a>(
         )));
     }
     Ok(value)
-}
-
-fn ensure_sensf_res(target: &LocalTarget) -> Result<Vec<u8>> {
-    let sensf_res = target
-        .data
-        .sensf_res
-        .as_ref()
-        .ok_or_else(|| DriverError::Other("sensf_res is required".into()))?;
-    if sensf_res.len() != 19 {
-        return Err(DriverError::Other("sensf_res must be 19 bytes".into()));
-    }
-    Ok(sensf_res.clone())
 }

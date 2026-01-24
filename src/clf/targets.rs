@@ -44,6 +44,7 @@ pub struct TargetData {
     pub sensb_req: Option<Vec<u8>>,
     pub sensb_res: Option<Vec<u8>>,
     pub sensf_req: Option<Vec<u8>>,
+    /// SENSF_RES payload (length byte excluded). Used by listen_dep and DEP activation helpers.
     pub sensf_res: Option<Vec<u8>>,
     pub rats_res: Option<Vec<u8>>,
     pub rats_cmd: Option<Vec<u8>>,
@@ -51,6 +52,7 @@ pub struct TargetData {
     pub atr_req: Option<Vec<u8>>,
     pub atr_res: Option<Vec<u8>>,
     pub tt2_cmd: Option<Vec<u8>>,
+    /// Type 3 (NFC-F) command frame including the length byte.
     pub tt3_cmd: Option<Vec<u8>>,
     pub tt4_cmd: Option<Vec<u8>>,
     pub dep_req: Option<Vec<u8>>,

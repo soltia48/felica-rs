@@ -6,7 +6,8 @@ use super::secure::{
 };
 use super::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
-    FelicaStandardResponse, RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode,
+    FelicaStandardResponse, SearchServiceCodeResult, ServiceCode, Type3TagPollingResult,
+    frame_with_length_prefix,
 };
 use rand::{RngCore, rngs::OsRng};
 use std::cell::{Ref, RefCell, RefMut};
@@ -15,7 +16,6 @@ use std::rc::Rc;
 
 const ROOT_AREA_CODE: u16 = 0x0000;
 const ROOT_END_SERVICE_CODE: u16 = 0xFFFE;
-const DEFAULT_CRYPTO_ID: u8 = 0x43;
 const STATUS_UNSUPPORTED_SF1: u8 = 0xFF;
 const STATUS_UNSUPPORTED_SF2: u8 = 0xC2;
 type SharedBlocks = Rc<RefCell<Vec<[u8; BLOCK_SIZE]>>>;
@@ -115,25 +115,95 @@ impl FelicaStandardEmulator {
             .collect()
     }
 
+    /// Build the SENSF_RES payload (without the length byte) for the active system.
+    /// Uses request code 0x01 (system code request).
     pub fn sensf_res(&self) -> Option<Vec<u8>> {
         let system_code = self.resolve_active_system_code()?;
         self.sensf_res_for(system_code)
     }
 
+    /// Build a length-prefixed SENSF_RES frame for the active system.
+    pub fn sensf_res_frame(&self) -> Option<Vec<u8>> {
+        let system_code = self.resolve_active_system_code()?;
+        self.sensf_res_frame_for(system_code)
+    }
+
+    /// Build the SENSF_RES payload (without the length byte) for a given system code.
+    /// Uses request code 0x01 (system code request).
     pub fn sensf_res_for(&self, system_code: u16) -> Option<Vec<u8>> {
+        self.polling_payload_for(system_code, 0x01)
+    }
+
+    /// Build the SENSF_RES payload (without the length byte) for a given request code.
+    pub fn polling_payload_for(&self, system_code: u16, request_code: u8) -> Option<Vec<u8>> {
         let system = self
             .systems
             .iter()
             .find(|system| system.system_code == system_code)?;
+        let optional = polling_optional(system.system_code, request_code);
         FelicaStandardResponse::Polling {
             idm: system.idm,
             pmm: system.pmm,
-            optional: system_code.to_be_bytes().to_vec(),
+            optional,
         }
         .to_payload()
         .ok()
     }
 
+    /// Build the polling result for a given request code.
+    pub fn polling_result_for(
+        &self,
+        system_code: u16,
+        request_code: u8,
+    ) -> Option<Type3TagPollingResult> {
+        let system = self
+            .systems
+            .iter()
+            .find(|system| system.system_code == system_code)?;
+        let optional = polling_optional(system.system_code, request_code);
+        Some(Type3TagPollingResult {
+            idm: system.idm.to_vec(),
+            pmm: system.pmm.to_vec(),
+            optional,
+        })
+    }
+
+    /// Build the SENSF_RES payload (without the length byte) for a polling request.
+    /// This selects a matching system and updates the active system.
+    pub fn polling_response(
+        &mut self,
+        request_system_code: u16,
+        request_code: u8,
+    ) -> Option<Type3TagPollingResult> {
+        let system_code = self.resolve_polling_system_code(request_system_code)?;
+        self.set_active_system(system_code);
+        self.polling_result_for(system_code, request_code)
+    }
+
+    fn resolve_polling_system_code(&self, request_system_code: u16) -> Option<u16> {
+        if request_system_code == 0xFFFF {
+            return self.systems.first().map(|system| system.system_code);
+        }
+        if let Some(active) = self.active_system {
+            if self.systems.iter().any(|system| {
+                system.system_code == active && matches_system_code(request_system_code, active)
+            }) {
+                return Some(active);
+            }
+        }
+        self.systems
+            .iter()
+            .find(|system| matches_system_code(request_system_code, system.system_code))
+            .map(|system| system.system_code)
+    }
+
+    /// Build a length-prefixed SENSF_RES frame for a given system code.
+    pub fn sensf_res_frame_for(&self, system_code: u16) -> Option<Vec<u8>> {
+        let payload = self.sensf_res_for(system_code)?;
+        Some(frame_with_length_prefix(&payload))
+    }
+
+    /// Handle a length-prefixed FeliCa frame (length byte + payload).
     pub fn handle_frame(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
         if frame.len() < 2 {
             return None;
@@ -160,11 +230,7 @@ impl FelicaStandardEmulator {
             } => {
                 let index = self.system_index_for_polling(system_code)?;
                 let system = self.systems.get(index)?;
-                let optional = match request_code {
-                    0x01 => system.system_code.to_be_bytes().to_vec(),
-                    0x02 => vec![0x00, 0x00],
-                    _ => Vec::new(),
-                };
+                let optional = polling_optional(system.system_code, request_code);
                 encode_response_frame(FelicaStandardResponse::Polling {
                     idm: system.idm,
                     pmm: system.pmm,
@@ -218,31 +284,6 @@ impl FelicaStandardEmulator {
                     .map(|code| system.node_key_version(*code))
                     .collect::<Vec<_>>();
                 encode_response_frame(FelicaStandardResponse::RequestService { idm, key_versions })
-            }
-            FelicaStandardCommand::RequestServiceV2 { idm, service_codes } => {
-                let index = self.system_index_for_idm(&idm)?;
-                let system = self.systems.get(index)?;
-                let key_versions = service_codes
-                    .iter()
-                    .map(|code| {
-                        let version = system.node_key_version(*code);
-                        if matches!(DEFAULT_CRYPTO_ID, 0x41 | 0x43) {
-                            RequestServiceV2KeyVersion::Dual {
-                                aes: version,
-                                des: version,
-                            }
-                        } else {
-                            RequestServiceV2KeyVersion::Single(version)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                encode_response_frame(FelicaStandardResponse::RequestServiceV2 {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                    crypto_id: Some(DEFAULT_CRYPTO_ID),
-                    key_versions: Some(key_versions),
-                })
             }
             FelicaStandardCommand::ReadWithoutEncryption {
                 idm,
@@ -448,6 +489,7 @@ pub struct EmulatedSystem {
     pmm: [u8; 8],
     root_area: EmulatedArea,
     mode: SystemMode,
+    system_key_version: u16,
     system_key: [u8; 8],
     idi: [u8; 8],
     pmi: [u8; 8],
@@ -464,6 +506,7 @@ impl EmulatedSystem {
             pmm,
             root_area,
             mode: SystemMode::Mode0,
+            system_key_version: 0x0000,
             system_key: [0x00; 8],
             idi: [0x00; 8],
             pmi: [0x00; 8],
@@ -474,6 +517,10 @@ impl EmulatedSystem {
 
     pub fn system_code(&self) -> u16 {
         self.system_code
+    }
+
+    pub fn system_key_version(&self) -> u16 {
+        self.system_key_version
     }
 
     pub fn system_key(&self) -> &[u8; 8] {
@@ -494,6 +541,11 @@ impl EmulatedSystem {
 
     pub fn root_area_mut(&mut self) -> &mut EmulatedArea {
         &mut self.root_area
+    }
+
+    pub fn set_system_key_version(&mut self, version: u16) -> &mut Self {
+        self.system_key_version = version;
+        self
     }
 
     pub fn set_system_key(&mut self, system_key: [u8; 8]) -> &mut Self {
@@ -545,6 +597,9 @@ impl EmulatedSystem {
     }
 
     fn node_key_version(&self, node_code: ServiceCode) -> u16 {
+        if node_code.raw() == 0xFFFF {
+            return self.system_key_version;
+        }
         if let Some(service) = self.find_service(node_code) {
             if service.service_code.requires_key() {
                 return service.key_version;
@@ -1252,4 +1307,12 @@ fn matches_system_code(request: u16, system_code: u16) -> bool {
     let sys_hi = (system_code >> 8) as u8;
     let sys_lo = system_code as u8;
     (req_hi == 0xFF || req_hi == sys_hi) && (req_lo == 0xFF || req_lo == sys_lo)
+}
+
+fn polling_optional(system_code: u16, request_code: u8) -> Vec<u8> {
+    match request_code {
+        0x01 => system_code.to_be_bytes().to_vec(),
+        0x02 => vec![0x00, 0x00],
+        _ => Vec::new(),
+    }
 }
