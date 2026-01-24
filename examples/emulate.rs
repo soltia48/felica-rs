@@ -1,7 +1,7 @@
-//! Simple FeliCa Standard emulator using the Port-100 (RC-S380) driver.
+//! FeliCa Standard emulator using the Port-100 (RC-S380) driver.
 //!
 //! Usage:
-//!   cargo run --example felica_emulate_port100
+//!   cargo run --example emulate
 
 use log::{debug, info};
 use nfc_rs::felica_standard::{
