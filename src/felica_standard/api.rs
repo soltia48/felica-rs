@@ -411,16 +411,16 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
         let context = AuthenticationContext::new(&idm, group_service_key, user_service_key);
 
-        let challenge_1a = context.encrypt_challenge1(&random_1);
+        let challenge_1a = context.encrypt_challenge1a(&random_1);
         let (challenge_1b, challenge_2a) = self.authentication1(areas, services, &challenge_1a)?;
-        if !context.verify_challenge1(&random_1, &challenge_1b) {
+        if !context.verify_challenge1b(&random_1, &challenge_1b) {
             return Err(FelicaStandardError::AuthenticationFailed(
                 "Authentication1 verification failed".into(),
             ));
         }
 
-        let random_2 = context.decrypt_challenge2(&challenge_2a);
-        let challenge_2b = context.encrypt_challenge2(&random_2);
+        let random_2 = context.decrypt_challenge2a(&challenge_2a);
+        let challenge_2b = context.encrypt_challenge2b(&random_2);
         let auth2_response = self.authentication2(&challenge_2b)?;
         let payload = auth2_response.decrypt_payload(&random_2)?;
         if payload.len() < 24 {

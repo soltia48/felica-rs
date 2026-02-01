@@ -642,11 +642,11 @@ impl EmulatedSystem {
 
         let (group_key, user_key) = generate_service_keys(&system_key, &area_keys, &service_keys);
         let context = AuthenticationContext::new(&idm, &group_key, &user_key);
-        let random_1 = context.decrypt_challenge1(&challenge_1a);
+        let random_1 = context.decrypt_challenge1a(&challenge_1a);
         let mut random_2 = [0u8; 8];
         OsRng.fill_bytes(&mut random_2);
-        let challenge_1b = context.build_challenge1b(&random_1);
-        let challenge_2a = context.build_challenge1b(&random_2);
+        let challenge_1b = context.encrypt_challenge1b(&random_1);
+        let challenge_2a = context.encrypt_challenge2a(&random_2);
 
         self.pending_auth = Some(PendingAuthentication {
             context,
@@ -666,7 +666,7 @@ impl EmulatedSystem {
 
     fn handle_authentication2(&mut self, _idm: [u8; 8], challenge_2b: [u8; 8]) -> Option<Vec<u8>> {
         let pending = self.pending_auth.take()?;
-        let expected = pending.context.encrypt_challenge2(&pending.random_2);
+        let expected = pending.context.encrypt_challenge2b(&pending.random_2);
         if expected != challenge_2b {
             return None;
         }

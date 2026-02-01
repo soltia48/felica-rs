@@ -427,27 +427,31 @@ impl AuthenticationContext {
         Self { l, alpha, beta }
     }
 
-    pub(crate) fn decrypt_challenge1(&self, challenge_1a: &[u8; 8]) -> [u8; 8] {
+    pub(crate) fn decrypt_challenge1a(&self, challenge_1a: &[u8; 8]) -> [u8; 8] {
         decrypt_3des_block(challenge_1a, &self.alpha, &self.l)
     }
 
-    pub(crate) fn encrypt_challenge1(&self, random_1: &[u8; 8]) -> [u8; 8] {
+    pub(crate) fn encrypt_challenge1a(&self, random_1: &[u8; 8]) -> [u8; 8] {
         encrypt_3des_block(random_1, &self.alpha, &self.l)
     }
 
-    pub(crate) fn build_challenge1b(&self, random_1: &[u8; 8]) -> [u8; 8] {
+    pub(crate) fn encrypt_challenge1b(&self, random_1: &[u8; 8]) -> [u8; 8] {
         encrypt_3des_block(random_1, &self.l, &self.beta)
     }
 
-    pub(crate) fn verify_challenge1(&self, random_1: &[u8; 8], challenge_1b: &[u8; 8]) -> bool {
-        encrypt_3des_block(random_1, &self.l, &self.beta) == *challenge_1b
+    pub(crate) fn encrypt_challenge2a(&self, random_2: &[u8; 8]) -> [u8; 8] {
+        encrypt_3des_block(random_2, &self.l, &self.beta)
     }
 
-    pub(crate) fn decrypt_challenge2(&self, challenge_2a: &[u8; 8]) -> [u8; 8] {
+    pub(crate) fn verify_challenge1b(&self, random_1: &[u8; 8], challenge_1b: &[u8; 8]) -> bool {
+        self.encrypt_challenge1b(random_1) == *challenge_1b
+    }
+
+    pub(crate) fn decrypt_challenge2a(&self, challenge_2a: &[u8; 8]) -> [u8; 8] {
         decrypt_3des_block(challenge_2a, &self.l, &self.beta)
     }
 
-    pub(crate) fn encrypt_challenge2(&self, random_2: &[u8; 8]) -> [u8; 8] {
+    pub(crate) fn encrypt_challenge2b(&self, random_2: &[u8; 8]) -> [u8; 8] {
         encrypt_3des_block(random_2, &self.alpha, &self.l)
     }
 }
