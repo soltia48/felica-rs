@@ -680,7 +680,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
     pub fn register_issue_id(
         &mut self,
         system_code: u16,
-        key_version: u16,
+        area0_key_version: u16,
         area0_key: &[u8; DES_BLOCK_SIZE],
         issue_id: &[u8; DES_BLOCK_SIZE],
         issue_parameter: &[u8; DES_BLOCK_SIZE],
@@ -688,7 +688,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
     ) -> Result<u16, FelicaStandardError> {
         let mut package_plain = Vec::with_capacity(16);
         package_plain.extend_from_slice(&system_code.to_be_bytes());
-        package_plain.extend_from_slice(&key_version.to_le_bytes());
+        package_plain.extend_from_slice(&area0_key_version.to_le_bytes());
         package_plain.extend_from_slice(area0_key);
         package_plain.extend_from_slice(&[0u8; 4]);
 
