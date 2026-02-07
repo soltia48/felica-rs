@@ -1,7 +1,7 @@
 //! Suica Card Dump Utility
 //!
 //! This utility dumps information from Suica cards using FeliCa encryption.
-//! Keys are loaded from a CSV file in the format: "system_code,node,version,key"
+//! Keys are loaded from a CSV file in the format: "system_code,node,version,idm,key"
 //!
 //! # Usage
 //!
@@ -24,10 +24,10 @@ use csv::ReaderBuilder;
 use encoding_rs::SHIFT_JIS;
 use hex::encode;
 use nfc_rs::felica_standard::{
-    BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, ServiceCode,
-    generate_service_keys,
+    generate_service_keys, BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError,
+    ServiceCode,
 };
-use nfc_rs::{ReaderPreference, RemoteDriver, open_reader};
+use nfc_rs::{open_reader, ReaderPreference, RemoteDriver};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,6 +37,24 @@ use std::io::{BufRead, BufReader};
 
 /// Suica system code
 const SUICA_SYSTEM_CODE: u16 = 0x0003;
+const SYSTEM_SERVICE_CODE: u16 = 0xFFFF;
+const KEY_LENGTH_BYTES: usize = 8;
+
+type NodeKeys = HashMap<u16, [u8; KEY_LENGTH_BYTES]>;
+type IdmScopedKeys = HashMap<String, NodeKeys>;
+type SystemKeys = HashMap<u16, IdmScopedKeys>;
+
+#[derive(Debug, Default)]
+struct CliOptions {
+    keys_path: Option<String>,
+    remote_addr: Option<String>,
+    station_codes_path: Option<String>,
+}
+
+enum CliAction {
+    Run(CliOptions),
+    ShowHelp,
+}
 
 /// Area node IDs for Suica
 const AREA_NODE_IDS: &[u16] = &[0x0000, 0x0040, 0x0800, 0x0FC0, 0x1000];
@@ -369,97 +387,181 @@ struct KeyRecord {
     system_code: String,
     node: String,
     version: String,
+    #[serde(default)]
+    idm: String,
     key: String,
 }
 
+fn parse_hex_u16_key_field(record_num: usize, field: &str, value: &str) -> Option<u16> {
+    match parse_hex_u16(value) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            eprintln!(
+                "Warning: Invalid {} '{}' at key record {}: {}",
+                field, value, record_num, err
+            );
+            None
+        }
+    }
+}
+
+fn parse_idm_key_field(record_num: usize, value: &str) -> Option<Option<String>> {
+    match parse_idm_hex(value) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            eprintln!(
+                "Warning: Invalid idm '{}' at key record {}: {}",
+                value, record_num, err
+            );
+            None
+        }
+    }
+}
+
+fn parse_key_bytes_field(record_num: usize, value: &str) -> Option<[u8; KEY_LENGTH_BYTES]> {
+    let key_bytes = match hex::decode(value) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "Warning: Invalid key '{}' at key record {}: {}",
+                value, record_num, err
+            );
+            return None;
+        }
+    };
+
+    if key_bytes.len() != KEY_LENGTH_BYTES {
+        eprintln!(
+            "Warning: Invalid key length at key record {} (expected {} bytes, got {})",
+            record_num,
+            KEY_LENGTH_BYTES,
+            key_bytes.len()
+        );
+        return None;
+    }
+
+    let mut key = [0u8; KEY_LENGTH_BYTES];
+    key.copy_from_slice(&key_bytes);
+    Some(key)
+}
+
 /// Load keys from CSV file
-/// CSV format: system_code,node,version,key (with header row)
-fn load_keys_from_csv(path: &str) -> Result<HashMap<u16, [u8; 8]>, Box<dyn Error>> {
+/// CSV format: system_code,node,version,idm,key (with header row)
+fn load_keys_from_csv(path: &str) -> Result<SystemKeys, Box<dyn Error>> {
     let file = File::open(path)?;
     let mut csv_reader = ReaderBuilder::new()
         .has_headers(true)
         .trim(csv::Trim::All)
         .from_reader(file);
 
-    let mut keys = HashMap::new();
+    let mut keys: SystemKeys = HashMap::new();
 
-    for (record_num, result) in csv_reader.deserialize().enumerate() {
+    for (index, result) in csv_reader.deserialize().enumerate() {
+        let record_num = index + 1;
         let record: KeyRecord = match result {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Warning: Failed to parse record {}: {}", record_num + 1, e);
+                eprintln!("Warning: Failed to parse key record {}: {}", record_num, e);
                 continue;
             }
         };
 
-        let system_code = match u16::from_str_radix(&record.system_code, 16) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Invalid system_code '{}' at record {}: {}",
-                    record.system_code,
-                    record_num + 1,
-                    e
-                );
-                continue;
-            }
-        };
-
-        if system_code != SUICA_SYSTEM_CODE {
+        let Some(system_code) =
+            parse_hex_u16_key_field(record_num, "system_code", &record.system_code)
+        else {
             continue;
-        }
-
-        let node = match u16::from_str_radix(&record.node, 16) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Invalid node '{}' at record {}: {}",
-                    record.node,
-                    record_num + 1,
-                    e
-                );
-                continue;
-            }
         };
 
-        let key_bytes = match hex::decode(&record.key) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Invalid key '{}' at record {}: {}",
-                    record.key,
-                    record_num + 1,
-                    e
-                );
-                continue;
-            }
-        };
-
-        if key_bytes.len() != 8 {
-            eprintln!(
-                "Warning: Invalid key length at record {} (expected 8 bytes, got {})",
-                record_num + 1,
-                key_bytes.len()
-            );
+        let Some(node) = parse_hex_u16_key_field(record_num, "node", &record.node) else {
             continue;
-        }
+        };
 
-        let mut key = [0u8; 8];
-        key.copy_from_slice(&key_bytes);
-        keys.insert(node, key);
+        let Some(idm) = parse_idm_key_field(record_num, &record.idm) else {
+            continue;
+        };
+
+        let Some(key) = parse_key_bytes_field(record_num, &record.key) else {
+            continue;
+        };
+
+        keys.entry(system_code)
+            .or_default()
+            .entry(idm.unwrap_or_default())
+            .or_default()
+            .insert(node, key);
     }
 
     Ok(keys)
 }
 
+fn parse_hex_u16(value: &str) -> Result<u16, std::num::ParseIntError> {
+    let trimmed = value.trim();
+    let without_prefix = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    u16::from_str_radix(without_prefix, 16)
+}
+
+fn parse_idm_hex(value: &str) -> Result<Option<String>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let without_prefix = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    let compact: String = without_prefix
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != ':' && *c != '-')
+        .collect();
+
+    let bytes = hex::decode(&compact).map_err(|err| err.to_string())?;
+    if bytes.len() != KEY_LENGTH_BYTES {
+        return Err(format!("expected 8 bytes, got {}", bytes.len()));
+    }
+    Ok(Some(hex::encode(bytes).to_uppercase()))
+}
+
+fn resolve_keys_for_card(
+    key_store: &SystemKeys,
+    system_code: u16,
+    idm_hex: &str,
+) -> Option<NodeKeys> {
+    let idm_scoped = key_store.get(&system_code)?;
+    let mut merged = NodeKeys::new();
+
+    if let Some(common_keys) = idm_scoped.get("") {
+        merged.extend(common_keys.iter().map(|(code, key)| (*code, *key)));
+    }
+    if let Some(card_keys) = idm_scoped.get(idm_hex) {
+        merged.extend(card_keys.iter().map(|(code, key)| (*code, *key)));
+    }
+
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn count_system_keys(key_store: &SystemKeys, system_code: u16) -> usize {
+    key_store
+        .get(&system_code)
+        .map(|idm_scoped| idm_scoped.values().map(|nodes| nodes.len()).sum())
+        .unwrap_or(0)
+}
+
 /// Derive group and user service keys from hierarchical keys
 fn derive_service_keys(
-    keys: &HashMap<u16, [u8; 8]>,
+    keys: &NodeKeys,
     areas: &[u16],
     services: &[ServiceCode],
 ) -> Option<([u8; 8], [u8; 8])> {
     // Get system key (0xFFFF)
-    let system_key = keys.get(&0xFFFF)?;
+    let system_key = keys.get(&SYSTEM_SERVICE_CODE)?;
 
     // Collect area keys in order
     let mut area_keys = Vec::new();
@@ -510,80 +612,93 @@ fn print_usage() {
     eprintln!("  --help, -h                  Show this help");
     eprintln!();
     eprintln!("CSV Format (with header row):");
-    eprintln!("  system_code,node,version,key");
-    eprintln!("  0003,FFFF,3,0123456789ABCDEF");
-    eprintln!("  0003,0000,3,...");
+    eprintln!("  system_code,node,version,idm,key");
+    eprintln!("  0003,FFFF,0003,,0123456789ABCDEF");
+    eprintln!("  0003,0000,0003,0123456789ABCDEF,0123456789ABCDEF");
+    eprintln!("  (idm empty means shared key for all cards in the system)");
+}
+
+fn parse_cli_args(args: &[String]) -> Result<CliAction, String> {
+    let mut options = CliOptions::default();
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--keys" | "-k" => {
+                let Some(path) = args.get(index + 1) else {
+                    return Err("--keys requires a file path argument".to_string());
+                };
+                options.keys_path = Some(path.clone());
+                index += 2;
+            }
+            "--station-codes" | "-s" => {
+                let Some(path) = args.get(index + 1) else {
+                    return Err("--station-codes requires a file path argument".to_string());
+                };
+                options.station_codes_path = Some(path.clone());
+                index += 2;
+            }
+            "--remote" | "-r" => {
+                let Some(addr) = args.get(index + 1) else {
+                    return Err("--remote requires an address argument".to_string());
+                };
+                options.remote_addr = Some(addr.clone());
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(CliAction::ShowHelp),
+            unknown => return Err(format!("Unknown argument: {}", unknown)),
+        }
+    }
+
+    Ok(CliAction::Run(options))
+}
+
+fn boxed_error<E>(err: E) -> Box<dyn Error>
+where
+    E: Error + 'static,
+{
+    Box::new(err)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
-
-    // Parse arguments
-    let mut keys_path: Option<String> = None;
-    let mut remote_addr: Option<String> = None;
-    let mut station_codes_path: Option<String> = None;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--keys" | "-k" => {
-                if i + 1 >= args.len() {
-                    eprintln!("Error: --keys requires a file path argument");
-                    print_usage();
-                    std::process::exit(1);
-                }
-                keys_path = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--station-codes" | "-s" => {
-                if i + 1 >= args.len() {
-                    eprintln!("Error: --station-codes requires a file path argument");
-                    print_usage();
-                    std::process::exit(1);
-                }
-                station_codes_path = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--remote" | "-r" => {
-                if i + 1 >= args.len() {
-                    eprintln!("Error: --remote requires an address argument");
-                    print_usage();
-                    std::process::exit(1);
-                }
-                remote_addr = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--help" | "-h" => {
-                print_usage();
-                return Ok(());
-            }
-            _ => {
-                eprintln!("Error: Unknown argument: {}", args[i]);
-                print_usage();
-                std::process::exit(1);
-            }
+    let options = match parse_cli_args(&args) {
+        Ok(CliAction::Run(options)) => options,
+        Ok(CliAction::ShowHelp) => {
+            print_usage();
+            return Ok(());
         }
-    }
+        Err(message) => {
+            eprintln!("Error: {}", message);
+            print_usage();
+            std::process::exit(1);
+        }
+    };
 
-    let keys_path = keys_path.unwrap_or_else(|| {
+    let keys_path = options.keys_path.unwrap_or_else(|| {
         eprintln!("Error: --keys argument is required");
         print_usage();
         std::process::exit(1);
     });
 
     // Initialize station lookup
-    if let Some(ref path) = station_codes_path {
+    if let Some(ref path) = options.station_codes_path {
         println!("Station codes file: {}", path);
     }
-    init_station_lookup(station_codes_path);
+    init_station_lookup(options.station_codes_path);
 
     // Load keys
     println!("Loading keys from {}...", keys_path);
-    let keys = load_keys_from_csv(&keys_path)?;
-    println!("Loaded {} keys", keys.len());
+    let key_store = load_keys_from_csv(&keys_path)?;
+    let suica_key_count = count_system_keys(&key_store, SUICA_SYSTEM_CODE);
+    println!(
+        "Loaded {} keys for system code 0x{:04X}",
+        suica_key_count, SUICA_SYSTEM_CODE
+    );
 
-    if keys.is_empty() {
+    if suica_key_count == 0 {
         eprintln!(
             "Error: No keys found for system code 0x{:04X}",
             SUICA_SYSTEM_CODE
@@ -592,17 +707,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Run with appropriate driver
-    if let Some(addr) = remote_addr {
-        run_with_remote_driver(&addr, &keys)
+    if let Some(addr) = options.remote_addr {
+        run_with_remote_driver(&addr, &key_store)
     } else {
-        run_with_local_driver(&keys)
+        run_with_local_driver(&key_store)
     }
 }
 
-fn run_with_local_driver(keys: &HashMap<u16, [u8; 8]>) -> Result<(), Box<dyn Error>> {
+fn run_with_local_driver(key_store: &SystemKeys) -> Result<(), Box<dyn Error>> {
     // Open local reader
     let preference = ReaderPreference::Auto;
-    let mut reader = open_reader(preference).map_err(|err| -> Box<dyn Error> { Box::new(err) })?;
+    let mut reader = open_reader(preference).map_err(boxed_error)?;
 
     println!(
         "Reader: {} - {}",
@@ -610,77 +725,76 @@ fn run_with_local_driver(keys: &HashMap<u16, [u8; 8]>) -> Result<(), Box<dyn Err
         reader.product_name().unwrap_or("Unknown")
     );
 
-    // Poll for Suica card
-    println!("Waiting for Suica card...");
-    let (felica, _polling) =
-        FelicaStandard::polling(reader.driver_mut(), "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
-
-    let idm_hex = encode(felica.idm()).to_uppercase();
-    let pmm_hex = encode(felica.pmm()).to_uppercase();
-
-    print_section("カード識別");
-    print_item("IDm", &idm_hex);
-    print_item("PMm", &pmm_hex);
-
-    // Prepare areas and services for authentication
-    let areas: Vec<u16> = AREA_NODE_IDS.to_vec();
-    let services: Vec<ServiceCode> = SERVICE_NODE_IDS
-        .iter()
-        .map(|&s| ServiceCode::new(s))
-        .collect();
-
-    let (group_service_key, user_service_key) = derive_service_keys(keys, &areas, &services)
-        .ok_or_else(|| "Missing keys for authentication - check your keys.csv file")?;
-
-    // Perform mutual authentication (need to re-poll)
-    let (mut felica, _) =
-        FelicaStandard::polling(reader.driver_mut(), "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
-
-    let auth_result =
-        felica.mutual_authentication(&areas, &services, &group_service_key, &user_service_key)?;
-
-    let idi_str = idi_bytes_to_str(&auth_result.issue_id);
-    let pmi_hex = encode(&auth_result.issue_parameter).to_uppercase();
-
-    print_item("IDi", &idi_str);
-    print_item("PMi", &pmi_hex);
-
-    // Read encrypted blocks
-    read_and_print_suica_data(&mut felica)?;
-
-    Ok(())
+    run_with_driver(reader.driver_mut(), key_store)
 }
 
-fn run_with_remote_driver(addr: &str, keys: &HashMap<u16, [u8; 8]>) -> Result<(), Box<dyn Error>> {
+fn run_with_remote_driver(addr: &str, key_store: &SystemKeys) -> Result<(), Box<dyn Error>> {
     println!("Connecting to remote reader at {}...", addr);
     let mut driver = RemoteDriver::connect(addr)?;
     println!("Connected!");
 
+    run_with_driver(&mut driver, key_store)
+}
+
+fn build_auth_targets() -> (Vec<u16>, Vec<ServiceCode>) {
+    let areas = AREA_NODE_IDS.to_vec();
+    let services = SERVICE_NODE_IDS
+        .iter()
+        .map(|&service| ServiceCode::new(service))
+        .collect();
+    (areas, services)
+}
+
+fn make_input_error(message: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+}
+
+fn resolve_auth_keys(
+    key_store: &SystemKeys,
+    idm_hex: &str,
+    areas: &[u16],
+    services: &[ServiceCode],
+) -> Result<([u8; 8], [u8; 8]), std::io::Error> {
+    let keys = resolve_keys_for_card(key_store, SUICA_SYSTEM_CODE, idm_hex).ok_or_else(|| {
+        make_input_error(format!(
+            "No keys found for system code 0x{:04X} and IDm {}; check keys.csv",
+            SUICA_SYSTEM_CODE, idm_hex
+        ))
+    })?;
+
+    derive_service_keys(&keys, areas, services).ok_or_else(|| {
+        make_input_error(format!(
+            "Missing required node keys for authentication (IDm: {}); check keys.csv",
+            idm_hex
+        ))
+    })
+}
+
+fn run_with_driver<D: FelicaDriver + ?Sized>(
+    driver: &mut D,
+    key_store: &SystemKeys,
+) -> Result<(), Box<dyn Error>> {
     // Poll for Suica card
     println!("Waiting for Suica card...");
-    let (felica, _polling) =
-        FelicaStandard::polling(&mut driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
-
-    let idm_hex = encode(felica.idm()).to_uppercase();
-    let pmm_hex = encode(felica.pmm()).to_uppercase();
+    let (idm_hex, pmm_hex) = {
+        let (felica, _polling) =
+            FelicaStandard::polling(driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
+        (
+            encode(felica.idm()).to_uppercase(),
+            encode(felica.pmm()).to_uppercase(),
+        )
+    };
 
     print_section("カード識別");
     print_item("IDm", &idm_hex);
     print_item("PMm", &pmm_hex);
 
-    // Prepare areas and services for authentication
-    let areas: Vec<u16> = AREA_NODE_IDS.to_vec();
-    let services: Vec<ServiceCode> = SERVICE_NODE_IDS
-        .iter()
-        .map(|&s| ServiceCode::new(s))
-        .collect();
-
-    let (group_service_key, user_service_key) = derive_service_keys(keys, &areas, &services)
-        .ok_or_else(|| "Missing keys for authentication - check your keys.csv file")?;
+    let (areas, services) = build_auth_targets();
+    let (group_service_key, user_service_key) =
+        resolve_auth_keys(key_store, &idm_hex, &areas, &services)?;
 
     // Perform mutual authentication (need to re-poll)
-    let (mut felica, _) =
-        FelicaStandard::polling(&mut driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
+    let (mut felica, _) = FelicaStandard::polling(driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
 
     let auth_result =
         felica.mutual_authentication(&areas, &services, &group_service_key, &user_service_key)?;
@@ -735,7 +849,7 @@ fn read_blocks<D: FelicaDriver + ?Sized>(
     let mut blocks = Vec::with_capacity(block_count);
 
     for block_num in 0..block_count {
-        let block_list = vec![BlockListElement::new(block_num as u16, service_index, 0)];
+        let block_list = [BlockListElement::new(block_num as u16, service_index, 0)];
         match felica.read(&block_list) {
             Ok(read_blocks) => {
                 if !read_blocks.is_empty() {
