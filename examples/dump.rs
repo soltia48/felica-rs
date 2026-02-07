@@ -64,7 +64,7 @@ struct AreaNode {
     #[serde(skip_serializing)]
     area_code_raw: u16,
     area_code_hex: String,
-    end_service_index_hex: String,
+    end_service_code_hex: String,
     key_version: Option<KeyVersionSummary>,
     children: Vec<AreaChild>,
 }
@@ -315,31 +315,45 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
     let mut areas = Vec::new();
     let mut system_services = Vec::new();
     let mut warnings = Vec::new();
-    let mut index = 0x00u16;
-    while index <= 0x00FF {
+    let mut index = 0u16;
+    loop {
         let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
         match felica.search_service_code(index)? {
             None => break,
             Some(SearchServiceCodeResult::Area {
                 area_code,
-                end_service_index,
+                end_service_code,
             }) => {
+                let Some(child_index) = index.checked_add(1) else {
+                    warnings.push(format!(
+                        "Directory index overflow while descending into area 0x{:04X}",
+                        area_code
+                    ));
+                    break;
+                };
                 let (area, next_index) = collect_area(
                     driver,
                     system_code,
                     area_code,
-                    end_service_index,
-                    index.saturating_add(1),
+                    end_service_code,
+                    child_index,
                     key_request_codes,
                     seen_codes,
                     &mut warnings,
                 )?;
                 areas.push(area);
+                if next_index <= index {
+                    warnings.push(format!(
+                        "Area traversal did not advance at directory index 0x{:04X}",
+                        index
+                    ));
+                    break;
+                }
                 index = next_index;
             }
             Some(SearchServiceCodeResult::Service(service_code)) => {
                 warnings.push(format!(
-                    "Service 0x{:04X} at index 0x{:02X} has no parent area; treating as system-level service",
+                    "Service 0x{:04X} at index 0x{:04X} has no parent area; treating as system-level service",
                     service_code.raw(),
                     index
                 ));
@@ -358,7 +372,13 @@ fn collect_system_areas<D: FelicaDriver + ?Sized>(
                         key_version: None,
                     },
                 );
-                index = index.saturating_add(1);
+                let Some(next_index) = index.checked_add(1) else {
+                    warnings.push(
+                        "Directory index overflow while reading system-level services".into(),
+                    );
+                    break;
+                };
+                index = next_index;
             }
         }
     }
@@ -369,7 +389,7 @@ fn collect_area<D: FelicaDriver + ?Sized>(
     driver: &mut D,
     system_code: u16,
     area_code: u16,
-    end_service_index: u16,
+    end_service_code: u16,
     mut index: u16,
     key_request_codes: &mut Vec<ServiceCode>,
     seen_codes: &mut HashSet<u16>,
@@ -378,17 +398,21 @@ fn collect_area<D: FelicaDriver + ?Sized>(
     register_service_code(key_request_codes, seen_codes, area_code);
 
     let mut children = Vec::new();
-    while index <= end_service_index {
+    loop {
         let (mut felica, _) = FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
         match felica.search_service_code(index)? {
             Some(SearchServiceCodeResult::Service(service_code)) => {
-                register_service_code(key_request_codes, seen_codes, service_code.raw());
+                let service_code_raw = service_code.raw();
+                if service_code_raw < area_code || service_code_raw > end_service_code {
+                    break;
+                }
+                register_service_code(key_request_codes, seen_codes, service_code_raw);
                 append_service_child(
                     &mut children,
                     ServiceSummary {
-                        service_code_raw: service_code.raw(),
+                        service_code_raw,
                         attributes_raw: service_code.attributes(),
-                        code_hex: hex_u16(service_code.raw()),
+                        code_hex: hex_u16(service_code_raw),
                         number: service_code.number(),
                         attributes_hex: hex_u8(service_code.attributes()),
                         attributes_description: service_code
@@ -397,30 +421,54 @@ fn collect_area<D: FelicaDriver + ?Sized>(
                         key_version: None,
                     },
                 );
-                index = index.saturating_add(1);
+                let Some(next_index) = index.checked_add(1) else {
+                    warnings.push(format!(
+                        "Directory index overflow while traversing area 0x{:04X}",
+                        area_code
+                    ));
+                    break;
+                };
+                index = next_index;
             }
             Some(SearchServiceCodeResult::Area {
                 area_code: child_code,
-                end_service_index: child_end,
+                end_service_code: child_end,
             }) => {
-                if child_end < index {
+                if child_end < child_code {
                     warnings.push(format!(
-                        "Area 0x{:04X} end index 0x{:02X} precedes start 0x{:02X}",
-                        child_code, child_end, index
+                        "Area 0x{:04X} end service code 0x{:04X} precedes start 0x{:04X}",
+                        child_code, child_end, child_code
                     ));
                     break;
                 }
+                if child_code < area_code || child_end > end_service_code {
+                    break;
+                }
+                let Some(child_index) = index.checked_add(1) else {
+                    warnings.push(format!(
+                        "Directory index overflow while descending into area 0x{:04X}",
+                        child_code
+                    ));
+                    break;
+                };
                 let (child_area, next_index) = collect_area(
                     driver,
                     system_code,
                     child_code,
                     child_end,
-                    index.saturating_add(1),
+                    child_index,
                     key_request_codes,
                     seen_codes,
                     warnings,
                 )?;
                 children.push(AreaChild::Area(child_area));
+                if next_index <= index {
+                    warnings.push(format!(
+                        "Child area traversal did not advance at directory index 0x{:04X}",
+                        index
+                    ));
+                    break;
+                }
                 index = next_index;
             }
             None => {
@@ -433,11 +481,11 @@ fn collect_area<D: FelicaDriver + ?Sized>(
         AreaNode {
             area_code_raw: area_code,
             area_code_hex: hex_u16(area_code),
-            end_service_index_hex: hex_u16(end_service_index),
+            end_service_code_hex: hex_u16(end_service_code),
             key_version: None,
             children,
         },
-        end_service_index.saturating_add(1),
+        index,
     ))
 }
 

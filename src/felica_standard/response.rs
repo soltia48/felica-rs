@@ -300,7 +300,7 @@ impl FelicaStandardResponse {
         } else if payload.len() == 4 {
             Some(SearchServiceCodeResult::Area {
                 area_code: u16::from_le_bytes([payload[0], payload[1]]),
-                end_service_index: u16::from_le_bytes([payload[2], payload[3]]),
+                end_service_code: u16::from_le_bytes([payload[2], payload[3]]),
             })
         } else {
             return Err(DriverError::Other(
@@ -579,10 +579,10 @@ impl FelicaStandardResponse {
                     }
                     Some(SearchServiceCodeResult::Area {
                         area_code,
-                        end_service_index,
+                        end_service_code,
                     }) => {
                         payload.extend_from_slice(&area_code.to_le_bytes());
-                        payload.extend_from_slice(&end_service_index.to_le_bytes());
+                        payload.extend_from_slice(&end_service_code.to_le_bytes());
                     }
                 }
                 Ok(payload)

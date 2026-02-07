@@ -270,7 +270,7 @@ impl FelicaStandardEmulator {
                         end_service_code,
                     }) => Some(SearchServiceCodeResult::Area {
                         area_code: *area_code,
-                        end_service_index: *end_service_code,
+                        end_service_code: *end_service_code,
                     }),
                     None => None,
                 };

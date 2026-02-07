@@ -227,7 +227,7 @@ pub enum SearchServiceCodeResult {
     Service(ServiceCode),
     Area {
         area_code: u16,
-        end_service_index: u16,
+        end_service_code: u16,
     },
 }
 

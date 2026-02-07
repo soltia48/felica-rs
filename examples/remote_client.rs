@@ -180,10 +180,10 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                 }
                 Some(nfc_rs::SearchServiceCodeResult::Area {
                     area_code,
-                    end_service_index,
+                    end_service_code,
                 }) => {
                     println!("Index {}: Area 0x{:04X}", service_index, area_code);
-                    println!("  End service index: 0x{:04X}", end_service_index);
+                    println!("  End service code: 0x{:04X}", end_service_code);
                 }
                 None => {
                     println!("Index {}: No more entries", service_index);
@@ -254,11 +254,11 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                     }
                     Ok(Some(nfc_rs::SearchServiceCodeResult::Area {
                         area_code,
-                        end_service_index,
+                        end_service_code,
                     })) => {
                         println!(
                             "  [{:02X}] Area 0x{:04X} (end: 0x{:04X})",
-                            index, area_code, end_service_index
+                            index, area_code, end_service_code
                         );
                     }
                     Ok(None) => break,
