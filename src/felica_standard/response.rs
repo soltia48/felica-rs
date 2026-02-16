@@ -2,8 +2,10 @@ use super::{
     AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
     FelicaStandardError, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_SERVICE_CODES,
     READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
-    REGISTER_SERVICE_COMMAND_CODE, RequestServiceV2KeyVersion, SearchServiceCodeResult,
-    ServiceCode, WRITE_COMMAND_CODE, frame_with_length_prefix,
+    REGISTER_SERVICE_COMMAND_CODE, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
+    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
+    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
+    WRITE_COMMAND_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -29,7 +31,7 @@ pub enum FelicaStandardResponse {
         idm: Idm,
         status_flag1: u8,
         status_flag2: u8,
-        blocks: Option<Vec<[u8; BLOCK_SIZE]>>,
+        result: Option<ReadWithoutEncryptionResult>,
     },
     WriteWithoutEncryption {
         idm: Idm,
@@ -52,16 +54,18 @@ pub enum FelicaStandardResponse {
         idm: Idm,
         status_flag1: u8,
         status_flag2: u8,
-        assigned_block_counts: Vec<u16>,
-        free_block_counts: Vec<u16>,
+        result: Option<RequestBlockInformationExResult>,
     },
     RequestCodeList {
         idm: Idm,
         status_flag1: u8,
         status_flag2: u8,
-        continue_flag: bool,
-        areas: Vec<AreaCodeRange>,
-        services: Vec<ServiceCode>,
+        result: Option<RequestCodeListResult>,
+    },
+    SetParameter {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
     },
     Authentication1 {
         idm: Idm,
@@ -72,7 +76,7 @@ pub enum FelicaStandardResponse {
     Read {
         status_flag1: u8,
         status_flag2: u8,
-        blocks: Option<Vec<[u8; BLOCK_SIZE]>>,
+        result: Option<ReadResult>,
     },
     Write {
         status_flag1: u8,
@@ -82,13 +86,12 @@ pub enum FelicaStandardResponse {
         idm: Idm,
         status_flag1: u8,
         status_flag2: u8,
-        crypto_id: Option<u8>,
-        key_versions: Option<Vec<RequestServiceV2KeyVersion>>,
+        result: Option<RequestServiceV2Result>,
     },
     RegisterIssueId {
         status_flag1: u8,
         status_flag2: u8,
-        remaining_blocks: Option<u16>,
+        result: Option<RegisterIssueIdResult>,
     },
     RegisterArea {
         status_flag1: u8,
@@ -97,7 +100,7 @@ pub enum FelicaStandardResponse {
     RegisterService {
         status_flag1: u8,
         status_flag2: u8,
-        remaining_blocks: Option<u16>,
+        result: Option<RegisterServiceResult>,
     },
     ChangeSystemBlock {
         status_flag1: u8,
@@ -133,6 +136,7 @@ impl FelicaStandardResponse {
             0x0F => Self::parse_request_block_information(idm, data),
             0x1F => Self::parse_request_block_information_ex(idm, data),
             0x1B => Self::parse_request_code_list(idm, data),
+            0x21 => Self::parse_set_parameter(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -195,8 +199,7 @@ impl FelicaStandardResponse {
         Self::ensure_response_len(data, 12, "short request service v2 response header")?;
         let status_flag1 = data[10];
         let status_flag2 = data[11];
-        let mut crypto_id = None;
-        let mut key_versions = None;
+        let mut result = None;
 
         if status_flag1 == 0 {
             Self::ensure_response_len(
@@ -240,16 +243,17 @@ impl FelicaStandardResponse {
                     ])));
                 }
             }
-            crypto_id = Some(parsed_crypto_id);
-            key_versions = Some(parsed_versions);
+            result = Some(RequestServiceV2Result {
+                crypto_id: parsed_crypto_id,
+                key_versions: parsed_versions,
+            });
         }
 
         Ok(FelicaStandardResponse::RequestServiceV2 {
             idm,
             status_flag1,
             status_flag2,
-            crypto_id,
-            key_versions,
+            result,
         })
     }
 
@@ -270,7 +274,7 @@ impl FelicaStandardResponse {
                 idm,
                 status_flag1: sf1,
                 status_flag2: sf2,
-                blocks: None,
+                result: None,
             });
         }
         let block_count = data[12] as usize;
@@ -290,7 +294,7 @@ impl FelicaStandardResponse {
             idm,
             status_flag1: sf1,
             status_flag2: sf2,
-            blocks: Some(blocks),
+            result: Some(ReadWithoutEncryptionResult { blocks }),
         })
     }
 
@@ -374,8 +378,7 @@ impl FelicaStandardResponse {
                 idm,
                 status_flag1,
                 status_flag2,
-                assigned_block_counts: Vec::new(),
-                free_block_counts: Vec::new(),
+                result: None,
             });
         }
 
@@ -408,15 +411,27 @@ impl FelicaStandardResponse {
             idm,
             status_flag1,
             status_flag2,
-            assigned_block_counts,
-            free_block_counts,
+            result: Some(RequestBlockInformationExResult {
+                assigned_block_counts,
+                free_block_counts,
+            }),
         })
     }
 
     fn parse_request_code_list(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 15, "short request code list response")?;
+        Self::ensure_response_len(data, 12, "short request code list response")?;
         let status_flag1 = data[10];
         let status_flag2 = data[11];
+        if status_flag1 != 0 {
+            return Ok(FelicaStandardResponse::RequestCodeList {
+                idm,
+                status_flag1,
+                status_flag2,
+                result: None,
+            });
+        }
+
+        Self::ensure_response_len(data, 15, "short request code list success response")?;
         let continue_flag = data[12] != 0;
 
         let area_count = data[13] as usize;
@@ -459,9 +474,20 @@ impl FelicaStandardResponse {
             idm,
             status_flag1,
             status_flag2,
-            continue_flag,
-            areas,
-            services,
+            result: Some(RequestCodeListResult {
+                continue_flag,
+                areas,
+                services,
+            }),
+        })
+    }
+
+    fn parse_set_parameter(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short set parameter response")?;
+        Ok(FelicaStandardResponse::SetParameter {
+            idm,
+            status_flag1: data[10],
+            status_flag2: data[11],
         })
     }
 
@@ -490,7 +516,7 @@ impl FelicaStandardResponse {
             return Ok(FelicaStandardResponse::Read {
                 status_flag1: sf1,
                 status_flag2: sf2,
-                blocks: None,
+                result: None,
             });
         }
         let block_count = data[2] as usize;
@@ -509,7 +535,7 @@ impl FelicaStandardResponse {
         Ok(FelicaStandardResponse::Read {
             status_flag1: sf1,
             status_flag2: sf2,
-            blocks: Some(blocks),
+            result: Some(ReadResult { blocks }),
         })
     }
 
@@ -533,20 +559,22 @@ impl FelicaStandardResponse {
         }
         let status_flag1 = data[0];
         let status_flag2 = data[1];
-        let remaining_blocks = if status_flag1 == 0 {
+        let result = if status_flag1 == 0 {
             if data.len() < 4 {
                 return Err(DriverError::Other(
                     "register issue id response missing remaining block count".into(),
                 ));
             }
-            Some(u16::from_le_bytes([data[2], data[3]]))
+            Some(RegisterIssueIdResult {
+                remaining_blocks: u16::from_le_bytes([data[2], data[3]]),
+            })
         } else {
             None
         };
         Ok(FelicaStandardResponse::RegisterIssueId {
             status_flag1,
             status_flag2,
-            remaining_blocks,
+            result,
         })
     }
 
@@ -570,20 +598,22 @@ impl FelicaStandardResponse {
         }
         let status_flag1 = data[0];
         let status_flag2 = data[1];
-        let remaining_blocks = if status_flag1 == 0 {
+        let result = if status_flag1 == 0 {
             if data.len() < 4 {
                 return Err(DriverError::Other(
                     "register service response missing remaining block count".into(),
                 ));
             }
-            Some(u16::from_le_bytes([data[2], data[3]]))
+            Some(RegisterServiceResult {
+                remaining_blocks: u16::from_le_bytes([data[2], data[3]]),
+            })
         } else {
             None
         };
         Ok(FelicaStandardResponse::RegisterService {
             status_flag1,
             status_flag2,
-            remaining_blocks,
+            result,
         })
     }
 
@@ -643,20 +673,21 @@ impl FelicaStandardResponse {
                 idm,
                 status_flag1,
                 status_flag2,
-                blocks,
+                result,
             } => {
-                let block_len = blocks.as_ref().map(|values| values.len()).unwrap_or(0);
+                let block_len = result.as_ref().map(|value| value.blocks.len()).unwrap_or(0);
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 3 + block_len * BLOCK_SIZE);
                 payload.push(0x07);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
                 if *status_flag1 == 0 {
-                    let blocks = blocks.as_ref().ok_or_else(|| {
+                    let result = result.as_ref().ok_or_else(|| {
                         FelicaStandardError::Protocol(
-                            "read without encryption missing block data".into(),
+                            "read without encryption result is missing on success".into(),
                         )
                     })?;
+                    let blocks = &result.blocks;
                     if blocks.is_empty() || blocks.len() > MAX_BLOCK_LIST_LEN {
                         return Err(FelicaStandardError::Protocol(
                             "read without encryption block count out of range".into(),
@@ -666,9 +697,9 @@ impl FelicaStandardResponse {
                     for block in blocks {
                         payload.extend_from_slice(block);
                     }
-                } else if blocks.is_some() {
+                } else if result.is_some() {
                     return Err(FelicaStandardError::Protocol(
-                        "read without encryption blocks must be omitted on error".into(),
+                        "read without encryption result must be omitted on error".into(),
                     ));
                 }
                 Ok(payload)
@@ -738,38 +769,47 @@ impl FelicaStandardResponse {
                 idm,
                 status_flag1,
                 status_flag2,
-                assigned_block_counts,
-                free_block_counts,
+                result,
             } => {
                 if *status_flag1 == 0 {
-                    if assigned_block_counts.is_empty()
-                        || assigned_block_counts.len() > MAX_NODE_CODES
+                    let result = result.as_ref().ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "request block information ex result is missing on success".into(),
+                        )
+                    })?;
+                    if result.assigned_block_counts.is_empty()
+                        || result.assigned_block_counts.len() > MAX_NODE_CODES
                     {
                         return Err(FelicaStandardError::Protocol(
                             "request block information ex count out of range".into(),
                         ));
                     }
-                    if assigned_block_counts.len() != free_block_counts.len() {
+                    if result.assigned_block_counts.len() != result.free_block_counts.len() {
                         return Err(FelicaStandardError::Protocol(
                             "request block information ex assigned/free length mismatch".into(),
                         ));
                     }
-                    let mut payload =
-                        Vec::with_capacity(1 + IDM_LEN + 2 + 1 + assigned_block_counts.len() * 4);
+                    let mut payload = Vec::with_capacity(
+                        1 + IDM_LEN + 2 + 1 + result.assigned_block_counts.len() * 4,
+                    );
                     payload.push(0x1F);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
-                    payload.push(assigned_block_counts.len() as u8);
-                    for (assigned, free) in assigned_block_counts.iter().zip(free_block_counts) {
+                    payload.push(result.assigned_block_counts.len() as u8);
+                    for (assigned, free) in result
+                        .assigned_block_counts
+                        .iter()
+                        .zip(result.free_block_counts.iter())
+                    {
                         payload.extend_from_slice(&assigned.to_le_bytes());
                         payload.extend_from_slice(&free.to_le_bytes());
                     }
                     Ok(payload)
                 } else {
-                    if !assigned_block_counts.is_empty() || !free_block_counts.is_empty() {
+                    if result.is_some() {
                         return Err(FelicaStandardError::Protocol(
-                            "request block information ex counts must be omitted on error".into(),
+                            "request block information ex result must be omitted on error".into(),
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
@@ -784,37 +824,72 @@ impl FelicaStandardResponse {
                 idm,
                 status_flag1,
                 status_flag2,
-                continue_flag,
-                areas,
-                services,
+                result,
             } => {
-                if areas.len() > u8::MAX as usize {
-                    return Err(FelicaStandardError::Protocol(
-                        "request code list area count out of range".into(),
-                    ));
+                if *status_flag1 == 0 {
+                    let result = result.as_ref().ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "request code list result is missing on success".into(),
+                        )
+                    })?;
+                    if result.areas.len() > u8::MAX as usize {
+                        return Err(FelicaStandardError::Protocol(
+                            "request code list area count out of range".into(),
+                        ));
+                    }
+                    if result.services.len() > u8::MAX as usize {
+                        return Err(FelicaStandardError::Protocol(
+                            "request code list service count out of range".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(
+                        1 + IDM_LEN
+                            + 2
+                            + 1
+                            + 1
+                            + result.areas.len() * 4
+                            + 1
+                            + result.services.len() * 2,
+                    );
+                    payload.push(0x1B);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    payload.push(if result.continue_flag { 0x01 } else { 0x00 });
+                    payload.push(result.areas.len() as u8);
+                    for area in &result.areas {
+                        payload.extend_from_slice(&area.area_code.to_le_bytes());
+                        payload.extend_from_slice(&area.end_service_code.to_le_bytes());
+                    }
+                    payload.push(result.services.len() as u8);
+                    for service in &result.services {
+                        payload.extend_from_slice(&service.raw().to_le_bytes());
+                    }
+                    Ok(payload)
+                } else {
+                    if result.is_some() {
+                        return Err(FelicaStandardError::Protocol(
+                            "request code list result must be omitted on error".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                    payload.push(0x1B);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    Ok(payload)
                 }
-                if services.len() > u8::MAX as usize {
-                    return Err(FelicaStandardError::Protocol(
-                        "request code list service count out of range".into(),
-                    ));
-                }
-                let mut payload = Vec::with_capacity(
-                    1 + IDM_LEN + 2 + 1 + 1 + areas.len() * 4 + 1 + services.len() * 2,
-                );
-                payload.push(0x1B);
+            }
+            FelicaStandardResponse::SetParameter {
+                idm,
+                status_flag1,
+                status_flag2,
+            } => {
+                let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                payload.push(0x21);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
-                payload.push(if *continue_flag { 0x01 } else { 0x00 });
-                payload.push(areas.len() as u8);
-                for area in areas {
-                    payload.extend_from_slice(&area.area_code.to_le_bytes());
-                    payload.extend_from_slice(&area.end_service_code.to_le_bytes());
-                }
-                payload.push(services.len() as u8);
-                for service in services {
-                    payload.extend_from_slice(&service.raw().to_le_bytes());
-                }
                 Ok(payload)
             }
             FelicaStandardResponse::Authentication1 {
@@ -839,12 +914,11 @@ impl FelicaStandardResponse {
                 idm,
                 status_flag1,
                 status_flag2,
-                crypto_id,
-                key_versions,
+                result,
             } => {
-                let kv_len = key_versions
+                let kv_len = result
                     .as_ref()
-                    .map(|versions| versions.len())
+                    .map(|value| value.key_versions.len())
                     .unwrap_or(0);
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 4 + kv_len * 4);
                 payload.push(0x33);
@@ -852,16 +926,13 @@ impl FelicaStandardResponse {
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
                 if *status_flag1 == 0 {
-                    let crypto_id = *crypto_id.as_ref().ok_or_else(|| {
+                    let result = result.as_ref().ok_or_else(|| {
                         FelicaStandardError::Protocol(
-                            "request service v2 missing crypto identifier".into(),
+                            "request service v2 result is missing on success".into(),
                         )
                     })?;
-                    let key_versions = key_versions.as_ref().ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "request service v2 missing key version list".into(),
-                        )
-                    })?;
+                    let crypto_id = result.crypto_id;
+                    let key_versions = &result.key_versions;
                     if key_versions.is_empty() || key_versions.len() > MAX_SERVICE_CODES {
                         return Err(FelicaStandardError::Protocol(
                             "request service v2 key version count out of range".into(),
@@ -895,9 +966,9 @@ impl FelicaStandardResponse {
                             payload.extend_from_slice(&version.primary_raw().to_le_bytes());
                         }
                     }
-                } else if crypto_id.is_some() || key_versions.is_some() {
+                } else if result.is_some() {
                     return Err(FelicaStandardError::Protocol(
-                        "request service v2 key versions must be omitted on error".into(),
+                        "request service v2 result must be omitted on error".into(),
                     ));
                 }
                 Ok(payload)
@@ -936,16 +1007,19 @@ impl FelicaStandardResponse {
             FelicaStandardResponse::Read {
                 status_flag1,
                 status_flag2,
-                blocks,
+                result,
             } => {
-                let block_len = blocks.as_ref().map(|values| values.len()).unwrap_or(0);
+                let block_len = result.as_ref().map(|value| value.blocks.len()).unwrap_or(0);
                 let mut payload = Vec::with_capacity(2 + 1 + block_len * BLOCK_SIZE);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
                 if *status_flag1 == 0 {
-                    let blocks = blocks.as_ref().ok_or_else(|| {
-                        FelicaStandardError::Protocol("secure read missing block data".into())
+                    let result = result.as_ref().ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "secure read result is missing on success".into(),
+                        )
                     })?;
+                    let blocks = &result.blocks;
                     if blocks.is_empty() || blocks.len() > MAX_BLOCK_LIST_LEN {
                         return Err(FelicaStandardError::Protocol(
                             "secure read block count out of range".into(),
@@ -955,9 +1029,9 @@ impl FelicaStandardResponse {
                     for block in blocks {
                         payload.extend_from_slice(block);
                     }
-                } else if blocks.is_some() {
+                } else if result.is_some() {
                     return Err(FelicaStandardError::Protocol(
-                        "secure read blocks must be omitted on error".into(),
+                        "secure read result must be omitted on error".into(),
                     ));
                 }
                 Ok(payload)
@@ -969,21 +1043,21 @@ impl FelicaStandardResponse {
             FelicaStandardResponse::RegisterIssueId {
                 status_flag1,
                 status_flag2,
-                remaining_blocks,
+                result,
             } => {
                 let mut payload = Vec::with_capacity(4);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
                 if *status_flag1 == 0 {
-                    let remaining_blocks = remaining_blocks.ok_or_else(|| {
+                    let result = result.as_ref().ok_or_else(|| {
                         FelicaStandardError::Protocol(
-                            "register issue id missing remaining block count".into(),
+                            "register issue id result is missing on success".into(),
                         )
                     })?;
-                    payload.extend_from_slice(&remaining_blocks.to_le_bytes());
-                } else if remaining_blocks.is_some() {
+                    payload.extend_from_slice(&result.remaining_blocks.to_le_bytes());
+                } else if result.is_some() {
                     return Err(FelicaStandardError::Protocol(
-                        "register issue id remaining blocks must be omitted on error".into(),
+                        "register issue id result must be omitted on error".into(),
                     ));
                 }
                 Ok(payload)
@@ -995,21 +1069,21 @@ impl FelicaStandardResponse {
             FelicaStandardResponse::RegisterService {
                 status_flag1,
                 status_flag2,
-                remaining_blocks,
+                result,
             } => {
                 let mut payload = Vec::with_capacity(4);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
                 if *status_flag1 == 0 {
-                    let remaining_blocks = remaining_blocks.ok_or_else(|| {
+                    let result = result.as_ref().ok_or_else(|| {
                         FelicaStandardError::Protocol(
-                            "register service missing remaining block count".into(),
+                            "register service result is missing on success".into(),
                         )
                     })?;
-                    payload.extend_from_slice(&remaining_blocks.to_le_bytes());
-                } else if remaining_blocks.is_some() {
+                    payload.extend_from_slice(&result.remaining_blocks.to_le_bytes());
+                } else if result.is_some() {
                     return Err(FelicaStandardError::Protocol(
-                        "register service remaining blocks must be omitted on error".into(),
+                        "register service result must be omitted on error".into(),
                     ));
                 }
                 Ok(payload)

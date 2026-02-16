@@ -69,6 +69,11 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::REQUEST_CODE_LIST)
     }
 
+    /// Compute the Set Parameter command timeout using the Other PMm byte.
+    pub fn set_parameter_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::OTHER)
+    }
+
     /// Compute the Authentication1 command timeout using the Authentication1 PMm byte.
     pub fn authentication1_timeout_ms(&self, node_count: usize) -> u16 {
         self.scaled_timeout_with_units(PmmSlot::AUTHENTICATION1, node_count, UnitClamp::at_least(1))
@@ -173,6 +178,7 @@ impl PmmSlot {
     const WRITE_WITHOUT_ENCRYPTION: Self = Self::new(6);
     const READ: Self = Self::new(5);
     const WRITE: Self = Self::new(6);
+    const OTHER: Self = Self::new(7);
     const REGISTRATION: Self = Self::new(7);
 
     fn index(self) -> usize {

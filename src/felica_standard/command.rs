@@ -2,7 +2,7 @@ use super::{
     BLOCK_SIZE, BlockListElement, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, FelicaStandardError, IDM_LEN,
     MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, READ_COMMAND_CODE,
     REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
-    ServiceCode, WRITE_COMMAND_CODE,
+    ServiceCode, SetParameterEncryptionType, SetParameterPacketType, WRITE_COMMAND_CODE,
 };
 
 pub enum FelicaStandardCommand {
@@ -48,6 +48,11 @@ pub enum FelicaStandardCommand {
         idm: [u8; IDM_LEN],
         parent_node_code: u16,
         index: u16,
+    },
+    SetParameter {
+        idm: [u8; IDM_LEN],
+        encryption_type: SetParameterEncryptionType,
+        packet_type: SetParameterPacketType,
     },
     Authentication1 {
         idm: [u8; IDM_LEN],
@@ -285,6 +290,19 @@ impl FelicaStandardCommand {
                 payload.idm(idm);
                 payload.extend_u16_le(*parent_node_code);
                 payload.extend_u16_le(*index);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::SetParameter {
+                idm,
+                encryption_type,
+                packet_type,
+            } => {
+                let mut payload = PayloadWriter::new(0x20);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 4]);
+                payload.push_u8(encryption_type.to_byte());
+                payload.push_u8(packet_type.to_byte());
+                payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication1 {
@@ -560,6 +578,44 @@ impl FelicaStandardCommand {
                     idm,
                     parent_node_code: u16::from_le_bytes([rest[0], rest[1]]),
                     index: u16::from_le_bytes([rest[2], rest[3]]),
+                })
+            }
+            0x20 => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 8 {
+                    return Err(FelicaStandardError::Protocol(
+                        "set parameter payload too short".into(),
+                    ));
+                }
+                if rest.len() > 8 {
+                    return Err(FelicaStandardError::Protocol(
+                        "set parameter payload has trailing bytes".into(),
+                    ));
+                }
+                if rest[..4].iter().any(|value| *value != 0x00) {
+                    return Err(FelicaStandardError::Protocol(
+                        "set parameter reserved bytes D0-D3 must be 0x00".into(),
+                    ));
+                }
+                if rest[6..8].iter().any(|value| *value != 0x00) {
+                    return Err(FelicaStandardError::Protocol(
+                        "set parameter reserved bytes D6-D7 must be 0x00".into(),
+                    ));
+                }
+                let encryption_type =
+                    SetParameterEncryptionType::from_byte(rest[4]).ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "set parameter encryption type out of range".into(),
+                        )
+                    })?;
+                let packet_type = SetParameterPacketType::from_byte(rest[5]).ok_or_else(|| {
+                    FelicaStandardError::Protocol("set parameter packet type out of range".into())
+                })?;
+
+                Ok(FelicaStandardCommand::SetParameter {
+                    idm,
+                    encryption_type,
+                    packet_type,
                 })
             }
             0x10 => {

@@ -1,3 +1,4 @@
+use super::BLOCK_SIZE;
 use super::secure::encrypt_des_block;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,11 +247,89 @@ impl AreaCodeRange {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetParameterEncryptionType {
+    SrmType1,
+    SrmType2,
+}
+
+impl SetParameterEncryptionType {
+    pub(crate) fn to_byte(self) -> u8 {
+        match self {
+            SetParameterEncryptionType::SrmType1 => 0x00,
+            SetParameterEncryptionType::SrmType2 => 0x01,
+        }
+    }
+
+    pub(crate) fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0x00 => Some(SetParameterEncryptionType::SrmType1),
+            0x01 => Some(SetParameterEncryptionType::SrmType2),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetParameterPacketType {
+    NodeCodeSize2,
+    NodeCodeSize4,
+}
+
+impl SetParameterPacketType {
+    pub(crate) fn to_byte(self) -> u8 {
+        match self {
+            SetParameterPacketType::NodeCodeSize2 => 0x00,
+            SetParameterPacketType::NodeCodeSize4 => 0x01,
+        }
+    }
+
+    pub(crate) fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0x00 => Some(SetParameterPacketType::NodeCodeSize2),
+            0x01 => Some(SetParameterPacketType::NodeCodeSize4),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestCodeListResult {
     pub continue_flag: bool,
     pub areas: Vec<AreaCodeRange>,
     pub services: Vec<ServiceCode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestBlockInformationExResult {
+    pub assigned_block_counts: Vec<u16>,
+    pub free_block_counts: Vec<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadWithoutEncryptionResult {
+    pub blocks: Vec<[u8; BLOCK_SIZE]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadResult {
+    pub blocks: Vec<[u8; BLOCK_SIZE]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestServiceV2Result {
+    pub crypto_id: u8,
+    pub key_versions: Vec<RequestServiceV2KeyVersion>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterIssueIdResult {
+    pub remaining_blocks: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterServiceResult {
+    pub remaining_blocks: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

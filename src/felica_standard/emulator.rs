@@ -6,7 +6,8 @@ use super::secure::{
 };
 use super::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
-    FelicaStandardResponse, SearchServiceCodeResult, ServiceCode, Type3TagPollingResult,
+    FelicaStandardResponse, ReadResult, ReadWithoutEncryptionResult,
+    RequestBlockInformationExResult, SearchServiceCodeResult, ServiceCode, Type3TagPollingResult,
     frame_with_length_prefix,
 };
 use rand::{RngCore, rngs::OsRng};
@@ -328,8 +329,18 @@ impl FelicaStandardEmulator {
                     idm,
                     status_flag1: 0x00,
                     status_flag2: 0x00,
-                    assigned_block_counts,
-                    free_block_counts,
+                    result: Some(RequestBlockInformationExResult {
+                        assigned_block_counts,
+                        free_block_counts,
+                    }),
+                })
+            }
+            FelicaStandardCommand::SetParameter { idm, .. } => {
+                self.system_index_for_idm(&idm)?;
+                encode_response_frame(FelicaStandardResponse::SetParameter {
+                    idm,
+                    status_flag1: 0x00,
+                    status_flag2: 0x00,
                 })
             }
             FelicaStandardCommand::Authentication1 {
@@ -368,7 +379,7 @@ impl FelicaStandardEmulator {
                                 idm,
                                 status_flag1: sf1,
                                 status_flag2: sf2,
-                                blocks: None,
+                                result: None,
                             },
                         );
                     }
@@ -384,7 +395,7 @@ impl FelicaStandardEmulator {
             idm,
             status_flag1: 0x00,
             status_flag2: 0x00,
-            blocks: Some(blocks),
+            result: Some(ReadWithoutEncryptionResult { blocks }),
         })
     }
 
@@ -851,7 +862,7 @@ impl EmulatedSystem {
                 FelicaStandardResponse::RegisterIssueId {
                     status_flag1: STATUS_UNSUPPORTED_SF1,
                     status_flag2: STATUS_UNSUPPORTED_SF2,
-                    remaining_blocks: None,
+                    result: None,
                 }
             }
             FelicaStandardCommand::RegisterArea { .. } => FelicaStandardResponse::RegisterArea {
@@ -862,7 +873,7 @@ impl EmulatedSystem {
                 FelicaStandardResponse::RegisterService {
                     status_flag1: STATUS_UNSUPPORTED_SF1,
                     status_flag2: STATUS_UNSUPPORTED_SF2,
-                    remaining_blocks: None,
+                    result: None,
                 }
             }
             FelicaStandardCommand::ChangeSystemBlock => FelicaStandardResponse::ChangeSystemBlock {
@@ -906,7 +917,7 @@ impl EmulatedSystem {
                         return FelicaStandardResponse::Read {
                             status_flag1: sf1,
                             status_flag2: sf2,
-                            blocks: None,
+                            result: None,
                         };
                     }
                 };
@@ -920,7 +931,7 @@ impl EmulatedSystem {
         FelicaStandardResponse::Read {
             status_flag1: 0x00,
             status_flag2: 0x00,
-            blocks: Some(blocks),
+            result: Some(ReadResult { blocks }),
         }
     }
 
