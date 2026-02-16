@@ -5,8 +5,8 @@ use super::secure::{
     generate_service_keys, strip_secure_padding,
 };
 use super::{
-    Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
-    FelicaStandardResponse, ReadResult, ReadWithoutEncryptionResult,
+    Authentication2Response, BLOCK_SIZE, BlockListElement, ContainerInformation, DES_BLOCK_SIZE,
+    FelicaStandardCommand, FelicaStandardResponse, ReadResult, ReadWithoutEncryptionResult,
     RequestBlockInformationExResult, SearchServiceCodeResult, ServiceCode, Type3TagPollingResult,
     frame_with_length_prefix,
 };
@@ -341,6 +341,13 @@ impl FelicaStandardEmulator {
                     idm,
                     status_flag1: 0x00,
                     status_flag2: 0x00,
+                })
+            }
+            FelicaStandardCommand::GetContainerIssueInformation { idm } => {
+                self.system_index_for_idm(&idm)?;
+                encode_response_frame(FelicaStandardResponse::GetContainerIssueInformation {
+                    idm,
+                    container_information: ContainerInformation::new([0u8; 5], [0u8; 11]),
                 })
             }
             FelicaStandardCommand::Authentication1 {

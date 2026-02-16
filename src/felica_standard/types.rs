@@ -248,6 +248,24 @@ impl AreaCodeRange {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContainerInformation {
+    pub format_version_carrier_information: [u8; 5],
+    pub mobile_phone_model_information: [u8; 11],
+}
+
+impl ContainerInformation {
+    pub fn new(
+        format_version_carrier_information: [u8; 5],
+        mobile_phone_model_information: [u8; 11],
+    ) -> Self {
+        Self {
+            format_version_carrier_information,
+            mobile_phone_model_information,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetParameterEncryptionType {
     SrmType1,
     SrmType2,

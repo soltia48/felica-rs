@@ -47,11 +47,12 @@ pub use response::FelicaStandardResponse;
 pub use secure::{AuthenticatedContext, Authentication2Response, generate_service_keys};
 pub use type3::Type3TagPollingResult;
 pub use types::{
-    AreaCodeRange, BlockListElement, ChangeKeyParameters, MutualAuthenticationResult, ReadResult,
-    ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
-    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
-    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType,
-    SetParameterPacketType, StatusFlag1, StatusFlag2, status_flag_description,
+    AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation,
+    MutualAuthenticationResult, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
+    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
+    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
+    SetParameterEncryptionType, SetParameterPacketType, StatusFlag1, StatusFlag2,
+    status_flag_description,
 };
 
 pub(crate) use command::frame_with_length_prefix;

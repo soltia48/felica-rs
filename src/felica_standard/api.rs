@@ -6,7 +6,7 @@ use super::secure::{
     SecureResponse, encrypt_des_cbc_zero_iv,
 };
 use super::types::{
-    BlockListElement, ChangeKeyParameters, MutualAuthenticationResult,
+    BlockListElement, ChangeKeyParameters, ContainerInformation, MutualAuthenticationResult,
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
     SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType, SetParameterPacketType,
     status_flag_description,
@@ -466,6 +466,29 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 }
             }
             _ => Err(unexpected_response("Set Parameter")),
+        }
+    }
+
+    pub fn get_container_issue_information(
+        &mut self,
+    ) -> Result<ContainerInformation, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self
+            .polling_result
+            .get_container_issue_information_timeout_ms();
+
+        let response = self.execute_command(
+            "Get Container Issue Information",
+            FelicaStandardCommand::GetContainerIssueInformation { idm },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetContainerIssueInformation {
+                container_information,
+                ..
+            } => Ok(container_information),
+            _ => Err(unexpected_response("Get Container Issue Information")),
         }
     }
 

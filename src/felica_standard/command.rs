@@ -54,6 +54,9 @@ pub enum FelicaStandardCommand {
         encryption_type: SetParameterEncryptionType,
         packet_type: SetParameterPacketType,
     },
+    GetContainerIssueInformation {
+        idm: [u8; IDM_LEN],
+    },
     Authentication1 {
         idm: [u8; IDM_LEN],
         areas: Vec<u16>,
@@ -302,6 +305,12 @@ impl FelicaStandardCommand {
                 payload.extend_bytes(&[0x00; 4]);
                 payload.push_u8(encryption_type.to_byte());
                 payload.push_u8(packet_type.to_byte());
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetContainerIssueInformation { idm } => {
+                let mut payload = PayloadWriter::new(0x22);
+                payload.idm(idm);
                 payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
@@ -617,6 +626,25 @@ impl FelicaStandardCommand {
                     encryption_type,
                     packet_type,
                 })
+            }
+            0x22 => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container issue information payload too short".into(),
+                    ));
+                }
+                if rest.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container issue information payload has trailing bytes".into(),
+                    ));
+                }
+                if rest.iter().any(|value| *value != 0x00) {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container issue information reserved bytes must be 0x00".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::GetContainerIssueInformation { idm })
             }
             0x10 => {
                 let (idm, rest) = parse_idm(body)?;

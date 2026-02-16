@@ -1,11 +1,12 @@
 use super::{
     AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
-    FelicaStandardError, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_SERVICE_CODES,
-    READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
-    REGISTER_SERVICE_COMMAND_CODE, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
-    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
-    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
-    WRITE_COMMAND_CODE, frame_with_length_prefix,
+    ContainerInformation, FelicaStandardError, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
+    MAX_SERVICE_CODES, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
+    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ReadResult,
+    ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
+    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
+    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
+    frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -66,6 +67,10 @@ pub enum FelicaStandardResponse {
         idm: Idm,
         status_flag1: u8,
         status_flag2: u8,
+    },
+    GetContainerIssueInformation {
+        idm: Idm,
+        container_information: ContainerInformation,
     },
     Authentication1 {
         idm: Idm,
@@ -137,6 +142,7 @@ impl FelicaStandardResponse {
             0x1F => Self::parse_request_block_information_ex(idm, data),
             0x1B => Self::parse_request_code_list(idm, data),
             0x21 => Self::parse_set_parameter(idm, data),
+            0x23 => Self::parse_get_container_issue_information(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -488,6 +494,21 @@ impl FelicaStandardResponse {
             idm,
             status_flag1: data[10],
             status_flag2: data[11],
+        })
+    }
+
+    fn parse_get_container_issue_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 26, "short get container issue information response")?;
+        let mut format_version_carrier_information = [0u8; 5];
+        format_version_carrier_information.copy_from_slice(&data[10..15]);
+        let mut mobile_phone_model_information = [0u8; 11];
+        mobile_phone_model_information.copy_from_slice(&data[15..26]);
+        Ok(FelicaStandardResponse::GetContainerIssueInformation {
+            idm,
+            container_information: ContainerInformation {
+                format_version_carrier_information,
+                mobile_phone_model_information,
+            },
         })
     }
 
@@ -890,6 +911,18 @@ impl FelicaStandardResponse {
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
+                Ok(payload)
+            }
+            FelicaStandardResponse::GetContainerIssueInformation {
+                idm,
+                container_information,
+            } => {
+                let mut payload = Vec::with_capacity(1 + IDM_LEN + 16);
+                payload.push(0x23);
+                payload.extend_from_slice(idm);
+                payload
+                    .extend_from_slice(&container_information.format_version_carrier_information);
+                payload.extend_from_slice(&container_information.mobile_phone_model_information);
                 Ok(payload)
             }
             FelicaStandardResponse::Authentication1 {

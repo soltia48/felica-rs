@@ -74,6 +74,11 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::OTHER)
     }
 
+    /// Compute the Get Container Issue Information command timeout using the Other PMm byte.
+    pub fn get_container_issue_information_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::OTHER)
+    }
+
     /// Compute the Authentication1 command timeout using the Authentication1 PMm byte.
     pub fn authentication1_timeout_ms(&self, node_count: usize) -> u16 {
         self.scaled_timeout_with_units(PmmSlot::AUTHENTICATION1, node_count, UnitClamp::at_least(1))
