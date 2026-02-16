@@ -7,6 +7,11 @@ pub struct Authentication2Response {
     pub(crate) encrypted_payload: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Authentication2V2Response {
+    pub(crate) encrypted_payload: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthenticatedContext {
     transaction_number: u16,

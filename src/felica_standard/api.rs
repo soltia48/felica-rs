@@ -2,8 +2,8 @@ use super::command::{CommandEncoding, FelicaStandardCommand};
 use super::error::FelicaStandardError;
 use super::response::FelicaStandardResponse;
 use super::secure::{
-    AuthenticatedContext, Authentication2Response, AuthenticationContext, SecureCommandContext,
-    SecureResponse, encrypt_des_cbc_zero_iv,
+    AuthenticatedContext, Authentication2Response, Authentication2V2Response,
+    AuthenticationContext, SecureCommandContext, SecureResponse, encrypt_des_cbc_zero_iv,
 };
 use super::types::{
     BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
@@ -1099,6 +1099,61 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 }
             }
             _ => Err(unexpected_response("Request Service V2")),
+        }
+    }
+
+    pub fn authentication1_v2(
+        &mut self,
+        nodes: &[u16],
+        challenge_1a: &[u8; 16],
+    ) -> Result<([u8; 16], [u8; 16], [u8; 4]), FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        if nodes.len() > MAX_SERVICE_CODES {
+            return Err(FelicaStandardError::InvalidParameter(
+                "too many nodes for authentication1 v2".into(),
+            ));
+        }
+        let timeout_ms = self.polling_result.authentication1_timeout_ms(nodes.len());
+        let response = self.execute_command(
+            "Authentication1 v2",
+            FelicaStandardCommand::Authentication1V2 {
+                idm,
+                nodes: nodes.to_vec(),
+                challenge_1a: *challenge_1a,
+            },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::Authentication1V2 {
+                challenge_1b,
+                challenge_2a,
+                challenge_3c,
+                ..
+            } => Ok((challenge_1b, challenge_2a, challenge_3c)),
+            _ => Err(unexpected_response("Authentication1 v2")),
+        }
+    }
+
+    pub fn authentication2_v2(
+        &mut self,
+        challenge_2b: &[u8; 16],
+    ) -> Result<Authentication2V2Response, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+
+        let timeout_ms = self.polling_result.authentication2_timeout_ms();
+        let response = self.execute_command(
+            "Authentication2 v2",
+            FelicaStandardCommand::Authentication2V2 {
+                idm,
+                challenge_2b: *challenge_2b,
+            },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::Authentication2V2(payload) => Ok(payload),
+            _ => Err(unexpected_response("Authentication2 v2")),
         }
     }
 

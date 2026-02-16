@@ -1,13 +1,13 @@
 use super::{
-    AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
-    ContainerInformation, FelicaStandardError, GetAreaInformationResult, GetNodePropertyResult,
-    GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
-    MAX_SERVICE_CODES, NodeProperty, OptionVersion, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
-    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ReadResult,
-    ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
-    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
-    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, SpecificationVersion,
-    WRITE_COMMAND_CODE, frame_with_length_prefix,
+    AreaCodeRange, Authentication2Response, Authentication2V2Response, BLOCK_SIZE,
+    CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerInformation, FelicaStandardError,
+    GetAreaInformationResult, GetNodePropertyResult, GetSystemStatusResult, IDM_LEN,
+    MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_SERVICE_CODES, NodeProperty,
+    OptionVersion, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
+    REGISTER_SERVICE_COMMAND_CODE, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
+    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
+    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
+    SpecificationVersion, WRITE_COMMAND_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -135,6 +135,13 @@ pub enum FelicaStandardResponse {
         status_flag2: u8,
         result: Option<RequestServiceV2Result>,
     },
+    Authentication1V2 {
+        idm: Idm,
+        challenge_1b: [u8; 16],
+        challenge_2a: [u8; 16],
+        challenge_3c: [u8; 4],
+    },
+    Authentication2V2(Authentication2V2Response),
     RegisterIssueId {
         status_flag1: u8,
         status_flag2: u8,
@@ -1454,6 +1461,26 @@ impl FelicaStandardResponse {
                         "request service v2 result must be omitted on error".into(),
                     ));
                 }
+                Ok(payload)
+            }
+            FelicaStandardResponse::Authentication1V2 {
+                idm,
+                challenge_1b,
+                challenge_2a,
+                challenge_3c,
+            } => {
+                let mut payload = Vec::with_capacity(1 + IDM_LEN + 36);
+                payload.push(0x41);
+                payload.extend_from_slice(idm);
+                payload.extend_from_slice(challenge_1b);
+                payload.extend_from_slice(challenge_2a);
+                payload.extend_from_slice(challenge_3c);
+                Ok(payload)
+            }
+            FelicaStandardResponse::Authentication2V2(auth) => {
+                let mut payload = Vec::with_capacity(1 + auth.encrypted_payload.len());
+                payload.push(0x43);
+                payload.extend_from_slice(&auth.encrypted_payload);
                 Ok(payload)
             }
             FelicaStandardResponse::Read { .. }

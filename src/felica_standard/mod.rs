@@ -44,7 +44,9 @@ pub use emulator::{
 };
 pub use error::FelicaStandardError;
 pub use response::FelicaStandardResponse;
-pub use secure::{AuthenticatedContext, Authentication2Response, generate_service_keys};
+pub use secure::{
+    AuthenticatedContext, Authentication2Response, Authentication2V2Response, generate_service_keys,
+};
 pub use type3::Type3TagPollingResult;
 pub use types::{
     AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
