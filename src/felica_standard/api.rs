@@ -542,6 +542,41 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    pub fn get_platform_information(&mut self) -> Result<Vec<u8>, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self.polling_result.get_platform_information_timeout_ms();
+
+        let response = self.execute_command(
+            "Get Platform Information",
+            FelicaStandardCommand::GetPlatformInformation { idm },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetPlatformInformation {
+                status_flag1,
+                status_flag2,
+                result,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error(
+                        "Get Platform Information",
+                        status_flag1,
+                        status_flag2,
+                    ))
+                } else {
+                    result.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Get Platform Information missing result payload".into(),
+                        )
+                    })
+                }
+            }
+            _ => Err(unexpected_response("Get Platform Information")),
+        }
+    }
+
     pub fn get_area_information(
         &mut self,
         node_code: u16,

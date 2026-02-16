@@ -372,6 +372,15 @@ impl FelicaStandardEmulator {
                     },
                 })
             }
+            FelicaStandardCommand::GetPlatformInformation { idm } => {
+                self.system_index_for_idm(&idm)?;
+                encode_response_frame(FelicaStandardResponse::GetPlatformInformation {
+                    idm,
+                    status_flag1: 0x00,
+                    status_flag2: 0x00,
+                    result: Some(vec![0x00]),
+                })
+            }
             FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
                 let index = self.system_index_for_idm(&idm)?;
                 let system = self.systems.get(index)?;

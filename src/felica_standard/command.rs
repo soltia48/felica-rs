@@ -73,6 +73,9 @@ pub enum FelicaStandardCommand {
     GetSystemStatus {
         idm: [u8; IDM_LEN],
     },
+    GetPlatformInformation {
+        idm: [u8; IDM_LEN],
+    },
     Authentication1 {
         idm: [u8; IDM_LEN],
         areas: Vec<u16>,
@@ -360,6 +363,11 @@ impl FelicaStandardCommand {
                 let mut payload = PayloadWriter::new(0x38);
                 payload.idm(idm);
                 payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetPlatformInformation { idm } => {
+                let mut payload = PayloadWriter::new(0x3A);
+                payload.idm(idm);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication1 {
@@ -768,6 +776,15 @@ impl FelicaStandardCommand {
                     ));
                 }
                 Ok(FelicaStandardCommand::GetSystemStatus { idm })
+            }
+            0x3A => {
+                let (idm, rest) = parse_idm(body)?;
+                if !rest.is_empty() {
+                    return Err(FelicaStandardError::Protocol(
+                        "get platform information payload has trailing bytes".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::GetPlatformInformation { idm })
             }
             0x10 => {
                 let (idm, rest) = parse_idm(body)?;

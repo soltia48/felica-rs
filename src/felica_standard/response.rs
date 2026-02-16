@@ -94,6 +94,12 @@ pub enum FelicaStandardResponse {
         status_flag2: u8,
         result: GetSystemStatusResult,
     },
+    GetPlatformInformation {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        result: Option<Vec<u8>>,
+    },
     Authentication1 {
         idm: Idm,
         challenge_1b: [u8; 8],
@@ -171,6 +177,7 @@ impl FelicaStandardResponse {
             0x25 => Self::parse_get_area_information(idm, data),
             0x29 => Self::parse_get_node_property(idm, data),
             0x39 => Self::parse_get_system_status(idm, data),
+            0x3B => Self::parse_get_platform_information(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -653,6 +660,34 @@ impl FelicaStandardResponse {
                 flag,
                 data: data[14..14 + data_len].to_vec(),
             },
+        })
+    }
+
+    fn parse_get_platform_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short get platform information response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        if status_flag1 != 0 {
+            return Ok(FelicaStandardResponse::GetPlatformInformation {
+                idm,
+                status_flag1,
+                status_flag2,
+                result: None,
+            });
+        }
+
+        Self::ensure_response_len(data, 13, "short get platform information success response")?;
+        let data_len = data[12] as usize;
+        Self::ensure_response_len(
+            data,
+            13 + data_len,
+            "short get platform information response payload",
+        )?;
+        Ok(FelicaStandardResponse::GetPlatformInformation {
+            idm,
+            status_flag1,
+            status_flag2,
+            result: Some(data[13..13 + data_len].to_vec()),
         })
     }
 
@@ -1194,6 +1229,45 @@ impl FelicaStandardResponse {
                 payload.push(result.data.len() as u8);
                 payload.extend_from_slice(&result.data);
                 Ok(payload)
+            }
+            FelicaStandardResponse::GetPlatformInformation {
+                idm,
+                status_flag1,
+                status_flag2,
+                result,
+            } => {
+                if *status_flag1 == 0 {
+                    let result = result.as_ref().ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "get platform information result is missing on success".into(),
+                        )
+                    })?;
+                    if result.len() > u8::MAX as usize {
+                        return Err(FelicaStandardError::Protocol(
+                            "get platform information response data length out of range".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 1 + result.len());
+                    payload.push(0x3B);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    payload.push(result.len() as u8);
+                    payload.extend_from_slice(result);
+                    Ok(payload)
+                } else {
+                    if result.is_some() {
+                        return Err(FelicaStandardError::Protocol(
+                            "get platform information result must be omitted on error".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                    payload.push(0x3B);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    Ok(payload)
+                }
             }
             FelicaStandardResponse::Authentication1 {
                 idm,
