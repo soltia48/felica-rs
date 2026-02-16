@@ -47,7 +47,7 @@ pub use response::FelicaStandardResponse;
 pub use secure::{AuthenticatedContext, Authentication2Response, generate_service_keys};
 pub use type3::Type3TagPollingResult;
 pub use types::{
-    AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation,
+    AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
     GetAreaInformationResult, GetNodePropertyResult, MutualAuthenticationResult, NodeProperty,
     NodePropertyType, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
     RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,

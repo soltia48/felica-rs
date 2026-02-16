@@ -266,6 +266,35 @@ impl ContainerInformation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerProperty {
+    Property1,
+    Property2,
+    Unknown(u16),
+}
+
+impl ContainerProperty {
+    pub fn index(self) -> u16 {
+        match self {
+            ContainerProperty::Property1 => 0x0000,
+            ContainerProperty::Property2 => 0x0001,
+            ContainerProperty::Unknown(index) => index,
+        }
+    }
+
+    pub(crate) fn to_index(self) -> u16 {
+        self.index()
+    }
+
+    pub(crate) fn from_index(index: u16) -> Self {
+        match index {
+            0x0000 => ContainerProperty::Property1,
+            0x0001 => ContainerProperty::Property2,
+            _ => ContainerProperty::Unknown(index),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodePropertyType {
     ValueLimitedPurseService,
     MacCommunication,

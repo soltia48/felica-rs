@@ -6,8 +6,8 @@ use super::secure::{
     SecureResponse, encrypt_des_cbc_zero_iv,
 };
 use super::types::{
-    BlockListElement, ChangeKeyParameters, ContainerInformation, GetAreaInformationResult,
-    GetNodePropertyResult, MutualAuthenticationResult, NodePropertyType,
+    BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
+    GetAreaInformationResult, GetNodePropertyResult, MutualAuthenticationResult, NodePropertyType,
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
     SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType, SetParameterPacketType,
     status_flag_description,
@@ -490,6 +490,24 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 ..
             } => Ok(container_information),
             _ => Err(unexpected_response("Get Container Issue Information")),
+        }
+    }
+
+    pub fn get_container_property(
+        &mut self,
+        property: ContainerProperty,
+    ) -> Result<Vec<u8>, FelicaStandardError> {
+        let timeout_ms = self.polling_result.get_container_property_timeout_ms();
+
+        let response = self.execute_command(
+            "Get Container Property",
+            FelicaStandardCommand::GetContainerProperty { property },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetContainerProperty { data } => Ok(data),
+            _ => Err(unexpected_response("Get Container Property")),
         }
     }
 

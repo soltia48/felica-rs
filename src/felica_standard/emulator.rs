@@ -5,9 +5,9 @@ use super::secure::{
     generate_service_keys, strip_secure_padding,
 };
 use super::{
-    Authentication2Response, BLOCK_SIZE, BlockListElement, ContainerInformation, DES_BLOCK_SIZE,
-    FelicaStandardCommand, FelicaStandardResponse, GetAreaInformationResult, GetNodePropertyResult,
-    NodeProperty, NodePropertyType, ReadResult, ReadWithoutEncryptionResult,
+    Authentication2Response, BLOCK_SIZE, BlockListElement, ContainerInformation, ContainerProperty,
+    DES_BLOCK_SIZE, FelicaStandardCommand, FelicaStandardResponse, GetAreaInformationResult,
+    GetNodePropertyResult, NodeProperty, NodePropertyType, ReadResult, ReadWithoutEncryptionResult,
     RequestBlockInformationExResult, SearchServiceCodeResult, ServiceCode, Type3TagPollingResult,
     frame_with_length_prefix,
 };
@@ -350,6 +350,15 @@ impl FelicaStandardEmulator {
                     idm,
                     container_information: ContainerInformation::new([0u8; 5], [0u8; 11]),
                 })
+            }
+            FelicaStandardCommand::GetContainerProperty { property } => {
+                self.resolve_active_system_code()?;
+                let data = match property {
+                    ContainerProperty::Property1 => vec![0x01],
+                    ContainerProperty::Property2 => vec![0x20],
+                    ContainerProperty::Unknown(_) => vec![0x00],
+                };
+                encode_response_frame(FelicaStandardResponse::GetContainerProperty { data })
             }
             FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
                 let index = self.system_index_for_idm(&idm)?;

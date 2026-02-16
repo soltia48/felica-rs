@@ -72,6 +72,9 @@ pub enum FelicaStandardResponse {
         idm: Idm,
         container_information: ContainerInformation,
     },
+    GetContainerProperty {
+        data: Vec<u8>,
+    },
     GetAreaInformation {
         idm: Idm,
         status_flag1: u8,
@@ -138,6 +141,9 @@ impl FelicaStandardResponse {
         let code = data[1];
         if code == 0x13 {
             return Self::parse_authentication2(data);
+        }
+        if code == 0x2F {
+            return Self::parse_get_container_property(data);
         }
         Self::ensure_response_len(data, 10, "short Felica response")?;
         let (idm, _rest) = parse_idm(&data[2..])?;
@@ -524,6 +530,17 @@ impl FelicaStandardResponse {
                 mobile_phone_model_information,
             },
         })
+    }
+
+    fn parse_get_container_property(data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 3, "short get container property response")?;
+        let payload = data[2..].to_vec();
+        if payload.is_empty() {
+            return Err(DriverError::Other(
+                "get container property response data must contain at least one byte".into(),
+            ));
+        }
+        Ok(FelicaStandardResponse::GetContainerProperty { data: payload })
     }
 
     fn parse_get_area_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
@@ -1020,6 +1037,18 @@ impl FelicaStandardResponse {
                 payload
                     .extend_from_slice(&container_information.format_version_carrier_information);
                 payload.extend_from_slice(&container_information.mobile_phone_model_information);
+                Ok(payload)
+            }
+            FelicaStandardResponse::GetContainerProperty { data } => {
+                if data.is_empty() {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container property response data must contain at least one byte"
+                            .into(),
+                    ));
+                }
+                let mut payload = Vec::with_capacity(1 + data.len());
+                payload.push(0x2F);
+                payload.extend_from_slice(data);
                 Ok(payload)
             }
             FelicaStandardResponse::GetAreaInformation {

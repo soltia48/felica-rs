@@ -79,6 +79,11 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::OTHER)
     }
 
+    /// Compute the Get Container Property command timeout using the Other PMm byte.
+    pub fn get_container_property_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::OTHER)
+    }
+
     /// Compute the Get Area Information command timeout using the fixed response PMm byte.
     pub fn get_area_information_timeout_ms(&self) -> u16 {
         self.base_timeout(PmmSlot::GET_AREA_INFORMATION)

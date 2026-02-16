@@ -1,9 +1,9 @@
 use super::{
-    BLOCK_SIZE, BlockListElement, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, FelicaStandardError, IDM_LEN,
-    MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES,
-    MAX_SERVICE_CODES, NodePropertyType, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
-    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ServiceCode,
-    SetParameterEncryptionType, SetParameterPacketType, WRITE_COMMAND_CODE,
+    BLOCK_SIZE, BlockListElement, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerProperty,
+    FelicaStandardError, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
+    MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, NodePropertyType, READ_COMMAND_CODE,
+    REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
+    ServiceCode, SetParameterEncryptionType, SetParameterPacketType, WRITE_COMMAND_CODE,
 };
 
 pub enum FelicaStandardCommand {
@@ -57,6 +57,9 @@ pub enum FelicaStandardCommand {
     },
     GetContainerIssueInformation {
         idm: [u8; IDM_LEN],
+    },
+    GetContainerProperty {
+        property: ContainerProperty,
     },
     GetAreaInformation {
         idm: [u8; IDM_LEN],
@@ -324,6 +327,11 @@ impl FelicaStandardCommand {
                 payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
+            FelicaStandardCommand::GetContainerProperty { property } => {
+                let mut payload = PayloadWriter::new(0x2E);
+                payload.extend_u16_le(property.to_index());
+                CommandEncoding::Plain(payload.finish_frame())
+            }
             FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
                 let mut payload = PayloadWriter::new(0x24);
                 payload.idm(idm);
@@ -458,6 +466,22 @@ impl FelicaStandardCommand {
                     system_code: u16::from_be_bytes([body[0], body[1]]),
                     request_code: body[2],
                     time_slots: body[3],
+                })
+            }
+            0x2E => {
+                if body.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container property payload too short".into(),
+                    ));
+                }
+                if body.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container property payload has trailing bytes".into(),
+                    ));
+                }
+                let index = u16::from_le_bytes([body[0], body[1]]);
+                Ok(FelicaStandardCommand::GetContainerProperty {
+                    property: ContainerProperty::from_index(index),
                 })
             }
             0x02 => {
