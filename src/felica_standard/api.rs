@@ -7,10 +7,10 @@ use super::secure::{
 };
 use super::types::{
     BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
-    GetAreaInformationResult, GetNodePropertyResult, MutualAuthenticationResult, NodePropertyType,
-    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
-    SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType, SetParameterPacketType,
-    status_flag_description,
+    GetAreaInformationResult, GetNodePropertyResult, GetSystemStatusResult,
+    MutualAuthenticationResult, NodePropertyType, RequestBlockInformationExResult,
+    RequestCodeListResult, RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode,
+    SetParameterEncryptionType, SetParameterPacketType, status_flag_description,
 };
 use super::{
     BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
@@ -508,6 +508,37 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         match response {
             FelicaStandardResponse::GetContainerProperty { data } => Ok(data),
             _ => Err(unexpected_response("Get Container Property")),
+        }
+    }
+
+    pub fn get_system_status(&mut self) -> Result<GetSystemStatusResult, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self.polling_result.get_system_status_timeout_ms();
+
+        let response = self.execute_command(
+            "Get System Status",
+            FelicaStandardCommand::GetSystemStatus { idm },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetSystemStatus {
+                status_flag1,
+                status_flag2,
+                result,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error(
+                        "Get System Status",
+                        status_flag1,
+                        status_flag2,
+                    ))
+                } else {
+                    Ok(result)
+                }
+            }
+            _ => Err(unexpected_response("Get System Status")),
         }
     }
 

@@ -70,6 +70,9 @@ pub enum FelicaStandardCommand {
         node_property_type: NodePropertyType,
         node_codes: Vec<u16>,
     },
+    GetSystemStatus {
+        idm: [u8; IDM_LEN],
+    },
     Authentication1 {
         idm: [u8; IDM_LEN],
         areas: Vec<u16>,
@@ -351,6 +354,12 @@ impl FelicaStandardCommand {
                 payload.push_u8(node_property_type.to_byte());
                 payload.push_u8(node_codes.len() as u8);
                 payload.extend_u16_list_le(node_codes);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetSystemStatus { idm } => {
+                let mut payload = PayloadWriter::new(0x38);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication1 {
@@ -740,6 +749,25 @@ impl FelicaStandardCommand {
                     node_property_type,
                     node_codes,
                 })
+            }
+            0x38 => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get system status payload too short".into(),
+                    ));
+                }
+                if rest.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get system status payload has trailing bytes".into(),
+                    ));
+                }
+                if rest.iter().any(|value| *value != 0x00) {
+                    return Err(FelicaStandardError::Protocol(
+                        "get system status reserved bytes must be 0x00".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::GetSystemStatus { idm })
             }
             0x10 => {
                 let (idm, rest) = parse_idm(body)?;

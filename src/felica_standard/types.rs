@@ -440,6 +440,12 @@ pub struct GetNodePropertyResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GetSystemStatusResult {
+    pub flag: u8,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadWithoutEncryptionResult {
     pub blocks: Vec<[u8; BLOCK_SIZE]>,
 }

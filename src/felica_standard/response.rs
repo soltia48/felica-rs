@@ -1,12 +1,13 @@
 use super::{
     AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
     ContainerInformation, FelicaStandardError, GetAreaInformationResult, GetNodePropertyResult,
-    IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_SERVICE_CODES,
-    NodeProperty, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
-    REGISTER_SERVICE_COMMAND_CODE, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
-    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
-    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
-    WRITE_COMMAND_CODE, frame_with_length_prefix,
+    GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
+    MAX_SERVICE_CODES, NodeProperty, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
+    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ReadResult,
+    ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
+    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
+    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
+    frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -87,6 +88,12 @@ pub enum FelicaStandardResponse {
         status_flag2: u8,
         result: Option<GetNodePropertyResult>,
     },
+    GetSystemStatus {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        result: GetSystemStatusResult,
+    },
     Authentication1 {
         idm: Idm,
         challenge_1b: [u8; 8],
@@ -163,6 +170,7 @@ impl FelicaStandardResponse {
             0x23 => Self::parse_get_container_issue_information(idm, data),
             0x25 => Self::parse_get_area_information(idm, data),
             0x29 => Self::parse_get_node_property(idm, data),
+            0x39 => Self::parse_get_system_status(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -623,6 +631,28 @@ impl FelicaStandardResponse {
             status_flag1,
             status_flag2,
             result: Some(GetNodePropertyResult { node_properties }),
+        })
+    }
+
+    fn parse_get_system_status(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 14, "short get system status response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        let flag = data[12];
+        let data_len = data[13] as usize;
+        Self::ensure_response_len(
+            data,
+            14 + data_len,
+            "short get system status response payload",
+        )?;
+        Ok(FelicaStandardResponse::GetSystemStatus {
+            idm,
+            status_flag1,
+            status_flag2,
+            result: GetSystemStatusResult {
+                flag,
+                data: data[14..14 + data_len].to_vec(),
+            },
         })
     }
 
@@ -1143,6 +1173,27 @@ impl FelicaStandardResponse {
                     payload.push(*status_flag2);
                     Ok(payload)
                 }
+            }
+            FelicaStandardResponse::GetSystemStatus {
+                idm,
+                status_flag1,
+                status_flag2,
+                result,
+            } => {
+                if result.data.len() > u8::MAX as usize {
+                    return Err(FelicaStandardError::Protocol(
+                        "get system status response data length out of range".into(),
+                    ));
+                }
+                let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 1 + 1 + result.data.len());
+                payload.push(0x39);
+                payload.extend_from_slice(idm);
+                payload.push(*status_flag1);
+                payload.push(*status_flag2);
+                payload.push(result.flag);
+                payload.push(result.data.len() as u8);
+                payload.extend_from_slice(&result.data);
+                Ok(payload)
             }
             FelicaStandardResponse::Authentication1 {
                 idm,

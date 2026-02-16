@@ -84,6 +84,11 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::OTHER)
     }
 
+    /// Compute the Get System Status command timeout using the fixed response PMm byte.
+    pub fn get_system_status_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::GET_SYSTEM_STATUS)
+    }
+
     /// Compute the Get Area Information command timeout using the fixed response PMm byte.
     pub fn get_area_information_timeout_ms(&self) -> u16 {
         self.base_timeout(PmmSlot::GET_AREA_INFORMATION)
@@ -196,6 +201,7 @@ impl PmmSlot {
     const REQUEST_RESPONSE: Self = Self::new(3);
     const SEARCH_SERVICE_CODE: Self = Self::new(3);
     const REQUEST_SYSTEM_CODE: Self = Self::new(3);
+    const GET_SYSTEM_STATUS: Self = Self::new(3);
     const GET_AREA_INFORMATION: Self = Self::new(3);
     const REQUEST_BLOCK_INFORMATION: Self = Self::new(2);
     const AUTHENTICATION1: Self = Self::new(4);

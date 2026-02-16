@@ -7,9 +7,9 @@ use super::secure::{
 use super::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, ContainerInformation, ContainerProperty,
     DES_BLOCK_SIZE, FelicaStandardCommand, FelicaStandardResponse, GetAreaInformationResult,
-    GetNodePropertyResult, NodeProperty, NodePropertyType, ReadResult, ReadWithoutEncryptionResult,
-    RequestBlockInformationExResult, SearchServiceCodeResult, ServiceCode, Type3TagPollingResult,
-    frame_with_length_prefix,
+    GetNodePropertyResult, GetSystemStatusResult, NodeProperty, NodePropertyType, ReadResult,
+    ReadWithoutEncryptionResult, RequestBlockInformationExResult, SearchServiceCodeResult,
+    ServiceCode, Type3TagPollingResult, frame_with_length_prefix,
 };
 use rand::{RngCore, rngs::OsRng};
 use std::cell::{Ref, RefCell, RefMut};
@@ -359,6 +359,18 @@ impl FelicaStandardEmulator {
                     ContainerProperty::Unknown(_) => vec![0x00],
                 };
                 encode_response_frame(FelicaStandardResponse::GetContainerProperty { data })
+            }
+            FelicaStandardCommand::GetSystemStatus { idm } => {
+                self.system_index_for_idm(&idm)?;
+                encode_response_frame(FelicaStandardResponse::GetSystemStatus {
+                    idm,
+                    status_flag1: 0x00,
+                    status_flag2: 0x00,
+                    result: GetSystemStatusResult {
+                        flag: 0x00,
+                        data: Vec::new(),
+                    },
+                })
             }
             FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
                 let index = self.system_index_for_idm(&idm)?;
