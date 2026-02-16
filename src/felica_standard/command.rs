@@ -40,6 +40,10 @@ pub enum FelicaStandardCommand {
         idm: [u8; IDM_LEN],
         node_codes: Vec<u16>,
     },
+    RequestBlockInformationEx {
+        idm: [u8; IDM_LEN],
+        node_codes: Vec<u16>,
+    },
     RequestCodeList {
         idm: [u8; IDM_LEN],
         parent_node_code: u16,
@@ -259,6 +263,14 @@ impl FelicaStandardCommand {
             FelicaStandardCommand::RequestBlockInformation { idm, node_codes } => {
                 debug_assert!(!node_codes.is_empty() && node_codes.len() <= MAX_NODE_CODES);
                 let mut payload = PayloadWriter::new(0x0E);
+                payload.idm(idm);
+                payload.push_u8(node_codes.len() as u8);
+                payload.extend_u16_list_le(node_codes);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestBlockInformationEx { idm, node_codes } => {
+                debug_assert!(!node_codes.is_empty() && node_codes.len() <= MAX_NODE_CODES);
+                let mut payload = PayloadWriter::new(0x1E);
                 payload.idm(idm);
                 payload.push_u8(node_codes.len() as u8);
                 payload.extend_u16_list_le(node_codes);
@@ -509,6 +521,25 @@ impl FelicaStandardCommand {
                 }
                 let values = parse_u16_list_le(&rest[1..], count)?;
                 Ok(FelicaStandardCommand::RequestBlockInformation {
+                    idm,
+                    node_codes: values,
+                })
+            }
+            0x1E => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.is_empty() {
+                    return Err(FelicaStandardError::Protocol(
+                        "request block information ex payload too short".into(),
+                    ));
+                }
+                let count = rest[0] as usize;
+                if count == 0 || count > MAX_NODE_CODES {
+                    return Err(FelicaStandardError::Protocol(
+                        "request block information ex count out of range".into(),
+                    ));
+                }
+                let values = parse_u16_list_le(&rest[1..], count)?;
+                Ok(FelicaStandardCommand::RequestBlockInformationEx {
                     idm,
                     node_codes: values,
                 })

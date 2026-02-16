@@ -59,6 +59,11 @@ impl Type3TagPollingResult {
         )
     }
 
+    /// Compute the Request Block Information Ex command timeout using the Request Block Information PMm byte.
+    pub fn request_block_information_ex_timeout_ms(&self, node_count: usize) -> u16 {
+        self.request_block_information_timeout_ms(node_count)
+    }
+
     /// Compute the Request Code List command timeout using the Request Service PMm byte.
     pub fn request_code_list_timeout_ms(&self) -> u16 {
         self.base_timeout(PmmSlot::REQUEST_CODE_LIST)

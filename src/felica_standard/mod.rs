@@ -48,8 +48,8 @@ pub use secure::{AuthenticatedContext, Authentication2Response, generate_service
 pub use type3::Type3TagPollingResult;
 pub use types::{
     AreaCodeRange, BlockListElement, ChangeKeyParameters, MutualAuthenticationResult,
-    RequestCodeListResult, RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode,
-    StatusFlag1, StatusFlag2, status_flag_description,
+    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
+    SearchServiceCodeResult, ServiceCode, StatusFlag1, StatusFlag2, status_flag_description,
 };
 
 pub(crate) use command::frame_with_length_prefix;

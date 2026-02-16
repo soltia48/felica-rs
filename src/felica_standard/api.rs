@@ -6,8 +6,9 @@ use super::secure::{
     SecureResponse, encrypt_des_cbc_zero_iv,
 };
 use super::types::{
-    BlockListElement, ChangeKeyParameters, MutualAuthenticationResult, RequestCodeListResult,
-    RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode, status_flag_description,
+    BlockListElement, ChangeKeyParameters, MutualAuthenticationResult,
+    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
+    SearchServiceCodeResult, ServiceCode, status_flag_description,
 };
 use super::{
     BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_RW_SERVICE_CODES,
@@ -328,6 +329,57 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 Ok(block_counts)
             }
             _ => Err(unexpected_response("Request Block Information")),
+        }
+    }
+
+    pub fn request_block_information_ex(
+        &mut self,
+        node_codes: &[u16],
+    ) -> Result<RequestBlockInformationExResult, FelicaStandardError> {
+        ensure_len_in_range("node_codes", node_codes.len(), 1, MAX_NODE_CODES)?;
+
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self
+            .polling_result
+            .request_block_information_ex_timeout_ms(node_codes.len());
+
+        let response = self.execute_command(
+            "Request Block Information Ex",
+            FelicaStandardCommand::RequestBlockInformationEx {
+                idm,
+                node_codes: node_codes.to_vec(),
+            },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::RequestBlockInformationEx {
+                status_flag1,
+                status_flag2,
+                assigned_block_counts,
+                free_block_counts,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error(
+                        "Request Block Information Ex",
+                        status_flag1,
+                        status_flag2,
+                    ))
+                } else if assigned_block_counts.len() != node_codes.len()
+                    || free_block_counts.len() != node_codes.len()
+                {
+                    Err(FelicaStandardError::Protocol(
+                        "Request Block Information Ex count list length mismatch".into(),
+                    ))
+                } else {
+                    Ok(RequestBlockInformationExResult {
+                        assigned_block_counts,
+                        free_block_counts,
+                    })
+                }
+            }
+            _ => Err(unexpected_response("Request Block Information Ex")),
         }
     }
 

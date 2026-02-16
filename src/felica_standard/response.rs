@@ -48,6 +48,13 @@ pub enum FelicaStandardResponse {
         idm: Idm,
         block_counts: Vec<u16>,
     },
+    RequestBlockInformationEx {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        assigned_block_counts: Vec<u16>,
+        free_block_counts: Vec<u16>,
+    },
     RequestCodeList {
         idm: Idm,
         status_flag1: u8,
@@ -124,6 +131,7 @@ impl FelicaStandardResponse {
             0x0B => Self::parse_search_service_code(idm, data),
             0x0D => Self::parse_request_systemcode(idm, data),
             0x0F => Self::parse_request_block_information(idm, data),
+            0x1F => Self::parse_request_block_information_ex(idm, data),
             0x1B => Self::parse_request_code_list(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
@@ -355,6 +363,54 @@ impl FelicaStandardResponse {
             block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
         Ok(FelicaStandardResponse::RequestBlockInformation { idm, block_counts })
+    }
+
+    fn parse_request_block_information_ex(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short request block information ex response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        if status_flag1 != 0 {
+            return Ok(FelicaStandardResponse::RequestBlockInformationEx {
+                idm,
+                status_flag1,
+                status_flag2,
+                assigned_block_counts: Vec::new(),
+                free_block_counts: Vec::new(),
+            });
+        }
+
+        Self::ensure_response_len(
+            data,
+            13,
+            "short request block information ex success response",
+        )?;
+        let count = data[12] as usize;
+        if count == 0 || count > MAX_NODE_CODES {
+            return Err(DriverError::Other(
+                "request block information ex count must be between 1 and 32".into(),
+            ));
+        }
+
+        let expected_len = 13 + count * 4;
+        Self::ensure_response_len(
+            data,
+            expected_len,
+            "short request block information ex count list",
+        )?;
+        let mut assigned_block_counts = Vec::with_capacity(count);
+        let mut free_block_counts = Vec::with_capacity(count);
+        for chunk in data[13..13 + count * 4].chunks_exact(4) {
+            assigned_block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+            free_block_counts.push(u16::from_le_bytes([chunk[2], chunk[3]]));
+        }
+
+        Ok(FelicaStandardResponse::RequestBlockInformationEx {
+            idm,
+            status_flag1,
+            status_flag2,
+            assigned_block_counts,
+            free_block_counts,
+        })
     }
 
     fn parse_request_code_list(idm: Idm, data: &[u8]) -> DriverResult<Self> {
@@ -677,6 +733,52 @@ impl FelicaStandardResponse {
                     payload.extend_from_slice(&count.to_le_bytes());
                 }
                 Ok(payload)
+            }
+            FelicaStandardResponse::RequestBlockInformationEx {
+                idm,
+                status_flag1,
+                status_flag2,
+                assigned_block_counts,
+                free_block_counts,
+            } => {
+                if *status_flag1 == 0 {
+                    if assigned_block_counts.is_empty()
+                        || assigned_block_counts.len() > MAX_NODE_CODES
+                    {
+                        return Err(FelicaStandardError::Protocol(
+                            "request block information ex count out of range".into(),
+                        ));
+                    }
+                    if assigned_block_counts.len() != free_block_counts.len() {
+                        return Err(FelicaStandardError::Protocol(
+                            "request block information ex assigned/free length mismatch".into(),
+                        ));
+                    }
+                    let mut payload =
+                        Vec::with_capacity(1 + IDM_LEN + 2 + 1 + assigned_block_counts.len() * 4);
+                    payload.push(0x1F);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    payload.push(assigned_block_counts.len() as u8);
+                    for (assigned, free) in assigned_block_counts.iter().zip(free_block_counts) {
+                        payload.extend_from_slice(&assigned.to_le_bytes());
+                        payload.extend_from_slice(&free.to_le_bytes());
+                    }
+                    Ok(payload)
+                } else {
+                    if !assigned_block_counts.is_empty() || !free_block_counts.is_empty() {
+                        return Err(FelicaStandardError::Protocol(
+                            "request block information ex counts must be omitted on error".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                    payload.push(0x1F);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    Ok(payload)
+                }
             }
             FelicaStandardResponse::RequestCodeList {
                 idm,

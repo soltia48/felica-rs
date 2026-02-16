@@ -316,6 +316,22 @@ impl FelicaStandardEmulator {
                     block_counts: counts,
                 })
             }
+            FelicaStandardCommand::RequestBlockInformationEx { idm, node_codes } => {
+                let index = self.system_index_for_idm(&idm)?;
+                let system = self.systems.get(index)?;
+                let assigned_block_counts = node_codes
+                    .iter()
+                    .map(|code| system.block_count_for_node(*code))
+                    .collect::<Vec<_>>();
+                let free_block_counts = vec![0u16; assigned_block_counts.len()];
+                encode_response_frame(FelicaStandardResponse::RequestBlockInformationEx {
+                    idm,
+                    status_flag1: 0x00,
+                    status_flag2: 0x00,
+                    assigned_block_counts,
+                    free_block_counts,
+                })
+            }
             FelicaStandardCommand::Authentication1 {
                 idm,
                 areas,
