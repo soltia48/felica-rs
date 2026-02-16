@@ -76,6 +76,9 @@ pub enum FelicaStandardResponse {
     GetContainerProperty {
         data: Vec<u8>,
     },
+    GetContainerId {
+        container_idm: Idm,
+    },
     GetAreaInformation {
         idm: Idm,
         status_flag1: u8,
@@ -191,6 +194,7 @@ impl FelicaStandardResponse {
             0x3B => Self::parse_get_platform_information(idm, data),
             0x3D => Self::parse_request_specification_version(idm, data),
             0x3F => Self::parse_reset_mode(idm, data),
+            0x71 => Self::parse_get_container_id(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -569,6 +573,11 @@ impl FelicaStandardResponse {
             ));
         }
         Ok(FelicaStandardResponse::GetContainerProperty { data: payload })
+    }
+
+    fn parse_get_container_id(container_idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 10, "short get container id response")?;
+        Ok(FelicaStandardResponse::GetContainerId { container_idm })
     }
 
     fn parse_get_area_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
@@ -1153,6 +1162,12 @@ impl FelicaStandardResponse {
                 let mut payload = Vec::with_capacity(1 + data.len());
                 payload.push(0x2F);
                 payload.extend_from_slice(data);
+                Ok(payload)
+            }
+            FelicaStandardResponse::GetContainerId { container_idm } => {
+                let mut payload = Vec::with_capacity(1 + IDM_LEN);
+                payload.push(0x71);
+                payload.extend_from_slice(container_idm);
                 Ok(payload)
             }
             FelicaStandardResponse::GetAreaInformation {

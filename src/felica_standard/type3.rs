@@ -84,6 +84,11 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::OTHER)
     }
 
+    /// Compute the Get Container ID command timeout using the Other PMm byte.
+    pub fn get_container_id_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::OTHER)
+    }
+
     /// Compute the Get System Status command timeout using the fixed response PMm byte.
     pub fn get_system_status_timeout_ms(&self) -> u16 {
         self.base_timeout(PmmSlot::GET_SYSTEM_STATUS)
@@ -92,6 +97,16 @@ impl Type3TagPollingResult {
     /// Compute the Get Platform Information command timeout using the Other PMm byte.
     pub fn get_platform_information_timeout_ms(&self) -> u16 {
         self.base_timeout(PmmSlot::OTHER)
+    }
+
+    /// Compute the Request Specification Version command timeout using the fixed response PMm byte.
+    pub fn request_specification_version_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::REQUEST_SPECIFICATION_VERSION)
+    }
+
+    /// Compute the Reset Mode command timeout using the fixed response PMm byte.
+    pub fn reset_mode_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::RESET_MODE)
     }
 
     /// Compute the Get Area Information command timeout using the fixed response PMm byte.
@@ -207,6 +222,8 @@ impl PmmSlot {
     const SEARCH_SERVICE_CODE: Self = Self::new(3);
     const REQUEST_SYSTEM_CODE: Self = Self::new(3);
     const GET_SYSTEM_STATUS: Self = Self::new(3);
+    const REQUEST_SPECIFICATION_VERSION: Self = Self::new(3);
+    const RESET_MODE: Self = Self::new(3);
     const GET_AREA_INFORMATION: Self = Self::new(3);
     const REQUEST_BLOCK_INFORMATION: Self = Self::new(2);
     const AUTHENTICATION1: Self = Self::new(4);

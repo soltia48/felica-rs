@@ -5,12 +5,9 @@ use super::secure::{
     generate_service_keys, strip_secure_padding,
 };
 use super::{
-    Authentication2Response, BLOCK_SIZE, BlockListElement, ContainerInformation, ContainerProperty,
-    DES_BLOCK_SIZE, FelicaStandardCommand, FelicaStandardResponse, GetAreaInformationResult,
-    GetNodePropertyResult, GetSystemStatusResult, NodeProperty, NodePropertyType, OptionVersion,
-    ReadResult, ReadWithoutEncryptionResult, RequestBlockInformationExResult,
-    SearchServiceCodeResult, ServiceCode, SpecificationVersion, Type3TagPollingResult,
-    frame_with_length_prefix,
+    Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
+    FelicaStandardResponse, ReadResult, ReadWithoutEncryptionResult, SearchServiceCodeResult,
+    ServiceCode, Type3TagPollingResult, frame_with_length_prefix,
 };
 use rand::{RngCore, rngs::OsRng};
 use std::cell::{Ref, RefCell, RefMut};
@@ -319,82 +316,6 @@ impl FelicaStandardEmulator {
                     block_counts: counts,
                 })
             }
-            FelicaStandardCommand::RequestBlockInformationEx { idm, node_codes } => {
-                let index = self.system_index_for_idm(&idm)?;
-                let system = self.systems.get(index)?;
-                let assigned_block_counts = node_codes
-                    .iter()
-                    .map(|code| system.block_count_for_node(*code))
-                    .collect::<Vec<_>>();
-                let free_block_counts = vec![0u16; assigned_block_counts.len()];
-                encode_response_frame(FelicaStandardResponse::RequestBlockInformationEx {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                    result: Some(RequestBlockInformationExResult {
-                        assigned_block_counts,
-                        free_block_counts,
-                    }),
-                })
-            }
-            FelicaStandardCommand::SetParameter { idm, .. } => {
-                self.system_index_for_idm(&idm)?;
-                encode_response_frame(FelicaStandardResponse::SetParameter {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                })
-            }
-            FelicaStandardCommand::GetContainerIssueInformation { idm } => {
-                self.system_index_for_idm(&idm)?;
-                encode_response_frame(FelicaStandardResponse::GetContainerIssueInformation {
-                    idm,
-                    container_information: ContainerInformation::new([0u8; 5], [0u8; 11]),
-                })
-            }
-            FelicaStandardCommand::GetContainerProperty { property } => {
-                self.resolve_active_system_code()?;
-                let data = match property {
-                    ContainerProperty::Property1 => vec![0x01],
-                    ContainerProperty::Property2 => vec![0x20],
-                    ContainerProperty::Unknown(_) => vec![0x00],
-                };
-                encode_response_frame(FelicaStandardResponse::GetContainerProperty { data })
-            }
-            FelicaStandardCommand::GetSystemStatus { idm } => {
-                self.system_index_for_idm(&idm)?;
-                encode_response_frame(FelicaStandardResponse::GetSystemStatus {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                    result: GetSystemStatusResult {
-                        flag: 0x00,
-                        data: Vec::new(),
-                    },
-                })
-            }
-            FelicaStandardCommand::GetPlatformInformation { idm } => {
-                self.system_index_for_idm(&idm)?;
-                encode_response_frame(FelicaStandardResponse::GetPlatformInformation {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                    result: Some(vec![0x00]),
-                })
-            }
-            FelicaStandardCommand::RequestSpecificationVersion { idm } => {
-                self.system_index_for_idm(&idm)?;
-                encode_response_frame(FelicaStandardResponse::RequestSpecificationVersion {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                    specification_version: Some(SpecificationVersion {
-                        format_version: 0x00,
-                        basic_version: OptionVersion::new(0, 0, 0),
-                        option_versions: Vec::new(),
-                    }),
-                })
-            }
             FelicaStandardCommand::ResetMode { idm } => {
                 let index = self.system_index_for_idm(&idm)?;
                 let system = self.systems.get_mut(index)?;
@@ -403,72 +324,6 @@ impl FelicaStandardEmulator {
                     idm,
                     status_flag1: 0x00,
                     status_flag2: 0x00,
-                })
-            }
-            FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
-                let index = self.system_index_for_idm(&idm)?;
-                let system = self.systems.get(index)?;
-                if system.find_area(node_code).is_some() {
-                    encode_response_frame(FelicaStandardResponse::GetAreaInformation {
-                        idm,
-                        status_flag1: 0x00,
-                        status_flag2: 0x00,
-                        result: Some(GetAreaInformationResult {
-                            node_code,
-                            data: [0x00, 0x00],
-                        }),
-                    })
-                } else {
-                    encode_response_frame(FelicaStandardResponse::GetAreaInformation {
-                        idm,
-                        status_flag1: 0xFF,
-                        status_flag2: 0xE2,
-                        result: None,
-                    })
-                }
-            }
-            FelicaStandardCommand::GetNodeProperty {
-                idm,
-                node_property_type,
-                node_codes,
-            } => {
-                let index = self.system_index_for_idm(&idm)?;
-                let system = self.systems.get(index)?;
-
-                for (position, code) in node_codes.iter().enumerate() {
-                    let service = system.find_service(ServiceCode::new(*code));
-                    let area = system.find_area(*code);
-                    if service.is_none() && area.is_none() {
-                        return encode_response_frame(FelicaStandardResponse::GetNodeProperty {
-                            idm,
-                            status_flag1: list_error_index(position),
-                            status_flag2: 0xA6,
-                            result: None,
-                        });
-                    }
-                }
-
-                let node_properties = match node_property_type {
-                    NodePropertyType::ValueLimitedPurseService => node_codes
-                        .iter()
-                        .map(|_| NodeProperty::ValueLimitedPurseService {
-                            enabled: false,
-                            upper_limit: -1,
-                            lower_limit: -1,
-                            generation_number: 0xFF,
-                        })
-                        .collect(),
-                    NodePropertyType::MacCommunication => node_codes
-                        .iter()
-                        .map(|_| NodeProperty::MacCommunication { enabled: false })
-                        .collect(),
-                };
-
-                encode_response_frame(FelicaStandardResponse::GetNodeProperty {
-                    idm,
-                    status_flag1: 0x00,
-                    status_flag2: 0x00,
-                    result: Some(GetNodePropertyResult { node_properties }),
                 })
             }
             FelicaStandardCommand::Authentication1 {

@@ -61,6 +61,7 @@ pub enum FelicaStandardCommand {
     GetContainerProperty {
         property: ContainerProperty,
     },
+    GetContainerId,
     GetAreaInformation {
         idm: [u8; IDM_LEN],
         node_code: u16,
@@ -344,6 +345,11 @@ impl FelicaStandardCommand {
                 payload.extend_u16_le(property.to_index());
                 CommandEncoding::Plain(payload.finish_frame())
             }
+            FelicaStandardCommand::GetContainerId => {
+                let mut payload = PayloadWriter::new(0x70);
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
             FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
                 let mut payload = PayloadWriter::new(0x24);
                 payload.idm(idm);
@@ -518,6 +524,19 @@ impl FelicaStandardCommand {
                 Ok(FelicaStandardCommand::GetContainerProperty {
                     property: ContainerProperty::from_index(index),
                 })
+            }
+            0x70 => {
+                if body.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container id payload too short".into(),
+                    ));
+                }
+                if body.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container id payload has trailing bytes".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::GetContainerId)
             }
             0x02 => {
                 let (idm, rest) = parse_idm(body)?;

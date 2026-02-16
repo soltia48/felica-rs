@@ -512,6 +512,21 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    pub fn get_container_id(&mut self) -> Result<[u8; IDM_LEN], FelicaStandardError> {
+        let timeout_ms = self.polling_result.get_container_id_timeout_ms();
+
+        let response = self.execute_command(
+            "Get Container ID",
+            FelicaStandardCommand::GetContainerId,
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetContainerId { container_idm } => Ok(container_idm),
+            _ => Err(unexpected_response("Get Container ID")),
+        }
+    }
+
     pub fn get_system_status(&mut self) -> Result<GetSystemStatusResult, FelicaStandardError> {
         let idm = self.idm_bytes()?;
         let timeout_ms = self.polling_result.get_system_status_timeout_ms();
