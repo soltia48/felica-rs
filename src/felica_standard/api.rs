@@ -1104,6 +1104,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
     pub fn authentication1_v2(
         &mut self,
+        operation_parameter: u8,
         nodes: &[u16],
         challenge_1a: &[u8; 16],
     ) -> Result<([u8; 16], [u8; 16], [u8; 4]), FelicaStandardError> {
@@ -1118,6 +1119,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             "Authentication1 v2",
             FelicaStandardCommand::Authentication1V2 {
                 idm,
+                operation_parameter,
                 nodes: nodes.to_vec(),
                 challenge_1a: *challenge_1a,
             },

@@ -106,6 +106,7 @@ pub enum FelicaStandardCommand {
     },
     Authentication1V2 {
         idm: [u8; IDM_LEN],
+        operation_parameter: u8,
         nodes: Vec<u16>,
         challenge_1a: [u8; 16],
     },
@@ -447,18 +448,20 @@ impl FelicaStandardCommand {
             }
             FelicaStandardCommand::Authentication1V2 {
                 idm,
+                operation_parameter,
                 nodes,
                 challenge_1a,
             } => {
-                let mut payload = PayloadWriter::new(0x10);
+                let mut payload = PayloadWriter::new(0x40);
                 payload.idm(idm);
+                payload.push_u8(*operation_parameter);
                 payload.push_u8(nodes.len() as u8);
                 payload.extend_u16_list_le(nodes);
                 payload.extend_bytes(challenge_1a);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication2V2 { idm, challenge_2b } => {
-                let mut payload = PayloadWriter::new(0x12);
+                let mut payload = PayloadWriter::new(0x42);
                 payload.idm(idm);
                 payload.extend_bytes(challenge_2b);
                 CommandEncoding::Plain(payload.finish_frame())

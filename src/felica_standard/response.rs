@@ -176,6 +176,9 @@ impl FelicaStandardResponse {
         if code == 0x13 {
             return Self::parse_authentication2(data);
         }
+        if code == 0x43 {
+            return Self::parse_authentication2_v2(data);
+        }
         if code == 0x2F {
             return Self::parse_get_container_property(data);
         }
@@ -203,6 +206,7 @@ impl FelicaStandardResponse {
             0x3F => Self::parse_reset_mode(idm, data),
             0x71 => Self::parse_get_container_id(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
+            0x41 => Self::parse_authentication1_v2(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
     }
@@ -226,6 +230,15 @@ impl FelicaStandardResponse {
 
     fn parse_authentication2(data: &[u8]) -> DriverResult<Self> {
         Self::ensure_response_len(data, 10, "short authentication2 response payload")?;
+        Ok(FelicaStandardResponse::Authentication2(
+            Authentication2Response {
+                encrypted_payload: data[2..].to_vec(),
+            },
+        ))
+    }
+
+    fn parse_authentication2_v2(data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 10, "short authentication2 v2 response payload")?;
         Ok(FelicaStandardResponse::Authentication2(
             Authentication2Response {
                 encrypted_payload: data[2..].to_vec(),
@@ -881,6 +894,22 @@ impl FelicaStandardResponse {
         Ok(FelicaStandardResponse::ChangeSystemBlock {
             status_flag1: data[0],
             status_flag2: data[1],
+        })
+    }
+
+    fn parse_authentication1_v2(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 46, "short authentication1 v2 response")?;
+        let mut challenge_1b = [0u8; 16];
+        challenge_1b.copy_from_slice(&data[10..26]);
+        let mut challenge_2a = [0u8; 16];
+        challenge_2a.copy_from_slice(&data[26..42]);
+        let mut challenge_3c = [0u8; 4];
+        challenge_3c.copy_from_slice(&data[42..46]);
+        Ok(FelicaStandardResponse::Authentication1V2 {
+            idm,
+            challenge_1b,
+            challenge_2a,
+            challenge_3c,
         })
     }
 
