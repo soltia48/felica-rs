@@ -41,48 +41,6 @@ pub enum FelicaStandardCommand {
         idm: [u8; IDM_LEN],
         node_codes: Vec<u16>,
     },
-    RequestBlockInformationEx {
-        idm: [u8; IDM_LEN],
-        node_codes: Vec<u16>,
-    },
-    RequestCodeList {
-        idm: [u8; IDM_LEN],
-        parent_node_code: u16,
-        index: u16,
-    },
-    SetParameter {
-        idm: [u8; IDM_LEN],
-        encryption_type: SetParameterEncryptionType,
-        packet_type: SetParameterPacketType,
-    },
-    GetContainerIssueInformation {
-        idm: [u8; IDM_LEN],
-    },
-    GetContainerProperty {
-        property: ContainerProperty,
-    },
-    GetContainerId,
-    GetAreaInformation {
-        idm: [u8; IDM_LEN],
-        node_code: u16,
-    },
-    GetNodeProperty {
-        idm: [u8; IDM_LEN],
-        node_property_type: NodePropertyType,
-        node_codes: Vec<u16>,
-    },
-    GetSystemStatus {
-        idm: [u8; IDM_LEN],
-    },
-    GetPlatformInformation {
-        idm: [u8; IDM_LEN],
-    },
-    RequestSpecificationVersion {
-        idm: [u8; IDM_LEN],
-    },
-    ResetMode {
-        idm: [u8; IDM_LEN],
-    },
     Authentication1 {
         idm: [u8; IDM_LEN],
         areas: Vec<u16>,
@@ -100,9 +58,50 @@ pub enum FelicaStandardCommand {
         block_list: Vec<BlockListElement>,
         data: Vec<u8>,
     },
+    RequestCodeList {
+        idm: [u8; IDM_LEN],
+        parent_node_code: u16,
+        index: u16,
+    },
+    RequestBlockInformationEx {
+        idm: [u8; IDM_LEN],
+        node_codes: Vec<u16>,
+    },
+    SetParameter {
+        idm: [u8; IDM_LEN],
+        encryption_type: SetParameterEncryptionType,
+        packet_type: SetParameterPacketType,
+    },
+    GetContainerIssueInformation {
+        idm: [u8; IDM_LEN],
+    },
+    GetAreaInformation {
+        idm: [u8; IDM_LEN],
+        node_code: u16,
+    },
+    GetNodeProperty {
+        idm: [u8; IDM_LEN],
+        node_property_type: NodePropertyType,
+        node_codes: Vec<u16>,
+    },
+    GetContainerProperty {
+        property: ContainerProperty,
+    },
     RequestServiceV2 {
         idm: [u8; IDM_LEN],
         service_codes: Vec<ServiceCode>,
+    },
+    GetSystemStatus {
+        idm: [u8; IDM_LEN],
+    },
+    GetPlatformInformation {
+        idm: [u8; IDM_LEN],
+    },
+    RequestSpecificationVersion {
+        idm: [u8; IDM_LEN],
+    },
+    ResetMode {
+        idm: [u8; IDM_LEN],
     },
     Authentication1V2 {
         idm: [u8; IDM_LEN],
@@ -114,6 +113,7 @@ pub enum FelicaStandardCommand {
         idm: [u8; IDM_LEN],
         challenge_2b: [u8; 16],
     },
+    GetContainerId,
     RegisterIssueId {
         issue_id: [u8; 8],
         issue_parameter: [u8; 8],
@@ -246,15 +246,6 @@ impl FelicaStandardCommand {
                 append_service_codes(&mut payload, service_codes);
                 CommandEncoding::Plain(payload.finish_frame())
             }
-            FelicaStandardCommand::RequestServiceV2 { idm, service_codes } => {
-                debug_assert!(
-                    !service_codes.is_empty() && service_codes.len() <= MAX_SERVICE_CODES
-                );
-                let mut payload = PayloadWriter::new(0x32);
-                payload.idm(idm);
-                append_service_codes(&mut payload, service_codes);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
             FelicaStandardCommand::RequestResponse { idm } => {
                 let mut payload = PayloadWriter::new(0x04);
                 payload.idm(idm);
@@ -312,98 +303,6 @@ impl FelicaStandardCommand {
                 payload.extend_u16_list_le(node_codes);
                 CommandEncoding::Plain(payload.finish_frame())
             }
-            FelicaStandardCommand::RequestBlockInformationEx { idm, node_codes } => {
-                debug_assert!(!node_codes.is_empty() && node_codes.len() <= MAX_NODE_CODES);
-                let mut payload = PayloadWriter::new(0x1E);
-                payload.idm(idm);
-                payload.push_u8(node_codes.len() as u8);
-                payload.extend_u16_list_le(node_codes);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::RequestCodeList {
-                idm,
-                parent_node_code,
-                index,
-            } => {
-                let mut payload = PayloadWriter::new(0x1A);
-                payload.idm(idm);
-                payload.extend_u16_le(*parent_node_code);
-                payload.extend_u16_le(*index);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::SetParameter {
-                idm,
-                encryption_type,
-                packet_type,
-            } => {
-                let mut payload = PayloadWriter::new(0x20);
-                payload.idm(idm);
-                payload.extend_bytes(&[0x00; 4]);
-                payload.push_u8(encryption_type.to_byte());
-                payload.push_u8(packet_type.to_byte());
-                payload.extend_bytes(&[0x00; 2]);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetContainerIssueInformation { idm } => {
-                let mut payload = PayloadWriter::new(0x22);
-                payload.idm(idm);
-                payload.extend_bytes(&[0x00; 2]);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetContainerProperty { property } => {
-                let mut payload = PayloadWriter::new(0x2E);
-                payload.extend_u16_le(property.to_index());
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetContainerId => {
-                let mut payload = PayloadWriter::new(0x70);
-                payload.extend_bytes(&[0x00; 2]);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
-                let mut payload = PayloadWriter::new(0x24);
-                payload.idm(idm);
-                payload.extend_u16_le(*node_code);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetNodeProperty {
-                idm,
-                node_property_type,
-                node_codes,
-            } => {
-                debug_assert!(
-                    !node_codes.is_empty() && node_codes.len() <= MAX_NODE_PROPERTY_CODES
-                );
-                let mut payload = PayloadWriter::new(0x28);
-                payload.idm(idm);
-                payload.push_u8(node_property_type.to_byte());
-                payload.push_u8(node_codes.len() as u8);
-                payload.extend_u16_list_le(node_codes);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetSystemStatus { idm } => {
-                let mut payload = PayloadWriter::new(0x38);
-                payload.idm(idm);
-                payload.extend_bytes(&[0x00; 2]);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::GetPlatformInformation { idm } => {
-                let mut payload = PayloadWriter::new(0x3A);
-                payload.idm(idm);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::RequestSpecificationVersion { idm } => {
-                let mut payload = PayloadWriter::new(0x3C);
-                payload.idm(idm);
-                payload.extend_bytes(&[0x00; 2]);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
-            FelicaStandardCommand::ResetMode { idm } => {
-                let mut payload = PayloadWriter::new(0x3E);
-                payload.idm(idm);
-                payload.extend_bytes(&[0x00; 2]);
-                CommandEncoding::Plain(payload.finish_frame())
-            }
             FelicaStandardCommand::Authentication1 {
                 idm,
                 areas,
@@ -446,6 +345,102 @@ impl FelicaStandardCommand {
                     payload: payload.finish(),
                 }
             }
+            FelicaStandardCommand::RequestCodeList {
+                idm,
+                parent_node_code,
+                index,
+            } => {
+                let mut payload = PayloadWriter::new(0x1A);
+                payload.idm(idm);
+                payload.extend_u16_le(*parent_node_code);
+                payload.extend_u16_le(*index);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestBlockInformationEx { idm, node_codes } => {
+                debug_assert!(!node_codes.is_empty() && node_codes.len() <= MAX_NODE_CODES);
+                let mut payload = PayloadWriter::new(0x1E);
+                payload.idm(idm);
+                payload.push_u8(node_codes.len() as u8);
+                payload.extend_u16_list_le(node_codes);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::SetParameter {
+                idm,
+                encryption_type,
+                packet_type,
+            } => {
+                let mut payload = PayloadWriter::new(0x20);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 4]);
+                payload.push_u8(encryption_type.to_byte());
+                payload.push_u8(packet_type.to_byte());
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetContainerIssueInformation { idm } => {
+                let mut payload = PayloadWriter::new(0x22);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
+                let mut payload = PayloadWriter::new(0x24);
+                payload.idm(idm);
+                payload.extend_u16_le(*node_code);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetNodeProperty {
+                idm,
+                node_property_type,
+                node_codes,
+            } => {
+                debug_assert!(
+                    !node_codes.is_empty() && node_codes.len() <= MAX_NODE_PROPERTY_CODES
+                );
+                let mut payload = PayloadWriter::new(0x28);
+                payload.idm(idm);
+                payload.push_u8(node_property_type.to_byte());
+                payload.push_u8(node_codes.len() as u8);
+                payload.extend_u16_list_le(node_codes);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetContainerProperty { property } => {
+                let mut payload = PayloadWriter::new(0x2E);
+                payload.extend_u16_le(property.to_index());
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestServiceV2 { idm, service_codes } => {
+                debug_assert!(
+                    !service_codes.is_empty() && service_codes.len() <= MAX_SERVICE_CODES
+                );
+                let mut payload = PayloadWriter::new(0x32);
+                payload.idm(idm);
+                append_service_codes(&mut payload, service_codes);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetSystemStatus { idm } => {
+                let mut payload = PayloadWriter::new(0x38);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetPlatformInformation { idm } => {
+                let mut payload = PayloadWriter::new(0x3A);
+                payload.idm(idm);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestSpecificationVersion { idm } => {
+                let mut payload = PayloadWriter::new(0x3C);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::ResetMode { idm } => {
+                let mut payload = PayloadWriter::new(0x3E);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
             FelicaStandardCommand::Authentication1V2 {
                 idm,
                 operation_parameter,
@@ -464,6 +459,11 @@ impl FelicaStandardCommand {
                 let mut payload = PayloadWriter::new(0x42);
                 payload.idm(idm);
                 payload.extend_bytes(challenge_2b);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetContainerId => {
+                let mut payload = PayloadWriter::new(0x70);
+                payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::RegisterIssueId {
@@ -539,46 +539,11 @@ impl FelicaStandardCommand {
                     time_slots: body[3],
                 })
             }
-            0x2E => {
-                if body.len() < 2 {
-                    return Err(FelicaStandardError::Protocol(
-                        "get container property payload too short".into(),
-                    ));
-                }
-                if body.len() > 2 {
-                    return Err(FelicaStandardError::Protocol(
-                        "get container property payload has trailing bytes".into(),
-                    ));
-                }
-                let index = u16::from_le_bytes([body[0], body[1]]);
-                Ok(FelicaStandardCommand::GetContainerProperty {
-                    property: ContainerProperty::from_index(index),
-                })
-            }
-            0x70 => {
-                if body.len() < 2 {
-                    return Err(FelicaStandardError::Protocol(
-                        "get container id payload too short".into(),
-                    ));
-                }
-                if body.len() > 2 {
-                    return Err(FelicaStandardError::Protocol(
-                        "get container id payload has trailing bytes".into(),
-                    ));
-                }
-                Ok(FelicaStandardCommand::GetContainerId)
-            }
             0x02 => {
                 let (idm, rest) = parse_idm(body)?;
                 let (service_codes, _consumed) =
                     parse_service_code_list(rest, MAX_SERVICE_CODES, "request service")?;
                 Ok(FelicaStandardCommand::RequestService { idm, service_codes })
-            }
-            0x32 => {
-                let (idm, rest) = parse_idm(body)?;
-                let (service_codes, _consumed) =
-                    parse_service_code_list(rest, MAX_SERVICE_CODES, "request service v2")?;
-                Ok(FelicaStandardCommand::RequestServiceV2 { idm, service_codes })
             }
             0x04 => {
                 let (idm, rest) = parse_idm(body)?;
@@ -691,6 +656,76 @@ impl FelicaStandardCommand {
                     node_codes: values,
                 })
             }
+            0x10 => {
+                let (idm, rest) = parse_idm(body)?;
+                let mut cursor = 0usize;
+                let area_count = *rest.get(cursor).ok_or_else(|| {
+                    FelicaStandardError::Protocol("authentication1 missing area count".into())
+                })? as usize;
+                cursor += 1;
+                if area_count > MAX_SERVICE_CODES {
+                    return Err(FelicaStandardError::Protocol(
+                        "authentication1 area count out of range".into(),
+                    ));
+                }
+                let areas = parse_u16_list_le(&rest[cursor..], area_count)?;
+                cursor += area_count * 2;
+                let service_count = *rest.get(cursor).ok_or_else(|| {
+                    FelicaStandardError::Protocol("authentication1 missing service count".into())
+                })? as usize;
+                cursor += 1;
+                if service_count > MAX_SERVICE_CODES {
+                    return Err(FelicaStandardError::Protocol(
+                        "authentication1 service count out of range".into(),
+                    ));
+                }
+                let services = parse_u16_list_le(&rest[cursor..], service_count)?;
+                cursor += service_count * 2;
+                let challenge_1a = rest.get(cursor..cursor + 8).ok_or_else(|| {
+                    FelicaStandardError::Protocol("authentication1 missing challenge1a".into())
+                })?;
+                let mut challenge_bytes = [0u8; 8];
+                challenge_bytes.copy_from_slice(challenge_1a);
+                Ok(FelicaStandardCommand::Authentication1 {
+                    idm,
+                    areas,
+                    services,
+                    challenge_1a: challenge_bytes,
+                })
+            }
+            0x12 => {
+                let (idm, rest) = parse_idm(body)?;
+                let challenge_2b = rest.get(..8).ok_or_else(|| {
+                    FelicaStandardError::Protocol("authentication2 missing challenge2b".into())
+                })?;
+                let mut challenge_bytes = [0u8; 8];
+                challenge_bytes.copy_from_slice(challenge_2b);
+                Ok(FelicaStandardCommand::Authentication2 {
+                    idm,
+                    challenge_2b: challenge_bytes,
+                })
+            }
+            0x14 | 0x16 | 0x80 | 0x82 | 0x84 | 0x8E => Err(FelicaStandardError::Protocol(
+                "secure command payload requires decryption".into(),
+            )),
+            0x1A => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 4 {
+                    return Err(FelicaStandardError::Protocol(
+                        "request code list payload too short".into(),
+                    ));
+                }
+                if rest.len() > 4 {
+                    return Err(FelicaStandardError::Protocol(
+                        "request code list payload has trailing bytes".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::RequestCodeList {
+                    idm,
+                    parent_node_code: u16::from_le_bytes([rest[0], rest[1]]),
+                    index: u16::from_le_bytes([rest[2], rest[3]]),
+                })
+            }
             0x1E => {
                 let (idm, rest) = parse_idm(body)?;
                 if rest.is_empty() {
@@ -708,24 +743,6 @@ impl FelicaStandardCommand {
                 Ok(FelicaStandardCommand::RequestBlockInformationEx {
                     idm,
                     node_codes: values,
-                })
-            }
-            0x1A => {
-                let (idm, rest) = parse_idm(body)?;
-                if rest.len() < 4 {
-                    return Err(FelicaStandardError::Protocol(
-                        "request code list payload too short".into(),
-                    ));
-                }
-                if rest.len() > 4 {
-                    return Err(FelicaStandardError::Protocol(
-                        "request code list payload has trailing bytes".into(),
-                    ));
-                }
-                Ok(FelicaStandardCommand::RequestCodeList {
-                    idm,
-                    parent_node_code: u16::from_le_bytes([rest[0], rest[1]]),
-                    index: u16::from_le_bytes([rest[2], rest[3]]),
                 })
             }
             0x20 => {
@@ -825,6 +842,28 @@ impl FelicaStandardCommand {
                     node_codes,
                 })
             }
+            0x2E => {
+                if body.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container property payload too short".into(),
+                    ));
+                }
+                if body.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get container property payload has trailing bytes".into(),
+                    ));
+                }
+                let index = u16::from_le_bytes([body[0], body[1]]);
+                Ok(FelicaStandardCommand::GetContainerProperty {
+                    property: ContainerProperty::from_index(index),
+                })
+            }
+            0x32 => {
+                let (idm, rest) = parse_idm(body)?;
+                let (service_codes, _consumed) =
+                    parse_service_code_list(rest, MAX_SERVICE_CODES, "request service v2")?;
+                Ok(FelicaStandardCommand::RequestServiceV2 { idm, service_codes })
+            }
             0x38 => {
                 let (idm, rest) = parse_idm(body)?;
                 if rest.len() < 2 {
@@ -891,58 +930,19 @@ impl FelicaStandardCommand {
                 }
                 Ok(FelicaStandardCommand::ResetMode { idm })
             }
-            0x10 => {
-                let (idm, rest) = parse_idm(body)?;
-                let mut cursor = 0usize;
-                let area_count = *rest.get(cursor).ok_or_else(|| {
-                    FelicaStandardError::Protocol("authentication1 missing area count".into())
-                })? as usize;
-                cursor += 1;
-                if area_count > MAX_SERVICE_CODES {
+            0x70 => {
+                if body.len() < 2 {
                     return Err(FelicaStandardError::Protocol(
-                        "authentication1 area count out of range".into(),
+                        "get container id payload too short".into(),
                     ));
                 }
-                let areas = parse_u16_list_le(&rest[cursor..], area_count)?;
-                cursor += area_count * 2;
-                let service_count = *rest.get(cursor).ok_or_else(|| {
-                    FelicaStandardError::Protocol("authentication1 missing service count".into())
-                })? as usize;
-                cursor += 1;
-                if service_count > MAX_SERVICE_CODES {
+                if body.len() > 2 {
                     return Err(FelicaStandardError::Protocol(
-                        "authentication1 service count out of range".into(),
+                        "get container id payload has trailing bytes".into(),
                     ));
                 }
-                let services = parse_u16_list_le(&rest[cursor..], service_count)?;
-                cursor += service_count * 2;
-                let challenge_1a = rest.get(cursor..cursor + 8).ok_or_else(|| {
-                    FelicaStandardError::Protocol("authentication1 missing challenge1a".into())
-                })?;
-                let mut challenge_bytes = [0u8; 8];
-                challenge_bytes.copy_from_slice(challenge_1a);
-                Ok(FelicaStandardCommand::Authentication1 {
-                    idm,
-                    areas,
-                    services,
-                    challenge_1a: challenge_bytes,
-                })
+                Ok(FelicaStandardCommand::GetContainerId)
             }
-            0x12 => {
-                let (idm, rest) = parse_idm(body)?;
-                let challenge_2b = rest.get(..8).ok_or_else(|| {
-                    FelicaStandardError::Protocol("authentication2 missing challenge2b".into())
-                })?;
-                let mut challenge_bytes = [0u8; 8];
-                challenge_bytes.copy_from_slice(challenge_2b);
-                Ok(FelicaStandardCommand::Authentication2 {
-                    idm,
-                    challenge_2b: challenge_bytes,
-                })
-            }
-            0x14 | 0x16 | 0x80 | 0x82 | 0x84 | 0x8E => Err(FelicaStandardError::Protocol(
-                "secure command payload requires decryption".into(),
-            )),
             _ => Err(FelicaStandardError::Protocol(format!(
                 "unsupported command code: 0x{command:02X}"
             ))),
