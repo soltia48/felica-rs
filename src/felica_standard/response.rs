@@ -2,12 +2,12 @@ use super::{
     AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
     ContainerInformation, FelicaStandardError, GetAreaInformationResult, GetNodePropertyResult,
     GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
-    MAX_SERVICE_CODES, NodeProperty, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
+    MAX_SERVICE_CODES, NodeProperty, OptionVersion, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ReadResult,
     ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
-    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
-    frame_with_length_prefix,
+    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, SpecificationVersion,
+    WRITE_COMMAND_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -100,6 +100,17 @@ pub enum FelicaStandardResponse {
         status_flag2: u8,
         result: Option<Vec<u8>>,
     },
+    RequestSpecificationVersion {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        specification_version: Option<SpecificationVersion>,
+    },
+    ResetMode {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+    },
     Authentication1 {
         idm: Idm,
         challenge_1b: [u8; 8],
@@ -178,6 +189,8 @@ impl FelicaStandardResponse {
             0x29 => Self::parse_get_node_property(idm, data),
             0x39 => Self::parse_get_system_status(idm, data),
             0x3B => Self::parse_get_platform_information(idm, data),
+            0x3D => Self::parse_request_specification_version(idm, data),
+            0x3F => Self::parse_reset_mode(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -688,6 +701,32 @@ impl FelicaStandardResponse {
             status_flag1,
             status_flag2,
             result: Some(data[13..13 + data_len].to_vec()),
+        })
+    }
+
+    fn parse_request_specification_version(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short request specification version response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        let specification_version = if status_flag1 == 0 && data.len() > 12 {
+            Some(parse_specification_version_data(&data[12..])?)
+        } else {
+            None
+        };
+        Ok(FelicaStandardResponse::RequestSpecificationVersion {
+            idm,
+            status_flag1,
+            status_flag2,
+            specification_version,
+        })
+    }
+
+    fn parse_reset_mode(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short reset mode response")?;
+        Ok(FelicaStandardResponse::ResetMode {
+            idm,
+            status_flag1: data[10],
+            status_flag2: data[11],
         })
     }
 
@@ -1269,6 +1308,58 @@ impl FelicaStandardResponse {
                     Ok(payload)
                 }
             }
+            FelicaStandardResponse::RequestSpecificationVersion {
+                idm,
+                status_flag1,
+                status_flag2,
+                specification_version,
+            } => {
+                if *status_flag1 == 0 {
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 16);
+                    payload.push(0x3D);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    if let Some(specification_version) = specification_version {
+                        if specification_version.format_version != 0x00 {
+                            return Err(FelicaStandardError::Protocol(
+                                "request specification version format version must be 0x00".into(),
+                            ));
+                        }
+                        if specification_version.option_versions.len() > u8::MAX as usize {
+                            return Err(FelicaStandardError::Protocol(
+                                "request specification version option count out of range".into(),
+                            ));
+                        }
+                        payload.extend_from_slice(&specification_version.to_bytes());
+                    }
+                    Ok(payload)
+                } else {
+                    if specification_version.is_some() {
+                        return Err(FelicaStandardError::Protocol(
+                            "request specification version payload must be omitted on error".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                    payload.push(0x3D);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    Ok(payload)
+                }
+            }
+            FelicaStandardResponse::ResetMode {
+                idm,
+                status_flag1,
+                status_flag2,
+            } => {
+                let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                payload.push(0x3F);
+                payload.extend_from_slice(idm);
+                payload.push(*status_flag1);
+                payload.push(*status_flag2);
+                Ok(payload)
+            }
             FelicaStandardResponse::Authentication1 {
                 idm,
                 challenge_1b,
@@ -1486,6 +1577,40 @@ fn parse_fixed<'a, const N: usize>(
     let mut out = [0u8; N];
     out.copy_from_slice(&data[..N]);
     Ok((out, &data[N..]))
+}
+
+fn parse_specification_version_data(data: &[u8]) -> DriverResult<SpecificationVersion> {
+    if data.len() < 4 {
+        return Err(DriverError::Other(
+            "request specification version payload too short".into(),
+        ));
+    }
+    let format_version = data[0];
+    if format_version != 0x00 {
+        return Err(DriverError::Other(
+            "request specification version format version must be 0x00".into(),
+        ));
+    }
+    let basic_version = OptionVersion::from_le_bytes([data[1], data[2]]);
+    let option_count = data[3] as usize;
+    let option_bytes_len = option_count.checked_mul(2).ok_or_else(|| {
+        DriverError::Other("request specification version option bytes length overflow".into())
+    })?;
+    if data.len() < 4 + option_bytes_len {
+        return Err(DriverError::Other(
+            "request specification version option list truncated".into(),
+        ));
+    }
+    let mut option_versions = Vec::with_capacity(option_count);
+    let option_bytes = &data[4..4 + option_bytes_len];
+    for chunk in option_bytes.chunks_exact(2) {
+        option_versions.push(OptionVersion::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    Ok(SpecificationVersion {
+        format_version,
+        basic_version,
+        option_versions,
+    })
 }
 
 fn parse_idm(data: &[u8]) -> DriverResult<(Idm, &[u8])> {

@@ -445,6 +445,78 @@ pub struct GetSystemStatusResult {
     pub data: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OptionVersion {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+}
+
+impl OptionVersion {
+    pub fn new(major: u8, minor: u8, patch: u8) -> Self {
+        Self {
+            major: major & 0x0F,
+            minor: minor & 0x0F,
+            patch: patch & 0x0F,
+        }
+    }
+
+    pub(crate) fn from_le_bytes(bytes: [u8; 2]) -> Self {
+        Self {
+            major: bytes[1] & 0x0F,
+            minor: (bytes[0] >> 4) & 0x0F,
+            patch: bytes[0] & 0x0F,
+        }
+    }
+
+    pub(crate) fn to_le_bytes(self) -> [u8; 2] {
+        [
+            ((self.minor & 0x0F) << 4) | (self.patch & 0x0F),
+            0x80 | (self.major & 0x0F),
+        ]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpecificationVersion {
+    pub format_version: u8,
+    pub basic_version: OptionVersion,
+    pub option_versions: Vec<OptionVersion>,
+}
+
+impl SpecificationVersion {
+    pub fn des_option_version(&self) -> Option<OptionVersion> {
+        self.option_versions.first().copied()
+    }
+
+    pub fn special_option_version(&self) -> Option<OptionVersion> {
+        self.option_versions.get(1).copied()
+    }
+
+    pub fn extended_overlap_option_version(&self) -> Option<OptionVersion> {
+        self.option_versions.get(2).copied()
+    }
+
+    pub fn value_limited_purse_service_option_version(&self) -> Option<OptionVersion> {
+        self.option_versions.get(3).copied()
+    }
+
+    pub fn communication_with_mac_option_version(&self) -> Option<OptionVersion> {
+        self.option_versions.get(4).copied()
+    }
+
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(4 + self.option_versions.len() * 2);
+        bytes.push(self.format_version);
+        bytes.extend_from_slice(&self.basic_version.to_le_bytes());
+        bytes.push(self.option_versions.len() as u8);
+        for version in &self.option_versions {
+            bytes.extend_from_slice(&version.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadWithoutEncryptionResult {
     pub blocks: Vec<[u8; BLOCK_SIZE]>,

@@ -76,6 +76,12 @@ pub enum FelicaStandardCommand {
     GetPlatformInformation {
         idm: [u8; IDM_LEN],
     },
+    RequestSpecificationVersion {
+        idm: [u8; IDM_LEN],
+    },
+    ResetMode {
+        idm: [u8; IDM_LEN],
+    },
     Authentication1 {
         idm: [u8; IDM_LEN],
         areas: Vec<u16>,
@@ -368,6 +374,18 @@ impl FelicaStandardCommand {
             FelicaStandardCommand::GetPlatformInformation { idm } => {
                 let mut payload = PayloadWriter::new(0x3A);
                 payload.idm(idm);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestSpecificationVersion { idm } => {
+                let mut payload = PayloadWriter::new(0x3C);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::ResetMode { idm } => {
+                let mut payload = PayloadWriter::new(0x3E);
+                payload.idm(idm);
+                payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication1 {
@@ -785,6 +803,44 @@ impl FelicaStandardCommand {
                     ));
                 }
                 Ok(FelicaStandardCommand::GetPlatformInformation { idm })
+            }
+            0x3C => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "request specification version payload too short".into(),
+                    ));
+                }
+                if rest.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "request specification version payload has trailing bytes".into(),
+                    ));
+                }
+                if rest.iter().any(|value| *value != 0x00) {
+                    return Err(FelicaStandardError::Protocol(
+                        "request specification version reserved bytes must be 0x00".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::RequestSpecificationVersion { idm })
+            }
+            0x3E => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "reset mode payload too short".into(),
+                    ));
+                }
+                if rest.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "reset mode payload has trailing bytes".into(),
+                    ));
+                }
+                if rest.iter().any(|value| *value != 0x00) {
+                    return Err(FelicaStandardError::Protocol(
+                        "reset mode reserved bytes must be 0x00".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::ResetMode { idm })
             }
             0x10 => {
                 let (idm, rest) = parse_idm(body)?;

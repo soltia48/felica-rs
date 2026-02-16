@@ -7,9 +7,10 @@ use super::secure::{
 use super::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, ContainerInformation, ContainerProperty,
     DES_BLOCK_SIZE, FelicaStandardCommand, FelicaStandardResponse, GetAreaInformationResult,
-    GetNodePropertyResult, GetSystemStatusResult, NodeProperty, NodePropertyType, ReadResult,
-    ReadWithoutEncryptionResult, RequestBlockInformationExResult, SearchServiceCodeResult,
-    ServiceCode, Type3TagPollingResult, frame_with_length_prefix,
+    GetNodePropertyResult, GetSystemStatusResult, NodeProperty, NodePropertyType, OptionVersion,
+    ReadResult, ReadWithoutEncryptionResult, RequestBlockInformationExResult,
+    SearchServiceCodeResult, ServiceCode, SpecificationVersion, Type3TagPollingResult,
+    frame_with_length_prefix,
 };
 use rand::{RngCore, rngs::OsRng};
 use std::cell::{Ref, RefCell, RefMut};
@@ -379,6 +380,29 @@ impl FelicaStandardEmulator {
                     status_flag1: 0x00,
                     status_flag2: 0x00,
                     result: Some(vec![0x00]),
+                })
+            }
+            FelicaStandardCommand::RequestSpecificationVersion { idm } => {
+                self.system_index_for_idm(&idm)?;
+                encode_response_frame(FelicaStandardResponse::RequestSpecificationVersion {
+                    idm,
+                    status_flag1: 0x00,
+                    status_flag2: 0x00,
+                    specification_version: Some(SpecificationVersion {
+                        format_version: 0x00,
+                        basic_version: OptionVersion::new(0, 0, 0),
+                        option_versions: Vec::new(),
+                    }),
+                })
+            }
+            FelicaStandardCommand::ResetMode { idm } => {
+                let index = self.system_index_for_idm(&idm)?;
+                let system = self.systems.get_mut(index)?;
+                system.reset_mode();
+                encode_response_frame(FelicaStandardResponse::ResetMode {
+                    idm,
+                    status_flag1: 0x00,
+                    status_flag2: 0x00,
                 })
             }
             FelicaStandardCommand::GetAreaInformation { idm, node_code } => {

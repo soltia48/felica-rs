@@ -10,7 +10,8 @@ use super::types::{
     GetAreaInformationResult, GetNodePropertyResult, GetSystemStatusResult,
     MutualAuthenticationResult, NodePropertyType, RequestBlockInformationExResult,
     RequestCodeListResult, RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode,
-    SetParameterEncryptionType, SetParameterPacketType, status_flag_description,
+    SetParameterEncryptionType, SetParameterPacketType, SpecificationVersion,
+    status_flag_description,
 };
 use super::{
     BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
@@ -574,6 +575,67 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 }
             }
             _ => Err(unexpected_response("Get Platform Information")),
+        }
+    }
+
+    pub fn request_specification_version(
+        &mut self,
+    ) -> Result<Option<SpecificationVersion>, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self
+            .polling_result
+            .request_specification_version_timeout_ms();
+
+        let response = self.execute_command(
+            "Request Specification Version",
+            FelicaStandardCommand::RequestSpecificationVersion { idm },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::RequestSpecificationVersion {
+                status_flag1,
+                status_flag2,
+                specification_version,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error(
+                        "Request Specification Version",
+                        status_flag1,
+                        status_flag2,
+                    ))
+                } else {
+                    Ok(specification_version)
+                }
+            }
+            _ => Err(unexpected_response("Request Specification Version")),
+        }
+    }
+
+    pub fn reset_mode(&mut self) -> Result<(), FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self.polling_result.reset_mode_timeout_ms();
+
+        let response = self.execute_command(
+            "Reset Mode",
+            FelicaStandardCommand::ResetMode { idm },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::ResetMode {
+                status_flag1,
+                status_flag2,
+                ..
+            } => {
+                if status_flag1 != 0 || status_flag2 != 0 {
+                    Err(Self::status_error("Reset Mode", status_flag1, status_flag2))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(unexpected_response("Reset Mode")),
         }
     }
 

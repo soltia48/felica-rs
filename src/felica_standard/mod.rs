@@ -49,11 +49,12 @@ pub use type3::Type3TagPollingResult;
 pub use types::{
     AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
     GetAreaInformationResult, GetNodePropertyResult, GetSystemStatusResult,
-    MutualAuthenticationResult, NodeProperty, NodePropertyType, ReadResult,
+    MutualAuthenticationResult, NodeProperty, NodePropertyType, OptionVersion, ReadResult,
     ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
     RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType,
-    SetParameterPacketType, StatusFlag1, StatusFlag2, status_flag_description,
+    SetParameterPacketType, SpecificationVersion, StatusFlag1, StatusFlag2,
+    status_flag_description,
 };
 
 pub(crate) use command::frame_with_length_prefix;
