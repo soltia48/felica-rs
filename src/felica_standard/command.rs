@@ -1,8 +1,9 @@
 use super::{
     BLOCK_SIZE, BlockListElement, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, FelicaStandardError, IDM_LEN,
-    MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, READ_COMMAND_CODE,
-    REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
-    ServiceCode, SetParameterEncryptionType, SetParameterPacketType, WRITE_COMMAND_CODE,
+    MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES,
+    MAX_SERVICE_CODES, NodePropertyType, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
+    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ServiceCode,
+    SetParameterEncryptionType, SetParameterPacketType, WRITE_COMMAND_CODE,
 };
 
 pub enum FelicaStandardCommand {
@@ -56,6 +57,15 @@ pub enum FelicaStandardCommand {
     },
     GetContainerIssueInformation {
         idm: [u8; IDM_LEN],
+    },
+    GetAreaInformation {
+        idm: [u8; IDM_LEN],
+        node_code: u16,
+    },
+    GetNodeProperty {
+        idm: [u8; IDM_LEN],
+        node_property_type: NodePropertyType,
+        node_codes: Vec<u16>,
     },
     Authentication1 {
         idm: [u8; IDM_LEN],
@@ -312,6 +322,27 @@ impl FelicaStandardCommand {
                 let mut payload = PayloadWriter::new(0x22);
                 payload.idm(idm);
                 payload.extend_bytes(&[0x00; 2]);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetAreaInformation { idm, node_code } => {
+                let mut payload = PayloadWriter::new(0x24);
+                payload.idm(idm);
+                payload.extend_u16_le(*node_code);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::GetNodeProperty {
+                idm,
+                node_property_type,
+                node_codes,
+            } => {
+                debug_assert!(
+                    !node_codes.is_empty() && node_codes.len() <= MAX_NODE_PROPERTY_CODES
+                );
+                let mut payload = PayloadWriter::new(0x28);
+                payload.idm(idm);
+                payload.push_u8(node_property_type.to_byte());
+                payload.push_u8(node_codes.len() as u8);
+                payload.extend_u16_list_le(node_codes);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication1 {
@@ -645,6 +676,46 @@ impl FelicaStandardCommand {
                     ));
                 }
                 Ok(FelicaStandardCommand::GetContainerIssueInformation { idm })
+            }
+            0x24 => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get area information payload too short".into(),
+                    ));
+                }
+                if rest.len() > 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get area information payload has trailing bytes".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::GetAreaInformation {
+                    idm,
+                    node_code: u16::from_le_bytes([rest[0], rest[1]]),
+                })
+            }
+            0x28 => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 2 {
+                    return Err(FelicaStandardError::Protocol(
+                        "get node property payload too short".into(),
+                    ));
+                }
+                let node_property_type = NodePropertyType::from_byte(rest[0]).ok_or_else(|| {
+                    FelicaStandardError::Protocol("get node property type out of range".into())
+                })?;
+                let count = rest[1] as usize;
+                if count == 0 || count > MAX_NODE_PROPERTY_CODES {
+                    return Err(FelicaStandardError::Protocol(
+                        "get node property count out of range".into(),
+                    ));
+                }
+                let node_codes = parse_u16_list_le(&rest[2..], count)?;
+                Ok(FelicaStandardCommand::GetNodeProperty {
+                    idm,
+                    node_property_type,
+                    node_codes,
+                })
             }
             0x10 => {
                 let (idm, rest) = parse_idm(body)?;

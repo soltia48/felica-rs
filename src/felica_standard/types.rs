@@ -266,6 +266,81 @@ impl ContainerInformation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodePropertyType {
+    ValueLimitedPurseService,
+    MacCommunication,
+}
+
+impl NodePropertyType {
+    pub(crate) fn to_byte(self) -> u8 {
+        match self {
+            NodePropertyType::ValueLimitedPurseService => 0x00,
+            NodePropertyType::MacCommunication => 0x01,
+        }
+    }
+
+    pub(crate) fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            0x00 => Some(NodePropertyType::ValueLimitedPurseService),
+            0x01 => Some(NodePropertyType::MacCommunication),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeProperty {
+    ValueLimitedPurseService {
+        enabled: bool,
+        upper_limit: i32,
+        lower_limit: i32,
+        generation_number: u8,
+    },
+    MacCommunication {
+        enabled: bool,
+    },
+}
+
+impl NodeProperty {
+    pub fn property_type(&self) -> NodePropertyType {
+        match self {
+            NodeProperty::ValueLimitedPurseService { .. } => {
+                NodePropertyType::ValueLimitedPurseService
+            }
+            NodeProperty::MacCommunication { .. } => NodePropertyType::MacCommunication,
+        }
+    }
+
+    pub(crate) fn size_bytes(self) -> usize {
+        match self {
+            NodeProperty::ValueLimitedPurseService { .. } => 10,
+            NodeProperty::MacCommunication { .. } => 1,
+        }
+    }
+
+    pub(crate) fn to_bytes(self) -> Vec<u8> {
+        match self {
+            NodeProperty::ValueLimitedPurseService {
+                enabled,
+                upper_limit,
+                lower_limit,
+                generation_number,
+            } => {
+                let mut bytes = Vec::with_capacity(10);
+                bytes.push(if enabled { 0x01 } else { 0x00 });
+                bytes.extend_from_slice(&upper_limit.to_le_bytes());
+                bytes.extend_from_slice(&lower_limit.to_le_bytes());
+                bytes.push(generation_number);
+                bytes
+            }
+            NodeProperty::MacCommunication { enabled } => {
+                vec![if enabled { 0x01 } else { 0x00 }]
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetParameterEncryptionType {
     SrmType1,
     SrmType2,
@@ -322,6 +397,17 @@ pub struct RequestCodeListResult {
 pub struct RequestBlockInformationExResult {
     pub assigned_block_counts: Vec<u16>,
     pub free_block_counts: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GetAreaInformationResult {
+    pub node_code: u16,
+    pub data: [u8; 2],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GetNodePropertyResult {
+    pub node_properties: Vec<NodeProperty>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -48,7 +48,8 @@ pub use secure::{AuthenticatedContext, Authentication2Response, generate_service
 pub use type3::Type3TagPollingResult;
 pub use types::{
     AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation,
-    MutualAuthenticationResult, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
+    GetAreaInformationResult, GetNodePropertyResult, MutualAuthenticationResult, NodeProperty,
+    NodePropertyType, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
     RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
     RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
     SetParameterEncryptionType, SetParameterPacketType, StatusFlag1, StatusFlag2,

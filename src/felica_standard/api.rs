@@ -6,14 +6,15 @@ use super::secure::{
     SecureResponse, encrypt_des_cbc_zero_iv,
 };
 use super::types::{
-    BlockListElement, ChangeKeyParameters, ContainerInformation, MutualAuthenticationResult,
+    BlockListElement, ChangeKeyParameters, ContainerInformation, GetAreaInformationResult,
+    GetNodePropertyResult, MutualAuthenticationResult, NodePropertyType,
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
     SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType, SetParameterPacketType,
     status_flag_description,
 };
 use super::{
-    BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_RW_SERVICE_CODES,
-    MAX_SERVICE_CODES, frame_with_length_prefix,
+    BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
+    MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, frame_with_length_prefix,
 };
 use crate::RemoteTarget;
 use crate::driver::errors::Result as DriverResult;
@@ -489,6 +490,106 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 ..
             } => Ok(container_information),
             _ => Err(unexpected_response("Get Container Issue Information")),
+        }
+    }
+
+    pub fn get_area_information(
+        &mut self,
+        node_code: u16,
+    ) -> Result<GetAreaInformationResult, FelicaStandardError> {
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self.polling_result.get_area_information_timeout_ms();
+
+        let response = self.execute_command(
+            "Get Area Information",
+            FelicaStandardCommand::GetAreaInformation { idm, node_code },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetAreaInformation {
+                status_flag1,
+                status_flag2,
+                result,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error(
+                        "Get Area Information",
+                        status_flag1,
+                        status_flag2,
+                    ))
+                } else {
+                    result.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Get Area Information missing result payload".into(),
+                        )
+                    })
+                }
+            }
+            _ => Err(unexpected_response("Get Area Information")),
+        }
+    }
+
+    pub fn get_node_property(
+        &mut self,
+        node_property_type: NodePropertyType,
+        node_codes: &[u16],
+    ) -> Result<GetNodePropertyResult, FelicaStandardError> {
+        ensure_len_in_range("node_codes", node_codes.len(), 1, MAX_NODE_PROPERTY_CODES)?;
+
+        let idm = self.idm_bytes()?;
+        let timeout_ms = self
+            .polling_result
+            .get_node_property_timeout_ms(node_codes.len());
+
+        let response = self.execute_command(
+            "Get Node Property",
+            FelicaStandardCommand::GetNodeProperty {
+                idm,
+                node_property_type,
+                node_codes: node_codes.to_vec(),
+            },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::GetNodeProperty {
+                status_flag1,
+                status_flag2,
+                result,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error(
+                        "Get Node Property",
+                        status_flag1,
+                        status_flag2,
+                    ))
+                } else {
+                    let result = result.ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "Get Node Property missing result payload".into(),
+                        )
+                    })?;
+                    if result.node_properties.len() != node_codes.len() {
+                        return Err(FelicaStandardError::Protocol(
+                            "Get Node Property property count mismatch".into(),
+                        ));
+                    }
+                    if result
+                        .node_properties
+                        .iter()
+                        .any(|property| property.property_type() != node_property_type)
+                    {
+                        return Err(FelicaStandardError::Protocol(
+                            "Get Node Property returned unexpected property type".into(),
+                        ));
+                    }
+                    Ok(result)
+                }
+            }
+            _ => Err(unexpected_response("Get Node Property")),
         }
     }
 

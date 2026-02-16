@@ -1,12 +1,12 @@
 use super::{
     AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
-    ContainerInformation, FelicaStandardError, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
-    MAX_SERVICE_CODES, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
-    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE, ReadResult,
-    ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
-    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
-    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
-    frame_with_length_prefix,
+    ContainerInformation, FelicaStandardError, GetAreaInformationResult, GetNodePropertyResult,
+    IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_SERVICE_CODES,
+    NodeProperty, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
+    REGISTER_SERVICE_COMMAND_CODE, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
+    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
+    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
+    WRITE_COMMAND_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -71,6 +71,18 @@ pub enum FelicaStandardResponse {
     GetContainerIssueInformation {
         idm: Idm,
         container_information: ContainerInformation,
+    },
+    GetAreaInformation {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        result: Option<GetAreaInformationResult>,
+    },
+    GetNodeProperty {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        result: Option<GetNodePropertyResult>,
     },
     Authentication1 {
         idm: Idm,
@@ -143,6 +155,8 @@ impl FelicaStandardResponse {
             0x1B => Self::parse_request_code_list(idm, data),
             0x21 => Self::parse_set_parameter(idm, data),
             0x23 => Self::parse_get_container_issue_information(idm, data),
+            0x25 => Self::parse_get_area_information(idm, data),
+            0x29 => Self::parse_get_node_property(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -509,6 +523,89 @@ impl FelicaStandardResponse {
                 format_version_carrier_information,
                 mobile_phone_model_information,
             },
+        })
+    }
+
+    fn parse_get_area_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short get area information response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        if status_flag1 != 0 {
+            return Ok(FelicaStandardResponse::GetAreaInformation {
+                idm,
+                status_flag1,
+                status_flag2,
+                result: None,
+            });
+        }
+        Self::ensure_response_len(data, 16, "short get area information success response")?;
+        Ok(FelicaStandardResponse::GetAreaInformation {
+            idm,
+            status_flag1,
+            status_flag2,
+            result: Some(GetAreaInformationResult {
+                node_code: u16::from_le_bytes([data[12], data[13]]),
+                data: [data[14], data[15]],
+            }),
+        })
+    }
+
+    fn parse_get_node_property(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short get node property response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        if status_flag1 != 0 {
+            return Ok(FelicaStandardResponse::GetNodeProperty {
+                idm,
+                status_flag1,
+                status_flag2,
+                result: None,
+            });
+        }
+
+        Self::ensure_response_len(data, 13, "short get node property success response")?;
+        let node_count = data[12] as usize;
+        if node_count == 0 || node_count > MAX_NODE_PROPERTY_CODES {
+            return Err(DriverError::Other(
+                "get node property node count must be between 1 and 16".into(),
+            ));
+        }
+
+        let payload = &data[13..];
+        let value_limited_len = node_count.checked_mul(10).ok_or_else(|| {
+            DriverError::Other("get node property value-limited payload length overflow".into())
+        })?;
+        let mac_communication_len = node_count;
+
+        let node_properties = if payload.len() == value_limited_len {
+            let mut properties = Vec::with_capacity(node_count);
+            for chunk in payload.chunks_exact(10) {
+                properties.push(NodeProperty::ValueLimitedPurseService {
+                    enabled: chunk[0] == 0x01,
+                    upper_limit: i32::from_le_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]),
+                    lower_limit: i32::from_le_bytes([chunk[5], chunk[6], chunk[7], chunk[8]]),
+                    generation_number: chunk[9],
+                });
+            }
+            properties
+        } else if payload.len() == mac_communication_len {
+            payload
+                .iter()
+                .map(|value| NodeProperty::MacCommunication {
+                    enabled: *value == 0x01,
+                })
+                .collect()
+        } else {
+            return Err(DriverError::Other(
+                "get node property payload length does not match known node property format".into(),
+            ));
+        };
+
+        Ok(FelicaStandardResponse::GetNodeProperty {
+            idm,
+            status_flag1,
+            status_flag2,
+            result: Some(GetNodePropertyResult { node_properties }),
         })
     }
 
@@ -924,6 +1021,99 @@ impl FelicaStandardResponse {
                     .extend_from_slice(&container_information.format_version_carrier_information);
                 payload.extend_from_slice(&container_information.mobile_phone_model_information);
                 Ok(payload)
+            }
+            FelicaStandardResponse::GetAreaInformation {
+                idm,
+                status_flag1,
+                status_flag2,
+                result,
+            } => {
+                if *status_flag1 == 0 {
+                    let result = result.as_ref().ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "get area information result is missing on success".into(),
+                        )
+                    })?;
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 4);
+                    payload.push(0x25);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    payload.extend_from_slice(&result.node_code.to_le_bytes());
+                    payload.extend_from_slice(&result.data);
+                    Ok(payload)
+                } else {
+                    if result.is_some() {
+                        return Err(FelicaStandardError::Protocol(
+                            "get area information result must be omitted on error".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                    payload.push(0x25);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    Ok(payload)
+                }
+            }
+            FelicaStandardResponse::GetNodeProperty {
+                idm,
+                status_flag1,
+                status_flag2,
+                result,
+            } => {
+                if *status_flag1 == 0 {
+                    let result = result.as_ref().ok_or_else(|| {
+                        FelicaStandardError::Protocol(
+                            "get node property result is missing on success".into(),
+                        )
+                    })?;
+                    if result.node_properties.is_empty()
+                        || result.node_properties.len() > MAX_NODE_PROPERTY_CODES
+                    {
+                        return Err(FelicaStandardError::Protocol(
+                            "get node property count out of range".into(),
+                        ));
+                    }
+                    let property_type = result.node_properties[0].property_type();
+                    if result
+                        .node_properties
+                        .iter()
+                        .any(|property| property.property_type() != property_type)
+                    {
+                        return Err(FelicaStandardError::Protocol(
+                            "get node property response cannot mix property types".into(),
+                        ));
+                    }
+                    let property_payload_len = result
+                        .node_properties
+                        .iter()
+                        .map(|property| (*property).size_bytes())
+                        .sum::<usize>();
+                    let mut payload =
+                        Vec::with_capacity(1 + IDM_LEN + 2 + 1 + property_payload_len);
+                    payload.push(0x29);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    payload.push(result.node_properties.len() as u8);
+                    for property in &result.node_properties {
+                        payload.extend_from_slice(&(*property).to_bytes());
+                    }
+                    Ok(payload)
+                } else {
+                    if result.is_some() {
+                        return Err(FelicaStandardError::Protocol(
+                            "get node property result must be omitted on error".into(),
+                        ));
+                    }
+                    let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
+                    payload.push(0x29);
+                    payload.extend_from_slice(idm);
+                    payload.push(*status_flag1);
+                    payload.push(*status_flag2);
+                    Ok(payload)
+                }
             }
             FelicaStandardResponse::Authentication1 {
                 idm,

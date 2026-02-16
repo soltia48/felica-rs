@@ -15,6 +15,9 @@ pub const MAX_BLOCK_LIST_LEN: usize = 0xFF;
 /// Maximum number of node codes in a single request.
 pub const MAX_NODE_CODES: usize = 0x20;
 
+/// Maximum number of node codes in a Get Node Property request.
+pub const MAX_NODE_PROPERTY_CODES: usize = 0x10;
+
 /// Size of a single data block in bytes.
 pub const BLOCK_SIZE: usize = 16;
 

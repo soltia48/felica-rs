@@ -79,6 +79,20 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::OTHER)
     }
 
+    /// Compute the Get Area Information command timeout using the fixed response PMm byte.
+    pub fn get_area_information_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::GET_AREA_INFORMATION)
+    }
+
+    /// Compute the Get Node Property command timeout using the variable response PMm byte.
+    pub fn get_node_property_timeout_ms(&self, node_count: usize) -> u16 {
+        self.scaled_timeout_with_units(
+            PmmSlot::GET_NODE_PROPERTY,
+            node_count,
+            UnitClamp::between(1, 16),
+        )
+    }
+
     /// Compute the Authentication1 command timeout using the Authentication1 PMm byte.
     pub fn authentication1_timeout_ms(&self, node_count: usize) -> u16 {
         self.scaled_timeout_with_units(PmmSlot::AUTHENTICATION1, node_count, UnitClamp::at_least(1))
@@ -173,9 +187,11 @@ impl PmmSlot {
 
     const REQUEST_SERVICE: Self = Self::new(2);
     const REQUEST_CODE_LIST: Self = Self::new(2);
+    const GET_NODE_PROPERTY: Self = Self::new(2);
     const REQUEST_RESPONSE: Self = Self::new(3);
     const SEARCH_SERVICE_CODE: Self = Self::new(3);
     const REQUEST_SYSTEM_CODE: Self = Self::new(3);
+    const GET_AREA_INFORMATION: Self = Self::new(3);
     const REQUEST_BLOCK_INFORMATION: Self = Self::new(2);
     const AUTHENTICATION1: Self = Self::new(4);
     const AUTHENTICATION2: Self = Self::new(4);
