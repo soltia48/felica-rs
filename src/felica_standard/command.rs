@@ -40,6 +40,11 @@ pub enum FelicaStandardCommand {
         idm: [u8; IDM_LEN],
         node_codes: Vec<u16>,
     },
+    RequestCodeList {
+        idm: [u8; IDM_LEN],
+        parent_node_code: u16,
+        index: u16,
+    },
     Authentication1 {
         idm: [u8; IDM_LEN],
         areas: Vec<u16>,
@@ -257,6 +262,17 @@ impl FelicaStandardCommand {
                 payload.idm(idm);
                 payload.push_u8(node_codes.len() as u8);
                 payload.extend_u16_list_le(node_codes);
+                CommandEncoding::Plain(payload.finish_frame())
+            }
+            FelicaStandardCommand::RequestCodeList {
+                idm,
+                parent_node_code,
+                index,
+            } => {
+                let mut payload = PayloadWriter::new(0x1A);
+                payload.idm(idm);
+                payload.extend_u16_le(*parent_node_code);
+                payload.extend_u16_le(*index);
                 CommandEncoding::Plain(payload.finish_frame())
             }
             FelicaStandardCommand::Authentication1 {
@@ -495,6 +511,24 @@ impl FelicaStandardCommand {
                 Ok(FelicaStandardCommand::RequestBlockInformation {
                     idm,
                     node_codes: values,
+                })
+            }
+            0x1A => {
+                let (idm, rest) = parse_idm(body)?;
+                if rest.len() < 4 {
+                    return Err(FelicaStandardError::Protocol(
+                        "request code list payload too short".into(),
+                    ));
+                }
+                if rest.len() > 4 {
+                    return Err(FelicaStandardError::Protocol(
+                        "request code list payload has trailing bytes".into(),
+                    ));
+                }
+                Ok(FelicaStandardCommand::RequestCodeList {
+                    idm,
+                    parent_node_code: u16::from_le_bytes([rest[0], rest[1]]),
+                    index: u16::from_le_bytes([rest[2], rest[3]]),
                 })
             }
             0x10 => {

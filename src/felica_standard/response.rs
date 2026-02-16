@@ -1,9 +1,9 @@
 use super::{
-    Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, FelicaStandardError,
-    IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_SERVICE_CODES, READ_COMMAND_CODE,
-    REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
-    RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode, WRITE_COMMAND_CODE,
-    frame_with_length_prefix,
+    AreaCodeRange, Authentication2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE,
+    FelicaStandardError, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_SERVICE_CODES,
+    READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
+    REGISTER_SERVICE_COMMAND_CODE, RequestServiceV2KeyVersion, SearchServiceCodeResult,
+    ServiceCode, WRITE_COMMAND_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -47,6 +47,14 @@ pub enum FelicaStandardResponse {
     RequestBlockInformation {
         idm: Idm,
         block_counts: Vec<u16>,
+    },
+    RequestCodeList {
+        idm: Idm,
+        status_flag1: u8,
+        status_flag2: u8,
+        continue_flag: bool,
+        areas: Vec<AreaCodeRange>,
+        services: Vec<ServiceCode>,
     },
     Authentication1 {
         idm: Idm,
@@ -116,6 +124,7 @@ impl FelicaStandardResponse {
             0x0B => Self::parse_search_service_code(idm, data),
             0x0D => Self::parse_request_systemcode(idm, data),
             0x0F => Self::parse_request_block_information(idm, data),
+            0x1B => Self::parse_request_code_list(idm, data),
             0x11 => Self::parse_authentication1(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
@@ -346,6 +355,58 @@ impl FelicaStandardResponse {
             block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
         Ok(FelicaStandardResponse::RequestBlockInformation { idm, block_counts })
+    }
+
+    fn parse_request_code_list(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 15, "short request code list response")?;
+        let status_flag1 = data[10];
+        let status_flag2 = data[11];
+        let continue_flag = data[12] != 0;
+
+        let area_count = data[13] as usize;
+        let mut offset = 14usize;
+        let area_payload_len = area_count.checked_mul(4).ok_or_else(|| {
+            DriverError::Other("request code list area payload length overflow".into())
+        })?;
+        Self::ensure_response_len(
+            data,
+            offset + area_payload_len + 1,
+            "short request code list area payload",
+        )?;
+
+        let mut areas = Vec::with_capacity(area_count);
+        for chunk in data[offset..offset + area_payload_len].chunks_exact(4) {
+            areas.push(AreaCodeRange {
+                area_code: u16::from_le_bytes([chunk[0], chunk[1]]),
+                end_service_code: u16::from_le_bytes([chunk[2], chunk[3]]),
+            });
+        }
+        offset += area_payload_len;
+
+        let service_count = data[offset] as usize;
+        offset += 1;
+        let service_payload_len = service_count.checked_mul(2).ok_or_else(|| {
+            DriverError::Other("request code list service payload length overflow".into())
+        })?;
+        Self::ensure_response_len(
+            data,
+            offset + service_payload_len,
+            "short request code list service payload",
+        )?;
+
+        let mut services = Vec::with_capacity(service_count);
+        for chunk in data[offset..offset + service_payload_len].chunks_exact(2) {
+            services.push(ServiceCode::new(u16::from_le_bytes([chunk[0], chunk[1]])));
+        }
+
+        Ok(FelicaStandardResponse::RequestCodeList {
+            idm,
+            status_flag1,
+            status_flag2,
+            continue_flag,
+            areas,
+            services,
+        })
     }
 
     fn parse_authentication1(idm: Idm, data: &[u8]) -> DriverResult<Self> {
@@ -614,6 +675,43 @@ impl FelicaStandardResponse {
                 payload.push(block_counts.len() as u8);
                 for count in block_counts {
                     payload.extend_from_slice(&count.to_le_bytes());
+                }
+                Ok(payload)
+            }
+            FelicaStandardResponse::RequestCodeList {
+                idm,
+                status_flag1,
+                status_flag2,
+                continue_flag,
+                areas,
+                services,
+            } => {
+                if areas.len() > u8::MAX as usize {
+                    return Err(FelicaStandardError::Protocol(
+                        "request code list area count out of range".into(),
+                    ));
+                }
+                if services.len() > u8::MAX as usize {
+                    return Err(FelicaStandardError::Protocol(
+                        "request code list service count out of range".into(),
+                    ));
+                }
+                let mut payload = Vec::with_capacity(
+                    1 + IDM_LEN + 2 + 1 + 1 + areas.len() * 4 + 1 + services.len() * 2,
+                );
+                payload.push(0x1B);
+                payload.extend_from_slice(idm);
+                payload.push(*status_flag1);
+                payload.push(*status_flag2);
+                payload.push(if *continue_flag { 0x01 } else { 0x00 });
+                payload.push(areas.len() as u8);
+                for area in areas {
+                    payload.extend_from_slice(&area.area_code.to_le_bytes());
+                    payload.extend_from_slice(&area.end_service_code.to_le_bytes());
+                }
+                payload.push(services.len() as u8);
+                for service in services {
+                    payload.extend_from_slice(&service.raw().to_le_bytes());
                 }
                 Ok(payload)
             }

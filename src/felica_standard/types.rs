@@ -232,6 +232,28 @@ pub enum SearchServiceCodeResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AreaCodeRange {
+    pub area_code: u16,
+    pub end_service_code: u16,
+}
+
+impl AreaCodeRange {
+    pub fn new(area_code: u16, end_service_code: u16) -> Self {
+        Self {
+            area_code,
+            end_service_code,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestCodeListResult {
+    pub continue_flag: bool,
+    pub areas: Vec<AreaCodeRange>,
+    pub services: Vec<ServiceCode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MutualAuthenticationResult {
     pub issue_id: [u8; 8],
     pub issue_parameter: [u8; 8],

@@ -59,6 +59,11 @@ impl Type3TagPollingResult {
         )
     }
 
+    /// Compute the Request Code List command timeout using the Request Service PMm byte.
+    pub fn request_code_list_timeout_ms(&self) -> u16 {
+        self.base_timeout(PmmSlot::REQUEST_CODE_LIST)
+    }
+
     /// Compute the Authentication1 command timeout using the Authentication1 PMm byte.
     pub fn authentication1_timeout_ms(&self, node_count: usize) -> u16 {
         self.scaled_timeout_with_units(PmmSlot::AUTHENTICATION1, node_count, UnitClamp::at_least(1))
@@ -152,6 +157,7 @@ impl PmmSlot {
     }
 
     const REQUEST_SERVICE: Self = Self::new(2);
+    const REQUEST_CODE_LIST: Self = Self::new(2);
     const REQUEST_RESPONSE: Self = Self::new(3);
     const SEARCH_SERVICE_CODE: Self = Self::new(3);
     const REQUEST_SYSTEM_CODE: Self = Self::new(3);

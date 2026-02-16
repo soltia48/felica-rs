@@ -47,8 +47,9 @@ pub use response::FelicaStandardResponse;
 pub use secure::{AuthenticatedContext, Authentication2Response, generate_service_keys};
 pub use type3::Type3TagPollingResult;
 pub use types::{
-    BlockListElement, ChangeKeyParameters, MutualAuthenticationResult, RequestServiceV2KeyVersion,
-    SearchServiceCodeResult, ServiceCode, StatusFlag1, StatusFlag2, status_flag_description,
+    AreaCodeRange, BlockListElement, ChangeKeyParameters, MutualAuthenticationResult,
+    RequestCodeListResult, RequestServiceV2KeyVersion, SearchServiceCodeResult, ServiceCode,
+    StatusFlag1, StatusFlag2, status_flag_description,
 };
 
 pub(crate) use command::frame_with_length_prefix;
