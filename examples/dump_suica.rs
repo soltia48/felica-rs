@@ -24,10 +24,10 @@ use csv::ReaderBuilder;
 use encoding_rs::SHIFT_JIS;
 use hex::encode;
 use nfc_rs::felica_standard::{
-    generate_service_keys, BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError,
-    ServiceCode,
+    BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, ServiceCode,
+    generate_service_keys,
 };
-use nfc_rs::{open_reader, ReaderPreference, RemoteDriver};
+use nfc_rs::{ReaderPreference, RemoteDriver, open_reader};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
