@@ -60,9 +60,10 @@ enum CliAction {
 const AREA_NODE_IDS: &[u16] = &[0x0000, 0x0040, 0x0800, 0x0FC0, 0x1000];
 
 /// Service node IDs for Suica
-const SERVICE_NODE_IDS: &[u16] = &[
+const REQUIRED_SERVICE_NODE_IDS: &[u16] = &[
     0x0048, 0x0088, 0x0810, 0x08C8, 0x090C, 0x1008, 0x1048, 0x108C, 0x10C8,
 ];
+const PAID_TICKET_SERVICE_NODE_ID: u16 = 0x1848;
 
 /// Equipment type descriptions
 fn equipment_type_to_str(equipment_type: u8) -> String {
@@ -736,9 +737,9 @@ fn run_with_remote_driver(addr: &str, key_store: &SystemKeys) -> Result<(), Box<
     run_with_driver(&mut driver, key_store)
 }
 
-fn build_auth_targets() -> (Vec<u16>, Vec<ServiceCode>) {
+fn build_auth_targets(service_node_ids: &[u16]) -> (Vec<u16>, Vec<ServiceCode>) {
     let areas = AREA_NODE_IDS.to_vec();
-    let services = SERVICE_NODE_IDS
+    let services = service_node_ids
         .iter()
         .map(|&service| ServiceCode::new(service))
         .collect();
@@ -749,20 +750,22 @@ fn make_input_error(message: String) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
 }
 
-fn resolve_auth_keys(
-    key_store: &SystemKeys,
-    idm_hex: &str,
-    areas: &[u16],
-    services: &[ServiceCode],
-) -> Result<([u8; 8], [u8; 8]), std::io::Error> {
-    let keys = resolve_keys_for_card(key_store, SUICA_SYSTEM_CODE, idm_hex).ok_or_else(|| {
+fn resolve_card_keys(key_store: &SystemKeys, idm_hex: &str) -> Result<NodeKeys, std::io::Error> {
+    resolve_keys_for_card(key_store, SUICA_SYSTEM_CODE, idm_hex).ok_or_else(|| {
         make_input_error(format!(
             "No keys found for system code 0x{:04X} and IDm {}; check keys.csv",
             SUICA_SYSTEM_CODE, idm_hex
         ))
-    })?;
+    })
+}
 
-    derive_service_keys(&keys, areas, services).ok_or_else(|| {
+fn resolve_auth_keys(
+    card_keys: &NodeKeys,
+    idm_hex: &str,
+    areas: &[u16],
+    services: &[ServiceCode],
+) -> Result<([u8; 8], [u8; 8]), std::io::Error> {
+    derive_service_keys(card_keys, areas, services).ok_or_else(|| {
         make_input_error(format!(
             "Missing required node keys for authentication (IDm: {}); check keys.csv",
             idm_hex
@@ -770,49 +773,94 @@ fn resolve_auth_keys(
     })
 }
 
+fn probe_service_exists<D: FelicaDriver + ?Sized>(
+    felica: &mut FelicaStandard<D>,
+    service: ServiceCode,
+) -> Result<bool, FelicaStandardError> {
+    let key_versions = felica.request_service(&[service])?;
+    if key_versions.len() != 1 {
+        return Err(FelicaStandardError::Protocol(
+            "request_service returned unexpected key version count".into(),
+        ));
+    }
+    Ok(key_versions[0] != 0xFFFF)
+}
+
 fn run_with_driver<D: FelicaDriver + ?Sized>(
     driver: &mut D,
     key_store: &SystemKeys,
 ) -> Result<(), Box<dyn Error>> {
-    // Poll for Suica card
     println!("Waiting for Suica card...");
-    let (idm_hex, pmm_hex) = {
-        let (felica, _polling) =
-            FelicaStandard::polling(driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
-        (
-            encode(felica.idm()).to_uppercase(),
-            encode(felica.pmm()).to_uppercase(),
-        )
-    };
+    let (mut felica, _) = FelicaStandard::polling(driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
+
+    let idm_hex = encode(felica.idm()).to_uppercase();
+    let pmm_hex = encode(felica.pmm()).to_uppercase();
 
     print_section("カード識別");
     print_item("IDm", &idm_hex);
     print_item("PMm", &pmm_hex);
 
-    let (areas, services) = build_auth_targets();
-    let (group_service_key, user_service_key) =
-        resolve_auth_keys(key_store, &idm_hex, &areas, &services)?;
+    let card_keys = resolve_card_keys(key_store, &idm_hex)?;
 
-    // Perform mutual authentication (need to re-poll)
-    let (mut felica, _) = FelicaStandard::polling(driver, "212F", SUICA_SYSTEM_CODE, 0x00, 0x00)?;
+    let mut auth_service_node_ids = REQUIRED_SERVICE_NODE_IDS.to_vec();
+    let mut paid_ticket_service_index: Option<u8> = None;
+    let mut paid_ticket_skip_reason: Option<String> = None;
+
+    match probe_service_exists(&mut felica, ServiceCode::new(PAID_TICKET_SERVICE_NODE_ID)) {
+        Ok(true) => {
+            if card_keys.contains_key(&PAID_TICKET_SERVICE_NODE_ID) {
+                paid_ticket_service_index = Some(auth_service_node_ids.len() as u8);
+                auth_service_node_ids.push(PAID_TICKET_SERVICE_NODE_ID);
+            } else {
+                paid_ticket_skip_reason = Some(format!(
+                    "Service 0x{:04X} は存在しますが鍵が不足しているためスキップしました",
+                    PAID_TICKET_SERVICE_NODE_ID
+                ));
+            }
+        }
+        Ok(false) => {
+            paid_ticket_skip_reason = Some(format!(
+                "カードに Service 0x{:04X} が存在しないためスキップしました",
+                PAID_TICKET_SERVICE_NODE_ID
+            ));
+        }
+        Err(err) => {
+            paid_ticket_skip_reason = Some(format!(
+                "Service 0x{:04X} の存在確認に失敗したためスキップしました: {}",
+                PAID_TICKET_SERVICE_NODE_ID, err
+            ));
+        }
+    }
+
+    let (areas, services) = build_auth_targets(&auth_service_node_ids);
+    let (group_service_key, user_service_key) =
+        resolve_auth_keys(&card_keys, &idm_hex, &areas, &services)?;
 
     let auth_result =
         felica.mutual_authentication(&areas, &services, &group_service_key, &user_service_key)?;
-
     let idi_str = idi_bytes_to_str(&auth_result.issue_id);
     let pmi_hex = encode(&auth_result.issue_parameter).to_uppercase();
 
     print_item("IDi", &idi_str);
     print_item("PMi", &pmi_hex);
 
-    // Read encrypted blocks
-    read_and_print_suica_data(&mut felica)?;
+    read_and_print_suica_data(
+        &mut felica,
+        paid_ticket_service_index,
+        paid_ticket_skip_reason.as_deref(),
+    )
+    .map_err(boxed_error)
+}
 
-    Ok(())
+fn print_paid_ticket_skip_message(reason: &str) {
+    print_section("料金発券・改札情報");
+    println!("  ({})", reason);
 }
 
 fn read_and_print_suica_data<D: FelicaDriver + ?Sized>(
     felica: &mut FelicaStandard<D>,
+    paid_ticket_service_index: Option<u8>,
+    paid_ticket_skip_reason: Option<&str>,
 ) -> Result<(), FelicaStandardError> {
     // Read issue information (service index 0)
     print_issue_information(felica)?;
@@ -837,6 +885,15 @@ fn read_and_print_suica_data<D: FelicaDriver + ?Sized>(
 
     // Read SF gate entry information (service index 8)
     print_sf_gate_entry_information(felica)?;
+
+    match paid_ticket_service_index {
+        Some(service_index) => print_paid_ticket_issue_information(felica, service_index)?,
+        None => {
+            if let Some(reason) = paid_ticket_skip_reason {
+                print_paid_ticket_skip_message(reason);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -1255,6 +1312,66 @@ fn print_sf_gate_entry_information<D: FelicaDriver + ?Sized>(
     );
 
     print_item("不明値2", format!("0x{:02X}", second_block[11]));
+
+    Ok(())
+}
+
+fn print_paid_ticket_issue_information<D: FelicaDriver + ?Sized>(
+    felica: &mut FelicaStandard<D>,
+    service_index: u8,
+) -> Result<(), FelicaStandardError> {
+    print_section("料金発券・改札情報");
+
+    let blocks = read_blocks(felica, service_index, 2)?;
+    if blocks.is_empty() {
+        println!("  (データがありません)");
+        return Ok(());
+    }
+
+    for (index, block) in blocks.iter().enumerate() {
+        println!("[{:02}]", index,);
+
+        let depart_station_line = block[0];
+        let depart_station_order = block[1];
+        print_item(
+            "発駅",
+            format_station(depart_station_line, depart_station_order),
+        );
+
+        let arrive_station_line = block[2];
+        let arrive_station_order = block[3];
+        print_item(
+            "着駅",
+            format_station(arrive_station_line, arrive_station_order),
+        );
+
+        let expiration_date = u16::from_be_bytes([block[4], block[5]]);
+        print_item("有効期限", format_date(expiration_date));
+
+        let issue_time = u16::from_be_bytes([block[6], block[7]]);
+        print_item("発券時間", format_time(issue_time));
+
+        let issue_type = &block[8..9];
+        print_item("発券種別", encode(issue_type));
+
+        let fee = block[9];
+        print_item("金額", fee * 10);
+
+        let device_number = encode(&block[10..12]).to_uppercase();
+        print_item("装置番号", device_number);
+
+        let checked_station_line = block[12];
+        let checked_station_order = block[13];
+        print_item(
+            "改札実施駅",
+            format_station(checked_station_line, checked_station_order),
+        );
+
+        let issue_time = u16::from_be_bytes([block[14], block[15]]);
+        print_item("改札実施時間", format_time(issue_time));
+
+        println!();
+    }
 
     Ok(())
 }
