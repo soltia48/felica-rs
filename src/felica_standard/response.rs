@@ -1,13 +1,24 @@
 use super::{
-    AreaCodeRange, Authentication2Response, Authentication2V2Response, BLOCK_SIZE,
-    CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerInformation, FelicaStandardError,
-    GetAreaInformationResult, GetNodePropertyResult, GetSystemStatusResult, IDM_LEN,
-    MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_SERVICE_CODES, NodeProperty,
-    OptionVersion, READ_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE,
-    REGISTER_SERVICE_COMMAND_CODE, ReadResult, ReadWithoutEncryptionResult, RegisterIssueIdResult,
-    RegisterServiceResult, RequestBlockInformationExResult, RequestCodeListResult,
-    RequestServiceV2KeyVersion, RequestServiceV2Result, SearchServiceCodeResult, ServiceCode,
-    SpecificationVersion, WRITE_COMMAND_CODE, frame_with_length_prefix,
+    AUTHENTICATION1_RESPONSE_CODE, AUTHENTICATION1_V2_RESPONSE_CODE, AUTHENTICATION2_RESPONSE_CODE,
+    AUTHENTICATION2_V2_RESPONSE_CODE, AreaCodeRange, Authentication2Response,
+    Authentication2V2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerInformation,
+    FelicaStandardError, GET_AREA_INFORMATION_RESPONSE_CODE, GET_CONTAINER_ID_RESPONSE_CODE,
+    GET_CONTAINER_ISSUE_INFORMATION_RESPONSE_CODE, GET_CONTAINER_PROPERTY_RESPONSE_CODE,
+    GET_NODE_PROPERTY_RESPONSE_CODE, GET_PLATFORM_INFORMATION_RESPONSE_CODE,
+    GET_SYSTEM_STATUS_RESPONSE_CODE, GetAreaInformationResult, GetNodePropertyResult,
+    GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
+    MAX_SERVICE_CODES, NodeProperty, OptionVersion, POLLING_RESPONSE_CODE, READ_COMMAND_CODE,
+    READ_WITHOUT_ENCRYPTION_RESPONSE_CODE, REGISTER_AREA_COMMAND_CODE,
+    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
+    REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE, REQUEST_BLOCK_INFORMATION_RESPONSE_CODE,
+    REQUEST_CODE_LIST_RESPONSE_CODE, REQUEST_RESPONSE_RESPONSE_CODE, REQUEST_SERVICE_RESPONSE_CODE,
+    REQUEST_SERVICE_V2_RESPONSE_CODE, REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE,
+    REQUEST_SYSTEM_CODE_RESPONSE_CODE, RESET_MODE_RESPONSE_CODE, ReadResult,
+    ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
+    RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
+    RequestServiceV2Result, SEARCH_SERVICE_CODE_RESPONSE_CODE, SET_PARAMETER_RESPONSE_CODE,
+    SearchServiceCodeResult, ServiceCode, SpecificationVersion, WRITE_COMMAND_CODE,
+    WRITE_WITHOUT_ENCRYPTION_RESPONSE_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -173,40 +184,52 @@ impl FelicaStandardResponse {
             ));
         }
         let code = data[1];
-        if code == 0x13 {
+        if code == AUTHENTICATION2_RESPONSE_CODE {
             return Self::parse_authentication2(data);
         }
-        if code == 0x2F {
+        if code == GET_CONTAINER_PROPERTY_RESPONSE_CODE {
             return Self::parse_get_container_property(data);
         }
-        if code == 0x43 {
+        if code == AUTHENTICATION2_V2_RESPONSE_CODE {
             return Self::parse_authentication2_v2(data);
         }
         Self::ensure_response_len(data, 10, "short Felica response")?;
         let (idm, _rest) = parse_idm(&data[2..])?;
         match code {
-            0x01 => Self::parse_polling(idm, data),
-            0x03 => Self::parse_request_service(idm, data),
-            0x05 => Self::parse_request_response(idm, data),
-            0x07 => Self::parse_read_without_encryption(idm, data),
-            0x09 => Self::parse_write_without_encryption(idm, data),
-            0x0B => Self::parse_search_service_code(idm, data),
-            0x0D => Self::parse_request_systemcode(idm, data),
-            0x0F => Self::parse_request_block_information(idm, data),
-            0x11 => Self::parse_authentication1(idm, data),
-            0x1B => Self::parse_request_code_list(idm, data),
-            0x1F => Self::parse_request_block_information_ex(idm, data),
-            0x21 => Self::parse_set_parameter(idm, data),
-            0x23 => Self::parse_get_container_issue_information(idm, data),
-            0x25 => Self::parse_get_area_information(idm, data),
-            0x29 => Self::parse_get_node_property(idm, data),
-            0x33 => Self::parse_request_service_v2(idm, data),
-            0x39 => Self::parse_get_system_status(idm, data),
-            0x3B => Self::parse_get_platform_information(idm, data),
-            0x3D => Self::parse_request_specification_version(idm, data),
-            0x3F => Self::parse_reset_mode(idm, data),
-            0x41 => Self::parse_authentication1_v2(idm, data),
-            0x71 => Self::parse_get_container_id(idm, data),
+            POLLING_RESPONSE_CODE => Self::parse_polling(idm, data),
+            REQUEST_SERVICE_RESPONSE_CODE => Self::parse_request_service(idm, data),
+            REQUEST_RESPONSE_RESPONSE_CODE => Self::parse_request_response(idm, data),
+            READ_WITHOUT_ENCRYPTION_RESPONSE_CODE => Self::parse_read_without_encryption(idm, data),
+            WRITE_WITHOUT_ENCRYPTION_RESPONSE_CODE => {
+                Self::parse_write_without_encryption(idm, data)
+            }
+            SEARCH_SERVICE_CODE_RESPONSE_CODE => Self::parse_search_service_code(idm, data),
+            REQUEST_SYSTEM_CODE_RESPONSE_CODE => Self::parse_request_systemcode(idm, data),
+            REQUEST_BLOCK_INFORMATION_RESPONSE_CODE => {
+                Self::parse_request_block_information(idm, data)
+            }
+            AUTHENTICATION1_RESPONSE_CODE => Self::parse_authentication1(idm, data),
+            REQUEST_CODE_LIST_RESPONSE_CODE => Self::parse_request_code_list(idm, data),
+            REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE => {
+                Self::parse_request_block_information_ex(idm, data)
+            }
+            SET_PARAMETER_RESPONSE_CODE => Self::parse_set_parameter(idm, data),
+            GET_CONTAINER_ISSUE_INFORMATION_RESPONSE_CODE => {
+                Self::parse_get_container_issue_information(idm, data)
+            }
+            GET_AREA_INFORMATION_RESPONSE_CODE => Self::parse_get_area_information(idm, data),
+            GET_NODE_PROPERTY_RESPONSE_CODE => Self::parse_get_node_property(idm, data),
+            REQUEST_SERVICE_V2_RESPONSE_CODE => Self::parse_request_service_v2(idm, data),
+            GET_SYSTEM_STATUS_RESPONSE_CODE => Self::parse_get_system_status(idm, data),
+            GET_PLATFORM_INFORMATION_RESPONSE_CODE => {
+                Self::parse_get_platform_information(idm, data)
+            }
+            REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE => {
+                Self::parse_request_specification_version(idm, data)
+            }
+            RESET_MODE_RESPONSE_CODE => Self::parse_reset_mode(idm, data),
+            AUTHENTICATION1_V2_RESPONSE_CODE => Self::parse_authentication1_v2(idm, data),
+            GET_CONTAINER_ID_RESPONSE_CODE => Self::parse_get_container_id(idm, data),
             _ => Ok(FelicaStandardResponse::Unknown),
         }
     }
@@ -925,7 +948,7 @@ impl FelicaStandardResponse {
         match self {
             FelicaStandardResponse::Polling { idm, pmm, optional } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 8 + optional.len());
-                payload.push(0x01);
+                payload.push(POLLING_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.extend_from_slice(pmm);
                 payload.extend_from_slice(optional);
@@ -938,7 +961,7 @@ impl FelicaStandardResponse {
                     ));
                 }
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 1 + key_versions.len() * 2);
-                payload.push(0x03);
+                payload.push(REQUEST_SERVICE_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(key_versions.len() as u8);
                 for version in key_versions {
@@ -948,7 +971,7 @@ impl FelicaStandardResponse {
             }
             FelicaStandardResponse::RequestResponse { idm, mode } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 1);
-                payload.push(0x05);
+                payload.push(REQUEST_RESPONSE_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*mode);
                 Ok(payload)
@@ -961,7 +984,7 @@ impl FelicaStandardResponse {
             } => {
                 let block_len = result.as_ref().map(|value| value.blocks.len()).unwrap_or(0);
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 3 + block_len * BLOCK_SIZE);
-                payload.push(0x07);
+                payload.push(READ_WITHOUT_ENCRYPTION_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
@@ -994,7 +1017,7 @@ impl FelicaStandardResponse {
                 status_flag2,
             } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                payload.push(0x09);
+                payload.push(WRITE_WITHOUT_ENCRYPTION_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
@@ -1002,7 +1025,7 @@ impl FelicaStandardResponse {
             }
             FelicaStandardResponse::SearchServiceCode { idm, result } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 4);
-                payload.push(0x0B);
+                payload.push(SEARCH_SERVICE_CODE_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 match result {
                     None => payload.extend_from_slice(&[0xFF, 0xFF]),
@@ -1026,7 +1049,7 @@ impl FelicaStandardResponse {
                     ));
                 }
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 1 + system_codes.len() * 2);
-                payload.push(0x0D);
+                payload.push(REQUEST_SYSTEM_CODE_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(system_codes.len() as u8);
                 for code in system_codes {
@@ -1041,7 +1064,7 @@ impl FelicaStandardResponse {
                     ));
                 }
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 1 + block_counts.len() * 2);
-                payload.push(0x0F);
+                payload.push(REQUEST_BLOCK_INFORMATION_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(block_counts.len() as u8);
                 for count in block_counts {
@@ -1055,7 +1078,7 @@ impl FelicaStandardResponse {
                 challenge_2a,
             } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 16);
-                payload.push(0x11);
+                payload.push(AUTHENTICATION1_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.extend_from_slice(challenge_1b);
                 payload.extend_from_slice(challenge_2a);
@@ -1063,7 +1086,7 @@ impl FelicaStandardResponse {
             }
             FelicaStandardResponse::Authentication2(auth) => {
                 let mut payload = Vec::with_capacity(1 + auth.encrypted_payload.len());
-                payload.push(0x13);
+                payload.push(AUTHENTICATION2_RESPONSE_CODE);
                 payload.extend_from_slice(&auth.encrypted_payload);
                 Ok(payload)
             }
@@ -1098,7 +1121,7 @@ impl FelicaStandardResponse {
                             + 1
                             + result.services.len() * 2,
                     );
-                    payload.push(0x1B);
+                    payload.push(REQUEST_CODE_LIST_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1120,7 +1143,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(0x1B);
+                    payload.push(REQUEST_CODE_LIST_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1154,7 +1177,7 @@ impl FelicaStandardResponse {
                     let mut payload = Vec::with_capacity(
                         1 + IDM_LEN + 2 + 1 + result.assigned_block_counts.len() * 4,
                     );
-                    payload.push(0x1F);
+                    payload.push(REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1175,7 +1198,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(0x1F);
+                    payload.push(REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1188,7 +1211,7 @@ impl FelicaStandardResponse {
                 status_flag2,
             } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                payload.push(0x21);
+                payload.push(SET_PARAMETER_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
@@ -1199,7 +1222,7 @@ impl FelicaStandardResponse {
                 container_information,
             } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 16);
-                payload.push(0x23);
+                payload.push(GET_CONTAINER_ISSUE_INFORMATION_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload
                     .extend_from_slice(&container_information.format_version_carrier_information);
@@ -1219,7 +1242,7 @@ impl FelicaStandardResponse {
                         )
                     })?;
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 4);
-                    payload.push(0x25);
+                    payload.push(GET_AREA_INFORMATION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1233,7 +1256,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(0x25);
+                    payload.push(GET_AREA_INFORMATION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1276,7 +1299,7 @@ impl FelicaStandardResponse {
                         .sum::<usize>();
                     let mut payload =
                         Vec::with_capacity(1 + IDM_LEN + 2 + 1 + property_payload_len);
-                    payload.push(0x29);
+                    payload.push(GET_NODE_PROPERTY_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1292,7 +1315,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(0x29);
+                    payload.push(GET_NODE_PROPERTY_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1307,7 +1330,7 @@ impl FelicaStandardResponse {
                     ));
                 }
                 let mut payload = Vec::with_capacity(1 + data.len());
-                payload.push(0x2F);
+                payload.push(GET_CONTAINER_PROPERTY_RESPONSE_CODE);
                 payload.extend_from_slice(data);
                 Ok(payload)
             }
@@ -1322,7 +1345,7 @@ impl FelicaStandardResponse {
                     .map(|value| value.key_versions.len())
                     .unwrap_or(0);
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 4 + kv_len * 4);
-                payload.push(0x33);
+                payload.push(REQUEST_SERVICE_V2_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
@@ -1386,7 +1409,7 @@ impl FelicaStandardResponse {
                     ));
                 }
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 1 + 1 + result.data.len());
-                payload.push(0x39);
+                payload.push(GET_SYSTEM_STATUS_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
@@ -1413,7 +1436,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 1 + result.len());
-                    payload.push(0x3B);
+                    payload.push(GET_PLATFORM_INFORMATION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1427,7 +1450,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(0x3B);
+                    payload.push(GET_PLATFORM_INFORMATION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1442,7 +1465,7 @@ impl FelicaStandardResponse {
             } => {
                 if *status_flag1 == 0 {
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 16);
-                    payload.push(0x3D);
+                    payload.push(REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1467,7 +1490,7 @@ impl FelicaStandardResponse {
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(0x3D);
+                    payload.push(REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1480,7 +1503,7 @@ impl FelicaStandardResponse {
                 status_flag2,
             } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                payload.push(0x3F);
+                payload.push(RESET_MODE_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.push(*status_flag1);
                 payload.push(*status_flag2);
@@ -1493,7 +1516,7 @@ impl FelicaStandardResponse {
                 challenge_3c,
             } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN + 36);
-                payload.push(0x41);
+                payload.push(AUTHENTICATION1_V2_RESPONSE_CODE);
                 payload.extend_from_slice(idm);
                 payload.extend_from_slice(challenge_1b);
                 payload.extend_from_slice(challenge_2a);
@@ -1502,13 +1525,13 @@ impl FelicaStandardResponse {
             }
             FelicaStandardResponse::Authentication2V2(auth) => {
                 let mut payload = Vec::with_capacity(1 + auth.encrypted_payload.len());
-                payload.push(0x43);
+                payload.push(AUTHENTICATION2_V2_RESPONSE_CODE);
                 payload.extend_from_slice(&auth.encrypted_payload);
                 Ok(payload)
             }
             FelicaStandardResponse::GetContainerId { container_idm } => {
                 let mut payload = Vec::with_capacity(1 + IDM_LEN);
-                payload.push(0x71);
+                payload.push(GET_CONTAINER_ID_RESPONSE_CODE);
                 payload.extend_from_slice(container_idm);
                 Ok(payload)
             }
