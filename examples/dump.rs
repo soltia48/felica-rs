@@ -10,16 +10,15 @@
 //! cargo run --example dump
 //!
 //! # Local reader with keys for authenticated services
-//! cargo run --example dump -- --keys keys.csv
+//! cargo run --example dump -- --keys keys.jsonl
 //!
 //! # Remote reader
 //! cargo run --example dump -- --remote 127.0.0.1:7878
 //!
 //! # Remote reader with keys for authenticated services
-//! cargo run --example dump -- --keys keys.csv --remote 127.0.0.1:7878
+//! cargo run --example dump -- --keys keys.jsonl --remote 127.0.0.1:7878
 //! ```
 
-use csv::ReaderBuilder;
 use hex::encode;
 use nfc_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, SearchServiceCodeResult,
@@ -30,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 
 const MAX_SERVICE_CODES_PER_REQUEST: usize = 0x20;
 const BLOCKS_PER_READ_ATTEMPT: usize = 1;
@@ -119,11 +119,13 @@ struct KeyVersionSummary {
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-struct KeyRecord {
+struct JsonlKeyRecord {
     system_code: String,
     node: String,
+    algo: String,
     version: String,
-    idm: String,
+    #[serde(default)]
+    idm: Option<String>,
     key: String,
 }
 
@@ -201,6 +203,13 @@ fn parse_idm_key_field(record_num: usize, value: &str) -> Option<Option<String>>
     }
 }
 
+fn parse_optional_idm_key_field(record_num: usize, value: Option<&str>) -> Option<Option<String>> {
+    match value {
+        Some(idm) => parse_idm_key_field(record_num, idm),
+        None => Some(None),
+    }
+}
+
 fn parse_key_bytes_field(record_num: usize, value: &str) -> Option<[u8; KEY_LENGTH_BYTES]> {
     let key_bytes = match hex::decode(value) {
         Ok(bytes) => bytes,
@@ -228,40 +237,58 @@ fn parse_key_bytes_field(record_num: usize, value: &str) -> Option<[u8; KEY_LENG
     Some(key)
 }
 
-fn load_keys_from_csv(path: &str) -> Result<SystemKeys, Box<dyn Error>> {
+fn load_keys_from_jsonl(path: &str) -> Result<SystemKeys, Box<dyn Error>> {
     let file = File::open(path)?;
-    let mut csv_reader = ReaderBuilder::new()
-        .has_headers(true)
-        .trim(csv::Trim::All)
-        .from_reader(file);
+    let reader = BufReader::new(file);
 
     let mut keys_by_system: SystemKeys = HashMap::new();
 
-    for (index, result) in csv_reader.deserialize().enumerate() {
-        let record_num = index + 1;
-        let record: KeyRecord = match result {
+    for (index, line_result) in reader.lines().enumerate() {
+        let line_num = index + 1;
+        let line = match line_result {
+            Ok(line) => line,
+            Err(err) => {
+                eprintln!("Warning: Failed to read key line {}: {}", line_num, err);
+                continue;
+            }
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let record: JsonlKeyRecord = match serde_json::from_str(trimmed) {
             Ok(record) => record,
             Err(err) => {
                 eprintln!(
-                    "Warning: Failed to parse key record {}: {}",
-                    record_num, err
+                    "Warning: Failed to parse key JSONL line {}: {}",
+                    line_num, err
                 );
                 continue;
             }
         };
 
+        if !record.algo.eq_ignore_ascii_case("DES") {
+            eprintln!(
+                "Warning: Unsupported algo '{}' at key line {}; only DES is supported",
+                record.algo, line_num
+            );
+            continue;
+        }
+
         let Some(system_code) =
-            parse_hex_u16_key_field(record_num, "system_code", &record.system_code)
+            parse_hex_u16_key_field(line_num, "system_code", &record.system_code)
         else {
             continue;
         };
-        let Some(node_code) = parse_hex_u16_key_field(record_num, "node", &record.node) else {
+        let Some(node_code) = parse_hex_u16_key_field(line_num, "node", &record.node) else {
             continue;
         };
-        let Some(idm) = parse_idm_key_field(record_num, &record.idm) else {
+        let Some(idm) = parse_optional_idm_key_field(line_num, record.idm.as_deref()) else {
             continue;
         };
-        let Some(key) = parse_key_bytes_field(record_num, &record.key) else {
+        let Some(key) = parse_key_bytes_field(line_num, &record.key) else {
             continue;
         };
 
@@ -306,21 +333,24 @@ fn print_usage() {
     eprintln!("  dump [--keys <file>] --remote <address:port> Use remote reader");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --keys, -k <file>           Path to CSV file with keys (optional)");
+    eprintln!("  --keys, -k <file>           Path to JSONL file with keys (optional)");
     eprintln!("  --remote, -r <addr>         Connect to remote reader server");
     eprintln!("  --help, -h                  Show this help");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  cargo run --example dump");
-    eprintln!("  cargo run --example dump -- --keys keys.csv");
+    eprintln!("  cargo run --example dump -- --keys keys.jsonl");
     eprintln!("  cargo run --example dump -- --remote 127.0.0.1:7878");
-    eprintln!("  cargo run --example dump -- --keys keys.csv --remote 127.0.0.1:7878");
+    eprintln!("  cargo run --example dump -- --keys keys.jsonl --remote 127.0.0.1:7878");
     eprintln!();
-    eprintln!("CSV Format (with header row):");
-    eprintln!("  system_code,node,version,idm,key");
-    eprintln!("  0003,FFFF,0003,,0123456789ABCDEF");
-    eprintln!("  0003,090A,0003,0123456789ABCDEF,0123456789ABCDEF");
-    eprintln!("  (idm empty means shared key for all cards in the system)");
+    eprintln!("JSONL Format (one JSON object per line):");
+    eprintln!(
+        "  {{\"system_code\":\"0003\",\"node\":\"FFFF\",\"algo\":\"DES\",\"version\":\"0003\",\"idm\":null,\"key\":\"0123456789ABCDEF\"}}"
+    );
+    eprintln!(
+        "  {{\"system_code\":\"0003\",\"node\":\"090A\",\"algo\":\"DES\",\"version\":\"0003\",\"idm\":\"0123456789ABCDEF\",\"key\":\"0123456789ABCDEF\"}}"
+    );
+    eprintln!("  (idm null means shared key for all cards in the system)");
 }
 
 fn parse_cli_args(args: &[String]) -> Result<CliAction, String> {
@@ -376,7 +406,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let key_store = match options.keys_path.as_deref() {
-        Some(path) => Some(load_keys_from_csv(path)?),
+        Some(path) => Some(load_keys_from_jsonl(path)?),
         None => None,
     };
 
