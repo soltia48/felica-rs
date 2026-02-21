@@ -66,6 +66,10 @@ struct RemoteInfo {
 struct SystemSummary {
     idm: String,
     pmm: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pmi: Option<String>,
     system_code_hex: String,
     system_key: Option<KeyVersionSummary>,
     system_services: Vec<ServiceGroupSummary>,
@@ -133,6 +137,18 @@ struct JsonlKeyRecord {
 struct AuthReadTarget {
     service_code_raw: u16,
     area_codes: Vec<u16>,
+}
+
+#[derive(Debug, Clone)]
+struct MutualAuthSummary {
+    idi: String,
+    pmi: String,
+}
+
+#[derive(Debug)]
+struct AuthReadResult {
+    blocks: Vec<String>,
+    auth_summary: MutualAuthSummary,
 }
 
 #[derive(Debug, Default)]
@@ -523,8 +539,9 @@ fn summarize_system<D: FelicaDriver + ?Sized>(
     }
 
     let system_keys = key_store.and_then(|store| resolve_keys_for_card(store, system_code, &idm));
+    let mut mutual_auth_summary = None;
     if let Some(keys) = system_keys.as_ref() {
-        read_authenticated_services(
+        mutual_auth_summary = read_authenticated_services(
             &mut felica,
             &mut areas,
             &mut system_services,
@@ -553,6 +570,12 @@ fn summarize_system<D: FelicaDriver + ?Sized>(
     Ok(SystemSummary {
         idm,
         pmm,
+        idi: mutual_auth_summary
+            .as_ref()
+            .map(|summary| summary.idi.clone()),
+        pmi: mutual_auth_summary
+            .as_ref()
+            .map(|summary| summary.pmi.clone()),
         system_code_hex: hex_u16(system_code),
         system_key,
         system_services,
@@ -887,18 +910,24 @@ fn read_authenticated_services<D: FelicaDriver + ?Sized>(
     system_services: &mut [ServiceGroupSummary],
     keys: &NodeKeys,
     warnings: &mut Vec<String>,
-) {
+) -> Option<MutualAuthSummary> {
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
     collect_authenticated_service_codes(areas, system_services, &mut targets, &mut seen);
     if targets.is_empty() {
-        return;
+        return None;
     }
 
     let mut read_results: HashMap<u16, Vec<String>> = HashMap::new();
+    let mut mutual_auth_summary = None;
     for target in targets {
         match read_service_blocks_with_auth(felica, &target, keys) {
-            Ok(blocks) => store_read_result(&mut read_results, target.service_code_raw, blocks),
+            Ok(result) => {
+                if mutual_auth_summary.is_none() {
+                    mutual_auth_summary = Some(result.auth_summary.clone());
+                }
+                store_read_result(&mut read_results, target.service_code_raw, result.blocks);
+            }
             Err(err) => warnings.push(format!(
                 "Authenticated Read failed for service {}: {}",
                 hex_u16(target.service_code_raw),
@@ -908,6 +937,7 @@ fn read_authenticated_services<D: FelicaDriver + ?Sized>(
     }
 
     assign_blocks(areas, system_services, &mut read_results);
+    mutual_auth_summary
 }
 
 fn collect_authenticated_service_codes(
@@ -1012,13 +1042,13 @@ fn read_service_blocks_with_auth<D: FelicaDriver + ?Sized>(
     felica: &mut FelicaStandard<D>,
     target: &AuthReadTarget,
     keys: &NodeKeys,
-) -> Result<Vec<String>, String> {
+) -> Result<AuthReadResult, String> {
     let service_code = ServiceCode::new(target.service_code_raw);
     let area_codes = normalize_area_path_for_auth(&target.area_codes);
     let (group_service_key, user_service_key) =
         derive_service_keys_for_auth(keys, &area_codes, service_code)?;
 
-    felica
+    let auth_result = felica
         .mutual_authentication(
             &area_codes,
             &[service_code],
@@ -1026,6 +1056,10 @@ fn read_service_blocks_with_auth<D: FelicaDriver + ?Sized>(
             &user_service_key,
         )
         .map_err(|err| format!("Mutual Authentication failed: {}", err))?;
+    let auth_summary = MutualAuthSummary {
+        idi: encode(&auth_result.issue_id).to_uppercase(),
+        pmi: encode(&auth_result.issue_parameter).to_uppercase(),
+    };
 
     let mut blocks_hex = Vec::new();
     let mut block_number: u16 = 0;
@@ -1047,7 +1081,10 @@ fn read_service_blocks_with_auth<D: FelicaDriver + ?Sized>(
         }
     }
 
-    Ok(blocks_hex)
+    Ok(AuthReadResult {
+        blocks: blocks_hex,
+        auth_summary,
+    })
 }
 
 fn collect_plaintext_service_codes(
