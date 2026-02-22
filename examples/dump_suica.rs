@@ -533,21 +533,15 @@ fn parse_hex_u16(value: &str) -> Result<u16, std::num::ParseIntError> {
 }
 
 fn parse_idm_hex(value: &str) -> Result<Option<String>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
+    if value.is_empty() {
+        return Err("idm is empty".to_string());
     }
 
-    let without_prefix = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-        .unwrap_or(trimmed);
-    let compact: String = without_prefix
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace() && *c != ':' && *c != '-')
-        .collect();
+    if !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("idm must be plain hex".to_string());
+    }
 
-    let bytes = hex::decode(&compact).map_err(|err| err.to_string())?;
+    let bytes = hex::decode(value).map_err(|err| err.to_string())?;
     if bytes.len() != KEY_LENGTH_BYTES {
         return Err(format!("expected 8 bytes, got {}", bytes.len()));
     }
