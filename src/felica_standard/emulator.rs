@@ -1326,3 +1326,137 @@ fn polling_optional(system_code: u16, request_code: u8) -> Vec<u8> {
         _ => Vec::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_functions_cover_boundaries_and_wildcards() {
+        assert_eq!(SystemMode::Mode0.code(), 0x00);
+        assert_eq!(SystemMode::Mode1.code(), 0x01);
+        assert_eq!(SystemMode::Mode2.code(), 0x02);
+        assert_eq!(SystemMode::Mode3.code(), 0x03);
+
+        assert_eq!(list_error_index(0), 1);
+        assert_eq!(list_error_index(200), 201);
+        assert_eq!(list_error_index(usize::MAX), u8::MAX);
+
+        assert!(matches_system_code(0x12AB, 0x12AB));
+        assert!(matches_system_code(0x12FF, 0x12AB));
+        assert!(matches_system_code(0xFFAB, 0x12AB));
+        assert!(matches_system_code(0xFFFF, 0x12AB));
+        assert!(!matches_system_code(0x34AB, 0x12AB));
+
+        assert_eq!(polling_optional(0xFE00, 0x01), vec![0xFE, 0x00]);
+        assert_eq!(polling_optional(0xFE00, 0x02), vec![0x00, 0x00]);
+        assert!(polling_optional(0xFE00, 0x03).is_empty());
+    }
+
+    #[test]
+    fn validate_area_range_and_write_permission_rules() {
+        match validate_area_range(ROOT_AREA_CODE, 0xFFFD) {
+            Err(EmulatorConfigError::InvalidRootAreaRange { end_service_code }) => {
+                assert_eq!(end_service_code, 0xFFFD);
+            }
+            other => panic!("expected InvalidRootAreaRange, got {other:?}"),
+        }
+
+        match validate_area_range(0x2000, 0x1000) {
+            Err(EmulatorConfigError::InvalidAreaRange {
+                area_code,
+                end_service_code,
+            }) => {
+                assert_eq!(area_code, 0x2000);
+                assert_eq!(end_service_code, 0x1000);
+            }
+            other => panic!("expected InvalidAreaRange, got {other:?}"),
+        }
+
+        assert!(validate_area_range(0x1000, 0x1000).is_ok());
+
+        let read_only = ServiceCode::new((0x0100 << 6) | 0b001011);
+        let writable = ServiceCode::new((0x0100 << 6) | 0b001001);
+        assert!(!service_allows_write(read_only));
+        assert!(service_allows_write(writable));
+    }
+
+    #[test]
+    fn emulated_service_default_key_version_depends_on_service_attributes() {
+        let with_key = EmulatedService::new(ServiceCode::new((0x10 << 6) | 0b001010), 2);
+        assert_eq!(with_key.key_version(), 0x0000);
+        assert_eq!(with_key.blocks().len(), 2);
+
+        let without_key = EmulatedService::new(ServiceCode::new((0x10 << 6) | 0b001011), 1);
+        assert_eq!(without_key.key_version(), 0xFFFF);
+        assert_eq!(without_key.blocks().len(), 1);
+    }
+
+    #[test]
+    fn emulated_area_rejects_children_outside_range() {
+        let mut root = EmulatedArea::new(ROOT_AREA_CODE, ROOT_END_SERVICE_CODE).expect("root area");
+
+        let out_of_range_service = EmulatedService::new(ServiceCode::new(0xFFFF), 1);
+        match root.add_service(out_of_range_service) {
+            Err(EmulatorConfigError::ServiceOutOfRange {
+                area_code,
+                end_service_code,
+                service_code,
+            }) => {
+                assert_eq!(area_code, ROOT_AREA_CODE);
+                assert_eq!(end_service_code, ROOT_END_SERVICE_CODE);
+                assert_eq!(service_code, 0xFFFF);
+            }
+            _ => panic!("expected ServiceOutOfRange"),
+        }
+
+        let child = EmulatedArea::new(0x0100, 0xFFFF).expect("child area");
+        match root.add_area(child) {
+            Err(EmulatorConfigError::AreaOutOfRange {
+                area_code,
+                end_service_code,
+                child_area_code,
+                child_end_service_code,
+            }) => {
+                assert_eq!(area_code, ROOT_AREA_CODE);
+                assert_eq!(end_service_code, ROOT_END_SERVICE_CODE);
+                assert_eq!(child_area_code, 0x0100);
+                assert_eq!(child_end_service_code, 0xFFFF);
+            }
+            _ => panic!("expected AreaOutOfRange"),
+        }
+    }
+
+    #[test]
+    fn emulator_tracks_active_system_and_polling_result() {
+        let mut emulator = FelicaStandardEmulator::new();
+        assert_eq!(emulator.active_system_code(), None);
+        assert!(emulator.system_codes().is_empty());
+
+        let system_a = EmulatedSystem::new(0x12AB, [1; 8], [2; 8]).expect("system A");
+        let system_b = EmulatedSystem::new(0x34CD, [3; 8], [4; 8]).expect("system B");
+        emulator.add_system(system_a).add_system(system_b);
+
+        assert_eq!(emulator.system_codes(), vec![0x12AB, 0x34CD]);
+        assert_eq!(emulator.active_system_code(), Some(0x12AB));
+        assert!(!emulator.set_active_system(0x9999));
+        assert!(emulator.set_active_system(0x34CD));
+        assert_eq!(emulator.active_system_code(), Some(0x34CD));
+
+        let poll = emulator
+            .polling_response(0x34FF, 0x01)
+            .expect("polling response should resolve wildcard");
+        assert_eq!(poll.idm, vec![3; 8]);
+        assert_eq!(poll.pmm, vec![4; 8]);
+        assert_eq!(poll.optional, vec![0x34, 0xCD]);
+        assert_eq!(emulator.active_system_code(), Some(0x34CD));
+    }
+
+    #[test]
+    fn handle_frame_rejects_invalid_length_prefix() {
+        let mut emulator = FelicaStandardEmulator::new();
+        let frame = [0x03, 0x00, 0xFF, 0xFF]; // length says 3 but actual length is 4
+        assert!(emulator.handle_frame(&frame).is_none());
+        assert!(emulator.handle_frame(&[0x01]).is_none());
+    }
+}

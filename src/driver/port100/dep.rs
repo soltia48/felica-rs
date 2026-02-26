@@ -142,3 +142,56 @@ pub(crate) struct DepFrame {
     pub code: u8,
     pub payload: Vec<u8>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dep_build_frame_and_parse_round_trip_for_106a_and_212f() {
+        let payload = vec![0xD4, 0x04, 0xAA];
+
+        let frame_106a = dep_build_frame("106A", &payload);
+        assert_eq!(frame_106a, vec![0xF0, 0x04, 0xD4, 0x04, 0xAA]);
+        let parsed_106a = dep_parse_frame("106A", &frame_106a, &[0x04]).expect("valid 106A frame");
+        assert_eq!(parsed_106a.code, 0x04);
+        assert_eq!(parsed_106a.payload, payload);
+
+        let frame_212f = dep_build_frame("212F", &payload);
+        assert_eq!(frame_212f, vec![0x04, 0xD4, 0x04, 0xAA]);
+        let parsed_212f = dep_parse_frame("212F", &frame_212f, &[0x04]).expect("valid 212F frame");
+        assert_eq!(parsed_212f.code, 0x04);
+        assert_eq!(parsed_212f.payload, payload);
+    }
+
+    #[test]
+    fn dep_parse_frame_rejects_invalid_header_length_or_command_bytes() {
+        let valid = vec![0xF0, 0x04, 0xD4, 0x04, 0xAA];
+        assert!(dep_parse_frame("106A", &valid, &[0x04]).is_some());
+
+        let bad_start = vec![0x00, 0x04, 0xD4, 0x04, 0xAA];
+        assert!(dep_parse_frame("106A", &bad_start, &[0x04]).is_none());
+
+        let bad_len = vec![0xF0, 0x05, 0xD4, 0x04, 0xAA];
+        assert!(dep_parse_frame("106A", &bad_len, &[0x04]).is_none());
+
+        let bad_cmd1 = vec![0xF0, 0x04, 0xD5, 0x04, 0xAA];
+        assert!(dep_parse_frame("106A", &bad_cmd1, &[0x04]).is_none());
+
+        let bad_cmd2 = vec![0xF0, 0x04, 0xD4, 0x05, 0xAA];
+        assert!(dep_parse_frame("106A", &bad_cmd2, &[0x04]).is_none());
+    }
+
+    #[test]
+    fn dep_offset_and_simple_response_payload_behave_as_expected() {
+        assert_eq!(dep_offset("106A"), 1);
+        assert_eq!(dep_offset("212F"), 0);
+        assert_eq!(dep_offset("424F"), 0);
+
+        let with_did = dep_simple_response_payload(0x07, &[0xD4, 0x06, 0x99, 0x00]);
+        assert_eq!(with_did, vec![0xD5, 0x07, 0x99]);
+
+        let without_did = dep_simple_response_payload(0x07, &[0xD4, 0x06]);
+        assert_eq!(without_did, vec![0xD5, 0x07]);
+    }
+}

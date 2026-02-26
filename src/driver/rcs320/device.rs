@@ -220,3 +220,236 @@ impl<T: Transport> FelicaDriver for Device<T> {
         self.transceive(target, data, timeout_ms)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::rcs320::frame::{ACK_BYTES, Frame};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::rc::Rc;
+
+    struct DummyTransport {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl DummyTransport {
+        fn new(reads: Vec<io::Result<Vec<u8>>>, writes: Rc<RefCell<Vec<Vec<u8>>>>) -> Self {
+            Self {
+                reads: reads.into(),
+                writes,
+            }
+        }
+    }
+
+    impl Transport for DummyTransport {
+        fn write(&mut self, data: &[u8]) -> io::Result<()> {
+            self.writes.borrow_mut().push(data.to_vec());
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
+            self.reads
+                .pop_front()
+                .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, "no more reads")))
+        }
+
+        fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn manufacturer_name(&self) -> Option<&str> {
+            Some("Sony")
+        }
+
+        fn product_name(&self) -> Option<&str> {
+            Some("RC-S320")
+        }
+    }
+
+    fn init_read_sequence(extra_reads: Vec<io::Result<Vec<u8>>>) -> Vec<io::Result<Vec<u8>>> {
+        let mut reads = Vec::new();
+
+        // INIT0..INIT5, RF_ON: ACK + simple response frame payload [0x00].
+        for _ in 0..7 {
+            reads.push(Ok(ACK_BYTES.to_vec()));
+            reads.push(Ok(Frame::build(&[0x00]).as_bytes().to_vec()));
+        }
+
+        // Firmware version command: ACK + response [0x59, minor, major].
+        reads.push(Ok(ACK_BYTES.to_vec()));
+        reads.push(Ok(Frame::build(&[0x59, 0x02, 0x01]).as_bytes().to_vec()));
+
+        reads.extend(extra_reads);
+        reads
+    }
+
+    fn build_device(
+        extra_reads: Vec<io::Result<Vec<u8>>>,
+    ) -> (Device<DummyTransport>, Rc<RefCell<Vec<Vec<u8>>>>) {
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let transport = DummyTransport::new(init_read_sequence(extra_reads), Rc::clone(&writes));
+        let chipset = Chipset::new(transport).expect("chipset should initialize");
+        (
+            Device::new(chipset).expect("device should be constructed"),
+            writes,
+        )
+    }
+
+    fn target() -> RemoteTarget {
+        RemoteTarget::new("212F").expect("target should be created")
+    }
+
+    fn send_packet_response_frame(data: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(data.len() + 2);
+        payload.push(0x5D);
+        payload.push(data.len() as u8);
+        payload.extend_from_slice(data);
+        Frame::build(&payload).as_bytes().to_vec()
+    }
+
+    #[test]
+    fn device_metadata_and_max_sizes_are_reported() {
+        let (device, _) = build_device(Vec::new());
+        assert_eq!(device.vendor_name(), Some("Sony"));
+        assert_eq!(device.product_name(), Some("RC-S320"));
+        assert_eq!(device.chipset_name(), "RCS320v1.2");
+
+        let target = target();
+        assert_eq!(
+            device.get_max_send_data_size(&target),
+            crate::driver::rcs320::chipset::MAX_DATA_SIZE - 4
+        );
+        assert_eq!(
+            device.get_max_recv_data_size(&target),
+            crate::driver::rcs320::chipset::MAX_DATA_SIZE - 4
+        );
+    }
+
+    #[test]
+    fn transceive_rejects_empty_payload_before_touching_chipset_exchange() {
+        let (mut device, writes) = build_device(Vec::new());
+        let writes_before = writes.borrow().len();
+        let target = target();
+        match device.transceive(&target, &[], None) {
+            Err(DriverError::Other(message)) => assert_eq!(message, "empty transceive data"),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(data) => panic!("expected error, got {data:?}"),
+        }
+        assert_eq!(writes.borrow().len(), writes_before);
+    }
+
+    #[test]
+    fn transceive_strips_length_prefix_and_readds_response_length() {
+        let response_payload = vec![0x5D, 0x03, 0xAA, 0xBB, 0xCC];
+        let (mut device, writes) = build_device(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(Frame::build(&response_payload).as_bytes().to_vec()),
+        ]);
+        let target = target();
+
+        let result = device
+            .transceive(&target, &[0x04, 0x06, 0x01, 0x02], Some(100))
+            .expect("transceive should succeed");
+        assert_eq!(result, vec![0x04, 0xAA, 0xBB, 0xCC]);
+
+        let writes = writes.borrow();
+        let last_write = writes
+            .last()
+            .expect("at least one write should be recorded")
+            .clone();
+        let command_payload = Frame::parse(&last_write)
+            .and_then(|frame| frame.into_payload())
+            .expect("written frame should contain payload");
+        assert_eq!(command_payload, vec![0x5C, 0x04, 0x06, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn detect_type_f_sends_polling_command_and_parses_response() {
+        let card_response = vec![
+            0x01, // Polling response command
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // IDm
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // PMm
+            0xA1, 0xB2, // optional bytes
+        ];
+        let (mut device, writes) = build_device(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(send_packet_response_frame(&card_response)),
+        ]);
+        let target = target();
+
+        let result = device
+            .detect_type_f(&target, 0xFE00, 0x01, 0x02)
+            .expect("detect_type_f should succeed");
+        assert_eq!(result.idm, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            result.pmm,
+            vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+        );
+        assert_eq!(result.optional, vec![0xA1, 0xB2]);
+
+        let writes = writes.borrow();
+        let last_write = writes
+            .last()
+            .expect("polling command should be written")
+            .clone();
+        let command_payload = Frame::parse(&last_write)
+            .and_then(|frame| frame.into_payload())
+            .expect("written frame should contain payload");
+        assert_eq!(
+            command_payload,
+            vec![0x5C, 0x06, 0x00, 0xFE, 0x00, 0x01, 0x02]
+        );
+    }
+
+    #[test]
+    fn detect_type_f_maps_empty_response_to_timeout() {
+        let (mut device, _) = build_device(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(send_packet_response_frame(&[])),
+        ]);
+        let target = target();
+
+        match device.detect_type_f(&target, 0xFFFF, 0, 0) {
+            Err(DriverError::Communication(crate::clf::errors::CommunicationError::Timeout(
+                message,
+            ))) => assert_eq!(message, "no FeliCa card found"),
+            Err(other) => panic!("expected timeout communication error, got {other}"),
+            Ok(value) => panic!("expected timeout error, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_type_f_rejects_unexpected_response_code() {
+        let (mut device, _) = build_device(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(send_packet_response_frame(&[0x7F])),
+        ]);
+        let target = target();
+
+        match device.detect_type_f(&target, 0xFFFF, 0, 0) {
+            Err(DriverError::Other(message)) => assert_eq!(message, "unexpected response code: 7F"),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(value) => panic!("expected error, got {value:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_type_f_rejects_short_polling_response() {
+        let (mut device, _) = build_device(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(send_packet_response_frame(&[0x01, 0xAA])),
+        ]);
+        let target = target();
+
+        match device.detect_type_f(&target, 0xFFFF, 0, 0) {
+            Err(DriverError::Other(message)) => {
+                assert_eq!(message, "polling response too short: 2 bytes")
+            }
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(value) => panic!("expected error, got {value:?}"),
+        }
+    }
+}

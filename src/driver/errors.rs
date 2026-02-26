@@ -165,3 +165,61 @@ pub(crate) fn convert_fault_to_comm_error(
         DriverError::Communication(CommunicationError::transmission(fault.to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn communication_fault_from_status_and_properties() {
+        assert!(CommunicationFault::from_status(&[0x01, 0x02, 0x03]).is_none());
+
+        let fault = CommunicationFault::from_status(&[0x80, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(fault.errno, 0x00000080);
+        assert_eq!(fault.as_str(), "RECEIVE_TIMEOUT_ERROR");
+        assert!(fault.is_timeout());
+        assert!(fault.matches("RECEIVE_TIMEOUT_ERROR"));
+        assert!(fault.to_string().contains("RECEIVE_TIMEOUT_ERROR"));
+
+        let unknown = CommunicationFault::new(0xDEADBEEF);
+        assert_eq!(unknown.as_str(), "UNKNOWN_ERROR");
+        assert!(!unknown.is_timeout());
+        assert!(!unknown.is_rf_off());
+    }
+
+    #[test]
+    fn ensure_status_ok_handles_success_and_error() {
+        assert!(ensure_status_ok(None).is_ok());
+        assert!(ensure_status_ok(Some(0)).is_ok());
+
+        match ensure_status_ok(Some(0x7F)) {
+            Err(DriverError::Status(status)) => assert_eq!(status.errno, 0x7F),
+            Err(other) => panic!("expected status error, got {other}"),
+            Ok(_) => panic!("expected status error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn convert_fault_to_comm_error_maps_each_branch() {
+        match convert_fault_to_comm_error(CommunicationFault::new(0x00000080), false) {
+            DriverError::Communication(CommunicationError::Timeout(message)) => {
+                assert!(message.contains("RECEIVE_TIMEOUT_ERROR"));
+            }
+            other => panic!("expected timeout communication error, got {other}"),
+        }
+
+        match convert_fault_to_comm_error(CommunicationFault::new(0x00000400), true) {
+            DriverError::Communication(CommunicationError::BrokenLink(message)) => {
+                assert!(message.contains("RF_OFF_ERROR"));
+            }
+            other => panic!("expected broken-link communication error, got {other}"),
+        }
+
+        match convert_fault_to_comm_error(CommunicationFault::new(0x00000400), false) {
+            DriverError::Communication(CommunicationError::Transmission(message)) => {
+                assert!(message.contains("RF_OFF_ERROR"));
+            }
+            other => panic!("expected transmission communication error, got {other}"),
+        }
+    }
+}

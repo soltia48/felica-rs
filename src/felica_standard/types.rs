@@ -651,3 +651,221 @@ impl ChangeKeyParameters {
         payload
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_code_accessors_descriptions_and_key_requirement() {
+        let code = ServiceCode::new((0x123 << 6) | 0b001010);
+        assert_eq!(code.raw(), (0x123 << 6) | 0b001010);
+        assert_eq!(code.number(), 0x123);
+        assert_eq!(code.attributes(), 0b001010);
+        assert_eq!(
+            code.attributes_description(),
+            Some("Random read-only with key")
+        );
+        assert!(code.requires_key());
+        assert_eq!(code.to_le_bytes(), code.raw().to_le_bytes());
+
+        let no_key = ServiceCode::new((0x001 << 6) | 0b001001);
+        assert!(!no_key.requires_key());
+        assert_eq!(
+            no_key.attributes_description(),
+            Some("Random read/write without key")
+        );
+    }
+
+    #[test]
+    fn status_flags_map_from_byte_and_descriptions() {
+        assert_eq!(StatusFlag1::from_byte(0x00), StatusFlag1::NormalCompletion);
+        assert_eq!(
+            StatusFlag1::from_byte(0xFF),
+            StatusFlag1::ErrorNotAssociatedWithList
+        );
+        assert_eq!(
+            StatusFlag1::from_byte(0x12),
+            StatusFlag1::ErrorAtListIndex(0x12)
+        );
+        assert_eq!(
+            StatusFlag1::from_byte(0x05).description(),
+            "error at list index 5"
+        );
+
+        assert_eq!(
+            StatusFlag2::from_byte(0xA2),
+            StatusFlag2::BlockCountOutOfRange
+        );
+        assert_eq!(StatusFlag2::from_byte(0xFE), StatusFlag2::Unknown(0xFE));
+        assert_eq!(
+            StatusFlag2::from_byte(0xAB).description(),
+            "package parity or MAC invalid"
+        );
+    }
+
+    #[test]
+    fn status_flag_description_formats_both_flags() {
+        let text = status_flag_description(0x02, 0xA8);
+        assert!(text.contains("SF1: error at list index 2"));
+        assert!(text.contains("SF2: block number exceeds service size"));
+    }
+
+    #[test]
+    fn block_list_element_pack_short_and_extended_forms() {
+        let short = BlockListElement::new(0x12, 0x0A, 0x05).pack();
+        assert_eq!(short, vec![0xDA, 0x12]);
+
+        let extended = BlockListElement::new(0x1234, 0x03, 0x02).pack();
+        assert_eq!(extended, vec![0x23, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn container_property_and_node_property_type_round_trip() {
+        assert_eq!(ContainerProperty::Property1.index(), 0x0000);
+        assert_eq!(ContainerProperty::Property2.to_index(), 0x0001);
+        assert_eq!(
+            ContainerProperty::from_index(0x2222),
+            ContainerProperty::Unknown(0x2222)
+        );
+        assert_eq!(ContainerProperty::Unknown(0xABCD).index(), 0xABCD);
+
+        assert_eq!(
+            NodePropertyType::from_byte(NodePropertyType::ValueLimitedPurseService.to_byte()),
+            Some(NodePropertyType::ValueLimitedPurseService)
+        );
+        assert_eq!(
+            NodePropertyType::from_byte(NodePropertyType::MacCommunication.to_byte()),
+            Some(NodePropertyType::MacCommunication)
+        );
+        assert_eq!(NodePropertyType::from_byte(0xFF), None);
+    }
+
+    #[test]
+    fn node_property_sizes_and_serialization_are_consistent() {
+        let purse = NodeProperty::ValueLimitedPurseService {
+            enabled: true,
+            upper_limit: 1_000,
+            lower_limit: -500,
+            generation_number: 7,
+        };
+        assert_eq!(
+            purse.property_type(),
+            NodePropertyType::ValueLimitedPurseService
+        );
+        assert_eq!(purse.size_bytes(), 10);
+        let purse_bytes = purse.to_bytes();
+        assert_eq!(purse_bytes.len(), 10);
+        assert_eq!(purse_bytes[0], 0x01);
+        assert_eq!(&purse_bytes[1..5], &1_000i32.to_le_bytes());
+        assert_eq!(&purse_bytes[5..9], &(-500i32).to_le_bytes());
+        assert_eq!(purse_bytes[9], 7);
+
+        let mac = NodeProperty::MacCommunication { enabled: false };
+        assert_eq!(mac.property_type(), NodePropertyType::MacCommunication);
+        assert_eq!(mac.size_bytes(), 1);
+        assert_eq!(mac.to_bytes(), vec![0x00]);
+    }
+
+    #[test]
+    fn set_parameter_enums_round_trip() {
+        assert_eq!(
+            SetParameterEncryptionType::from_byte(SetParameterEncryptionType::SrmType1.to_byte()),
+            Some(SetParameterEncryptionType::SrmType1)
+        );
+        assert_eq!(
+            SetParameterEncryptionType::from_byte(SetParameterEncryptionType::SrmType2.to_byte()),
+            Some(SetParameterEncryptionType::SrmType2)
+        );
+        assert_eq!(SetParameterEncryptionType::from_byte(0xFF), None);
+
+        assert_eq!(
+            SetParameterPacketType::from_byte(SetParameterPacketType::NodeCodeSize2.to_byte()),
+            Some(SetParameterPacketType::NodeCodeSize2)
+        );
+        assert_eq!(
+            SetParameterPacketType::from_byte(SetParameterPacketType::NodeCodeSize4.to_byte()),
+            Some(SetParameterPacketType::NodeCodeSize4)
+        );
+        assert_eq!(SetParameterPacketType::from_byte(0xFF), None);
+    }
+
+    #[test]
+    fn option_version_and_specification_version_serialization() {
+        let version = OptionVersion::new(0x12, 0x34, 0x56);
+        assert_eq!(version.major, 0x02);
+        assert_eq!(version.minor, 0x04);
+        assert_eq!(version.patch, 0x06);
+        assert_eq!(version.to_le_bytes(), [0x46, 0x82]);
+        assert_eq!(
+            OptionVersion::from_le_bytes(version.to_le_bytes()),
+            OptionVersion::new(0x02, 0x04, 0x06)
+        );
+
+        let spec = SpecificationVersion {
+            format_version: 1,
+            basic_version: OptionVersion::new(1, 2, 3),
+            option_versions: vec![
+                OptionVersion::new(4, 5, 6),
+                OptionVersion::new(7, 8, 9),
+                OptionVersion::new(10, 11, 12),
+                OptionVersion::new(13, 14, 15),
+                OptionVersion::new(1, 1, 1),
+            ],
+        };
+        assert_eq!(spec.des_option_version(), Some(OptionVersion::new(4, 5, 6)));
+        assert_eq!(
+            spec.special_option_version(),
+            Some(OptionVersion::new(7, 8, 9))
+        );
+        assert_eq!(
+            spec.extended_overlap_option_version(),
+            Some(OptionVersion::new(10, 11, 12))
+        );
+        assert_eq!(
+            spec.value_limited_purse_service_option_version(),
+            Some(OptionVersion::new(13, 14, 15))
+        );
+        assert_eq!(
+            spec.communication_with_mac_option_version(),
+            Some(OptionVersion::new(1, 1, 1))
+        );
+        let serialized = spec.to_bytes();
+        assert_eq!(serialized.len(), 14);
+        assert_eq!(serialized[0], 1);
+        assert_eq!(serialized[1..3], [0x23, 0x81]);
+        assert_eq!(serialized[3], 5);
+    }
+
+    #[test]
+    fn request_service_v2_key_version_accessors_normalize_no_key_value() {
+        let single = RequestServiceV2KeyVersion::single(0x1234);
+        assert_eq!(single.primary(), Some(0x1234));
+        assert_eq!(single.secondary(), None);
+        assert_eq!(single.primary_raw(), 0x1234);
+        assert_eq!(single.secondary_raw(), None);
+
+        let single_none = RequestServiceV2KeyVersion::single(0xFFFF);
+        assert_eq!(single_none.primary(), None);
+        assert_eq!(single_none.secondary(), None);
+
+        let dual = RequestServiceV2KeyVersion::dual(0x1000, 0xFFFF);
+        assert_eq!(dual.primary(), Some(0x1000));
+        assert_eq!(dual.secondary(), None);
+        assert_eq!(dual.primary_raw(), 0x1000);
+        assert_eq!(dual.secondary_raw(), Some(0xFFFF));
+    }
+
+    #[test]
+    fn change_key_parameters_accessors_and_payload_shape() {
+        let params = ChangeKeyParameters::new([1; 8], [2; 8], [3; 8], 0x1234);
+        assert_eq!(params.new_key_version(), 0x1234);
+        assert_eq!(params.block_descriptor_block_number(), 0x1234);
+
+        let payload_a = params.payload();
+        assert_eq!(payload_a.len(), 16);
+
+        let payload_b = ChangeKeyParameters::new([1; 8], [2; 8], [3; 8], 0x1235).payload();
+        assert_ne!(payload_a, payload_b);
+    }
+}

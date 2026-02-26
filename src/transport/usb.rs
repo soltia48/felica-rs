@@ -171,3 +171,64 @@ fn rusb_to_io_error(err: rusb::Error) -> io::Error {
         other => Error::other(other),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_transport() -> UsbTransport {
+        UsbTransport {
+            handle: None,
+            in_ep: 0x81,
+            out_ep: 0x02,
+            max_packet_size: 64,
+            interface: 0,
+            manufacturer: Some("Sony".to_string()),
+            product: Some("Port-100".to_string()),
+        }
+    }
+
+    #[test]
+    fn rusb_to_io_error_maps_known_error_kinds() {
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::Timeout).kind(),
+            ErrorKind::TimedOut
+        );
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::NoDevice).kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::Access).kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(rusb_to_io_error(rusb::Error::Busy).kind(), ErrorKind::Other);
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::Interrupted).kind(),
+            ErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn metadata_accessors_and_close_with_none_handle() {
+        let mut transport = dummy_transport();
+        assert_eq!(transport.manufacturer_name(), Some("Sony"));
+        assert_eq!(transport.product_name(), Some("Port-100"));
+        transport.close().expect("close should succeed");
+        assert!(transport.handle.is_none());
+    }
+
+    #[test]
+    fn write_and_read_fail_with_not_connected_when_handle_is_closed() {
+        let mut transport = dummy_transport();
+        let write_err = transport
+            .write(&[0x00])
+            .expect_err("write should fail without handle");
+        assert_eq!(write_err.kind(), ErrorKind::NotConnected);
+
+        let read_err = transport
+            .read(Duration::from_millis(10))
+            .expect_err("read should fail without handle");
+        assert_eq!(read_err.kind(), ErrorKind::NotConnected);
+    }
+}

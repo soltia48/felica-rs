@@ -70,3 +70,37 @@ pub fn check_crc_b(data: &[u8]) -> bool {
     let crc = !calculate_crc(data, data.len() - 2, CRC_B_INIT);
     verify_crc(data, crc)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{add_crc_a, add_crc_b, check_crc_a, check_crc_b};
+
+    #[test]
+    fn add_and_check_crc_a_round_trip() {
+        let payload = vec![0x93, 0x20, 0x01, 0x02];
+        let framed = add_crc_a(payload.clone());
+        assert_eq!(framed.len(), payload.len() + 2);
+        assert!(check_crc_a(&framed));
+    }
+
+    #[test]
+    fn check_crc_a_rejects_modified_payload() {
+        let mut framed = add_crc_a(vec![0x12, 0x34, 0x56, 0x78]);
+        framed[1] ^= 0xFF;
+        assert!(!check_crc_a(&framed));
+    }
+
+    #[test]
+    fn add_and_check_crc_b_round_trip() {
+        let payload = vec![0x05, 0x00, 0x08, 0x39, 0x73];
+        let framed = add_crc_b(payload.clone());
+        assert_eq!(framed.len(), payload.len() + 2);
+        assert!(check_crc_b(&framed));
+    }
+
+    #[test]
+    fn check_crc_b_rejects_short_input() {
+        assert!(!check_crc_b(&[]));
+        assert!(!check_crc_b(&[0x00]));
+    }
+}

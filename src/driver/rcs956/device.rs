@@ -237,3 +237,33 @@ fn is_type2_target(target: &RemoteTarget) -> bool {
             .unwrap_or(false)
         && target.data.rid_res.is_none()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_target(brty: &str, sel_res: Option<Vec<u8>>, rid_res: Option<Vec<u8>>) -> RemoteTarget {
+        let mut target = RemoteTarget::new(brty).expect("target should be created");
+        target.data.sel_res = sel_res;
+        target.data.rid_res = rid_res;
+        target
+    }
+
+    #[test]
+    fn is_type2_target_requires_106a_and_type2_sel_res_without_rid() {
+        let type2 = make_target("106A", Some(vec![0x00]), None);
+        assert!(is_type2_target(&type2));
+
+        let type4_like = make_target("106A", Some(vec![0x20]), None);
+        assert!(!is_type2_target(&type4_like));
+
+        let wrong_brty = make_target("212F", Some(vec![0x00]), None);
+        assert!(!is_type2_target(&wrong_brty));
+
+        let no_sel = make_target("106A", None, None);
+        assert!(!is_type2_target(&no_sel));
+
+        let type1 = make_target("106A", Some(vec![0x00]), Some(vec![0x11]));
+        assert!(!is_type2_target(&type1));
+    }
+}

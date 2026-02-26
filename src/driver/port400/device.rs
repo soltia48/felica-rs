@@ -1189,3 +1189,247 @@ fn append_uid_block(uid: &mut Vec<u8>, block: &[u8]) {
 fn build_speed_code(dri: u8, dsi: u8) -> u8 {
     ((dri & 0x07) << 3) | (dsi & 0x07)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::errors::DriverError;
+    use crate::driver::port400::iso14443::IsoDepDataRate;
+    use std::time::Duration;
+
+    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
+        match result {
+            Err(DriverError::Other(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "unexpected driver error message: {message}"
+                );
+            }
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected DriverError::Other, got Ok"),
+        }
+    }
+
+    #[test]
+    fn through_protocol_flag_defaults_match_protocol() {
+        let type_a = ThroughProtocol::Iso14443TypeA.transmission_flags();
+        assert!(type_a.insert_parity);
+        assert!(type_a.expect_parity);
+
+        let type_b = ThroughProtocol::Iso14443TypeB.transmission_flags();
+        assert!(!type_b.insert_parity);
+        assert!(!type_b.expect_parity);
+    }
+
+    #[test]
+    fn through_protocol_iso_dep_flags_default_to_type_a_except_type_b() {
+        let felica = ThroughProtocol::Felica.iso_dep_flags();
+        let type_a = ThroughProtocol::Iso14443TypeA.iso_dep_flags();
+        let type_b = ThroughProtocol::Iso14443TypeB.iso_dep_flags();
+        assert_eq!(felica.insert_parity, type_a.insert_parity);
+        assert_eq!(felica.expect_parity, type_a.expect_parity);
+        assert!(!type_b.insert_parity);
+        assert!(!type_b.expect_parity);
+    }
+
+    #[test]
+    fn through_options_flags_override_protocol_defaults() {
+        let options = ThroughOptions {
+            protocol: ThroughProtocol::Iso14443TypeA,
+            append_crc: Some(false),
+            discard_crc: Some(false),
+            insert_parity: Some(false),
+            expect_parity: Some(false),
+            append_protocol_prologue: Some(true),
+            tx_valid_bits: Some(7),
+        };
+        let flags = options.flags();
+        assert!(!flags.append_crc);
+        assert!(!flags.discard_crc);
+        assert!(!flags.insert_parity);
+        assert!(!flags.expect_parity);
+        assert!(flags.append_protocol_prologue);
+        assert_eq!(flags.tx_valid_bits, Some(7));
+    }
+
+    #[test]
+    fn build_type_b_attrib_command_packs_parameters() {
+        let info = TypeBInfo {
+            pupi: [0x11, 0x22, 0x33, 0x44],
+            application_data: [0; 4],
+            protocol_info: vec![0x00, 0xF2],
+        };
+        let mut config = IsoDepConfig::type_b_defaults();
+        config.fsdi = 0x1A;
+        config.cid = 0x2F;
+        let frame = build_type_b_attrib_command(&info, &config, 0x03, 0x02);
+        assert_eq!(
+            frame,
+            vec![0x1D, 0x11, 0x22, 0x33, 0x44, 0x00, 0xBA, 0x02, 0x0F]
+        );
+    }
+
+    #[test]
+    fn build_type_b_attrib_command_uses_default_param3_when_info_is_short() {
+        let info = TypeBInfo {
+            pupi: [1, 2, 3, 4],
+            application_data: [0; 4],
+            protocol_info: vec![0xA0],
+        };
+        let config = IsoDepConfig::type_b_defaults();
+        let frame = build_type_b_attrib_command(&info, &config, 1, 1);
+        assert_eq!(frame, vec![0x1D, 1, 2, 3, 4, 0x00, 0x58, 0x02, 0x02]);
+    }
+
+    #[test]
+    fn ensure_rffe_category_accepts_known_categories_and_rejects_unknown() {
+        assert!(ensure_rffe_category(RFFE_PARAM_EEPROM).is_ok());
+        assert!(ensure_rffe_category(RFFE_PARAM_PD_SC_DPC).is_ok());
+        assert!(ensure_rffe_category(RFFE_PARAM_PROTOCOL_CONFIGURATION).is_ok());
+        assert_driver_error_contains(
+            ensure_rffe_category(0xFF),
+            "unsupported RFFE parameter category",
+        );
+    }
+
+    #[test]
+    fn duration_from_timeout_and_data_rate_symbols_behave_as_expected() {
+        assert_eq!(duration_from_timeout(None), Duration::from_millis(0));
+        assert_eq!(duration_from_timeout(Some(123)), Duration::from_millis(123));
+
+        let mut config = IsoDepConfig::type_a_defaults();
+        config.dr = IsoDepDataRate::Kbps848;
+        config.ds = IsoDepDataRate::Kbps424;
+        assert_eq!(data_rate_symbols(&config), (3, 2));
+    }
+
+    #[test]
+    fn format_firmware_requires_four_bytes_and_formats_hex() {
+        assert_eq!(format_firmware(&[0x01, 0x02, 0x03]), None);
+        assert_eq!(
+            format_firmware(&[0x01, 0x02, 0xAB, 0xCD]),
+            Some("v01.02.AB.CD".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_ats_config_updates_on_valid_input_and_ignores_invalid_input() {
+        let mut valid = IsoDepConfig::type_a_defaults();
+        valid.fsci = 1;
+        apply_ats_config(&mut valid, &[0x02, 0x08]);
+        assert_eq!(valid.fsci, 8);
+
+        let mut invalid = IsoDepConfig::type_a_defaults();
+        invalid.fsci = 3;
+        apply_ats_config(&mut invalid, &[0x01]);
+        assert_eq!(invalid.fsci, 3);
+    }
+
+    #[test]
+    fn apply_type_b_protocol_details_updates_on_valid_input_and_ignores_invalid_input() {
+        let mut valid = IsoDepConfig::type_b_defaults();
+        apply_type_b_protocol_details(&mut valid, &[0xA1, 0xF0, 0x00, 0xB0]);
+        assert_eq!(valid.fsci, 8);
+        assert_eq!(valid.dr, IsoDepDataRate::Kbps212);
+        assert_eq!(valid.ds, IsoDepDataRate::Kbps424);
+        assert!(!valid.use_cid);
+        assert!(!valid.use_nad);
+        assert_eq!(valid.sfgi, 11);
+
+        let mut invalid = IsoDepConfig::type_b_defaults();
+        invalid.fsci = 5;
+        apply_type_b_protocol_details(&mut invalid, &[0x00, 0x00]);
+        assert_eq!(invalid.fsci, 5);
+    }
+
+    #[test]
+    fn validate_bcc_checks_xor_of_uid_block() {
+        let block = [0x04, 0x25, 0x85, 0x93];
+        let bcc = block.iter().fold(0u8, |acc, b| acc ^ b);
+        assert!(validate_bcc(&block, bcc).is_ok());
+        assert_driver_error_contains(validate_bcc(&block, bcc ^ 0x01), "UID BCC mismatch");
+    }
+
+    #[test]
+    fn next_cascade_code_maps_known_levels_and_rejects_invalid_level() {
+        assert_eq!(next_cascade_code(0x93).expect("cascade level 1"), 0x95);
+        assert_eq!(next_cascade_code(0x95).expect("cascade level 2"), 0x97);
+        assert_driver_error_contains(next_cascade_code(0x97), "unsupported Type-A cascade level");
+    }
+
+    #[test]
+    fn append_uid_block_strips_ct_prefix_only_for_complete_blocks() {
+        let mut uid = vec![0xAA];
+        append_uid_block(&mut uid, &[0x88, 0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(uid, vec![0xAA, 0x11, 0x22, 0x33]);
+
+        let mut normal = Vec::new();
+        append_uid_block(&mut normal, &[0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(normal, vec![0x01, 0x02, 0x03, 0x04]);
+
+        let mut short_ct = Vec::new();
+        append_uid_block(&mut short_ct, &[0x88, 0x99]);
+        assert_eq!(short_ct, vec![0x88, 0x99]);
+    }
+
+    #[test]
+    fn build_speed_code_masks_upper_bits() {
+        assert_eq!(build_speed_code(0x03, 0x05), 0x1D);
+        assert_eq!(build_speed_code(0xFF, 0xAA), 0x3A);
+    }
+
+    #[test]
+    fn diagnose_polling_protocol_code_matches_expected_values() {
+        assert_eq!(DiagnosePollingProtocol::Felica.code(), 0x02);
+        assert_eq!(DiagnosePollingProtocol::Iso18092.code(), 0x02);
+        assert_eq!(DiagnosePollingProtocol::Iso14443TypeA.code(), 0x00);
+        assert_eq!(DiagnosePollingProtocol::Iso14443TypeB.code(), 0x01);
+        assert_eq!(DiagnosePollingProtocol::Iso15693.code(), 0x03);
+    }
+
+    #[test]
+    fn iso_dep_exchange_state_retries_and_bounds_validation() {
+        let mut config = IsoDepConfig::type_a_defaults();
+        config.max_retry_r_nak = 1;
+        config.max_try_s_wtx = 1;
+        let session = IsoDepSession::new(config);
+        let payload = [0x10, 0x20, 0x30];
+        let mut state =
+            IsoDepExchangeState::new(&session, &payload, false).expect("state should initialize");
+
+        let too_large = vec![0x00; session.config().max_inf_len_picc() + 1];
+        assert_driver_error_contains(state.validate_picc_payload(&too_large), "exceeds FSC");
+
+        state.accumulate_payload(&vec![0xAA; MAX_THROUGH_PAYLOAD - 1]);
+        assert_driver_error_contains(
+            state.validate_picc_payload(&[0xBB, 0xCC]),
+            "exceeds receive buffer",
+        );
+
+        state.retry_after_nak().expect("first retry should pass");
+        assert_driver_error_contains(state.retry_after_nak(), "retry limit reached");
+
+        state
+            .record_wtx_attempt(session.config().max_try_s_wtx)
+            .expect("first WTX should pass");
+        assert_driver_error_contains(
+            state.record_wtx_attempt(session.config().max_try_s_wtx),
+            "WTX retry limit reached",
+        );
+    }
+
+    #[test]
+    fn iso_dep_exchange_state_timeout_extension_and_reset_progress() {
+        let session = IsoDepSession::new(IsoDepConfig::type_a_defaults());
+        let mut state =
+            IsoDepExchangeState::new(&session, &[0x10], false).expect("state should initialize");
+
+        let base = state.current_timeout();
+        let extended = state.extend_timeout(4);
+        assert!(extended >= base);
+        assert_eq!(state.current_timeout(), extended);
+
+        state.reset_progress();
+        assert_eq!(state.current_timeout(), base);
+    }
+}

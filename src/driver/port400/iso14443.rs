@@ -564,3 +564,205 @@ fn bytes_to_fdsi(value: usize) -> u8 {
     }
     ISO_DEP_MAX_FSDI
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
+        match result {
+            Err(DriverError::Other(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "unexpected driver error message: {message}"
+                );
+            }
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected DriverError::Other, got Ok"),
+        }
+    }
+
+    #[test]
+    fn update_pcd_ifs_clamps_and_maps_fdsi() {
+        let mut cfg = IsoDepConfig::type_a_defaults();
+
+        cfg.update_pcd_ifs(1);
+        assert_eq!(cfg.fsdi, 0);
+        assert_eq!(cfg.fsd(), 16);
+
+        cfg.update_pcd_ifs(255);
+        assert_eq!(cfg.fsdi, 8);
+        assert_eq!(cfg.fsd(), 256);
+    }
+
+    #[test]
+    fn apply_ats_rejects_invalid_inputs() {
+        let mut cfg = IsoDepConfig::type_a_defaults();
+        assert_driver_error_contains(cfg.apply_ats(&[0x01]), "ATS is too short");
+        assert_driver_error_contains(cfg.apply_ats(&[0x03, 0x00]), "ATS length mismatch");
+        assert_driver_error_contains(cfg.apply_ats(&[0x01, 0x00]), "ATS missing T0");
+        assert_driver_error_contains(cfg.apply_ats(&[0x02, 0x10]), "ATS missing TA");
+        assert_driver_error_contains(cfg.apply_ats(&[0x02, 0x20]), "ATS missing TB");
+        assert_driver_error_contains(cfg.apply_ats(&[0x02, 0x40]), "ATS missing TC");
+    }
+
+    #[test]
+    fn apply_ats_updates_configuration_fields() {
+        let mut cfg = IsoDepConfig::type_a_defaults();
+        cfg.use_nad = true;
+
+        // TL=5, T0=0x7F (TA/TB/TC present, FSCI=15->clamp to 8)
+        // TA=0xA1 (DR=212, DS=424, same_d=true)
+        // TB=0xC5 (FWI=12, SFGI=5)
+        // TC=0x00 (CID/NAD disabled)
+        cfg.apply_ats(&[0x05, 0x7F, 0xA1, 0xC5, 0x00])
+            .expect("ATS should parse");
+
+        assert_eq!(cfg.fsci, 8);
+        assert_eq!(cfg.dr, IsoDepDataRate::Kbps212);
+        assert_eq!(cfg.ds, IsoDepDataRate::Kbps424);
+        assert!(cfg.same_d);
+        assert_eq!(cfg.fwi, 12);
+        assert_eq!(cfg.sfgi, 5);
+        assert!(!cfg.use_cid);
+        assert!(!cfg.use_nad);
+    }
+
+    #[test]
+    fn apply_type_b_protocol_info_validation_and_parse() {
+        let mut cfg = IsoDepConfig::type_b_defaults();
+        assert_driver_error_contains(
+            cfg.apply_type_b_protocol_info(&[0x00, 0x00]),
+            "at least 3 bytes",
+        );
+
+        cfg.apply_type_b_protocol_info(&[0xA1, 0xF0, 0x00, 0xB0])
+            .expect("type-b protocol info should parse");
+        assert_eq!(cfg.fsci, 8);
+        assert_eq!(cfg.dr, IsoDepDataRate::Kbps212);
+        assert_eq!(cfg.ds, IsoDepDataRate::Kbps424);
+        assert!(cfg.same_d);
+        assert!(!cfg.use_cid);
+        assert!(!cfg.use_nad);
+        assert_eq!(cfg.fwi, 0);
+        assert_eq!(cfg.sfgi, 11);
+    }
+
+    #[test]
+    fn iso_dep_state_block_numbers_and_flags() {
+        let mut state = IsoDepState::new(Some(0x02), Some(0x03));
+        assert_eq!(state.current_tx_block(), 0);
+        assert_eq!(state.next_tx_block(), 1);
+        assert_eq!(state.next_tx_block(), 0);
+
+        assert_eq!(state.expected_picc_block(), 0);
+        assert_eq!(state.advance_picc_block(), 1);
+        assert_eq!(state.advance_picc_block(), 0);
+
+        assert_eq!(state.cid(), Some(0x02));
+        assert_eq!(state.nad(), Some(0x03));
+        assert!(!state.chaining());
+        state.set_chaining(true);
+        assert!(state.chaining());
+    }
+
+    #[test]
+    fn build_iso_dep_blocks_include_expected_fields() {
+        let state = IsoDepState::new(Some(0x02), Some(0x03));
+
+        let i_block = build_iso_dep_i_block(&state, &[0xAA], true);
+        assert_eq!(i_block, vec![0x1E, 0x02, 0x03, 0xAA]);
+
+        let r_block = build_iso_dep_r_block(&state, false);
+        assert_eq!(r_block, vec![0x98, 0x02]);
+
+        let s_block = build_iso_dep_s_block(&state, ISO_DEP_S_WTX, true, &[0x05]);
+        assert_eq!(s_block, vec![0xF8, 0x02, 0x05]);
+    }
+
+    #[test]
+    fn next_iso_dep_i_frame_chunks_payload_and_handles_empty_payload() {
+        let state = IsoDepState::new(None, None);
+        let payload = [1u8, 2, 3, 4, 5];
+        let mut offset = 0usize;
+        let mut sent_empty = false;
+
+        let first = next_iso_dep_i_frame(&state, &payload, &mut offset, 2, false, &mut sent_empty)
+            .expect("first frame");
+        assert_eq!(first.frame, vec![0x12, 1, 2]);
+        assert!(first.chaining);
+
+        let second = next_iso_dep_i_frame(&state, &payload, &mut offset, 2, false, &mut sent_empty)
+            .expect("second frame");
+        assert_eq!(second.frame, vec![0x12, 3, 4]);
+        assert!(second.chaining);
+
+        let third = next_iso_dep_i_frame(&state, &payload, &mut offset, 2, false, &mut sent_empty)
+            .expect("third frame");
+        assert_eq!(third.frame, vec![0x02, 5]);
+        assert!(!third.chaining);
+
+        assert!(
+            next_iso_dep_i_frame(&state, &payload, &mut offset, 2, false, &mut sent_empty)
+                .is_none()
+        );
+
+        let mut empty_offset = 0usize;
+        let mut empty_sent = false;
+        let empty_first =
+            next_iso_dep_i_frame(&state, &[], &mut empty_offset, 2, false, &mut empty_sent)
+                .expect("empty frame should be emitted once");
+        assert_eq!(empty_first.frame, vec![0x02]);
+        assert!(!empty_first.chaining);
+        assert!(
+            next_iso_dep_i_frame(&state, &[], &mut empty_offset, 2, false, &mut empty_sent)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_iso_dep_response_variants_and_errors() {
+        let state = IsoDepState::new(Some(0x02), Some(0x03));
+        assert_driver_error_contains(parse_iso_dep_response(&state, &[]), "response is empty");
+
+        assert_driver_error_contains(
+            parse_iso_dep_response(&state, &[0x0A, 0x99, 0xAA]),
+            "CID mismatch",
+        );
+
+        let parsed_i = parse_iso_dep_response(&state, &[0x1F, 0x02, 0x03, 0xAA])
+            .expect("I-block should parse");
+        assert!(parsed_i.chaining);
+        assert_eq!(parsed_i.block_number, 1);
+        match parsed_i.block_type {
+            IsoDepBlockType::I { payload } => assert_eq!(payload, vec![0xAA]),
+            _ => panic!("expected I block"),
+        }
+
+        let parsed_r = parse_iso_dep_response(&state, &[0x98, 0x02]).expect("R-block should parse");
+        match parsed_r.block_type {
+            IsoDepBlockType::R { ack } => assert!(!ack),
+            _ => panic!("expected R block"),
+        }
+
+        let parsed_s =
+            parse_iso_dep_response(&state, &[0xF8, 0x02, 0x05]).expect("S-block should parse");
+        match parsed_s.block_type {
+            IsoDepBlockType::S { code, payload } => {
+                assert_eq!(code, ISO_DEP_S_WTX);
+                assert_eq!(payload, vec![0x05]);
+            }
+            _ => panic!("expected S block"),
+        }
+    }
+
+    #[test]
+    fn wtx_multiplier_and_timeout_extension() {
+        assert_eq!(wtx_multiplier(0x00), 1);
+        assert_eq!(wtx_multiplier(0xFF), 59);
+
+        let base = Duration::from_millis(10);
+        assert_eq!(extend_timeout(base, 1), base);
+        assert_eq!(extend_timeout(base, 3), Duration::from_millis(30));
+    }
+}

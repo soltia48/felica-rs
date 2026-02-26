@@ -194,3 +194,56 @@ pub const AUTHENTICATION2_V2_RESPONSE_CODE: u8 = 0x43;
 
 /// Get Container ID response code.
 pub const GET_CONTAINER_ID_RESPONSE_CODE: u8 = 0x71;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_and_response_codes_follow_expected_pairing() {
+        assert_eq!(POLLING_RESPONSE_CODE, POLLING_COMMAND_CODE + 1);
+        assert_eq!(
+            REQUEST_SERVICE_RESPONSE_CODE,
+            REQUEST_SERVICE_COMMAND_CODE + 1
+        );
+        assert_eq!(
+            REQUEST_RESPONSE_RESPONSE_CODE,
+            REQUEST_RESPONSE_COMMAND_CODE + 1
+        );
+        assert_eq!(
+            READ_WITHOUT_ENCRYPTION_RESPONSE_CODE,
+            READ_WITHOUT_ENCRYPTION_COMMAND_CODE + 1
+        );
+        assert_eq!(
+            WRITE_WITHOUT_ENCRYPTION_RESPONSE_CODE,
+            WRITE_WITHOUT_ENCRYPTION_COMMAND_CODE + 1
+        );
+        assert_eq!(
+            REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE,
+            REQUEST_BLOCK_INFORMATION_EX_COMMAND_CODE + 1
+        );
+        assert_eq!(RESET_MODE_RESPONSE_CODE, RESET_MODE_COMMAND_CODE + 1);
+        assert_eq!(
+            AUTHENTICATION1_V2_RESPONSE_CODE,
+            AUTHENTICATION1_V2_COMMAND_CODE + 1
+        );
+        assert_eq!(
+            AUTHENTICATION2_V2_RESPONSE_CODE,
+            AUTHENTICATION2_V2_COMMAND_CODE + 1
+        );
+        assert_eq!(
+            GET_CONTAINER_ID_RESPONSE_CODE,
+            GET_CONTAINER_ID_COMMAND_CODE + 1
+        );
+    }
+
+    #[test]
+    fn size_and_limit_constants_match_protocol_expectations() {
+        assert_eq!(IDM_LEN, 8);
+        assert_eq!(BLOCK_SIZE, 16);
+        assert_eq!(DES_BLOCK_SIZE, 8);
+        assert!(MAX_SERVICE_CODES >= MAX_RW_SERVICE_CODES);
+        assert!(MAX_BLOCK_LIST_LEN >= MAX_SERVICE_CODES);
+        assert!(MAX_NODE_CODES >= MAX_NODE_PROPERTY_CODES);
+    }
+}

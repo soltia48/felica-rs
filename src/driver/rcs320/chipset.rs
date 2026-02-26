@@ -394,3 +394,281 @@ fn remaining_until(deadline: Instant) -> Option<Duration> {
 fn timeout_error() -> io::Error {
     io::Error::new(ErrorKind::TimedOut, "timeout while waiting for data")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct DummyTransport {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl DummyTransport {
+        fn with_reads(reads: Vec<io::Result<Vec<u8>>>) -> Self {
+            Self {
+                reads: reads.into(),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl Transport for DummyTransport {
+        fn write(&mut self, data: &[u8]) -> io::Result<()> {
+            self.writes.push(data.to_vec());
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
+            match self.reads.pop_front() {
+                Some(chunk) => chunk,
+                None => Ok(Vec::new()),
+            }
+        }
+
+        fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn new_chipset(transport: DummyTransport) -> Chipset<DummyTransport> {
+        Chipset {
+            transport,
+            firmware_version: (0, 0),
+            read_buffer: VecDeque::new(),
+            timeout: Duration::from_millis(100),
+        }
+    }
+
+    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
+        match result {
+            Err(DriverError::Other(message)) => assert!(
+                message.contains(expected),
+                "unexpected DriverError::Other message: {message}"
+            ),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected DriverError::Other, got Ok"),
+        }
+    }
+
+    #[test]
+    fn remaining_until_and_timeout_error_behave_as_expected() {
+        let future = Instant::now() + Duration::from_secs(1);
+        assert!(remaining_until(future).is_some());
+
+        let now = Instant::now();
+        assert!(remaining_until(now).is_none());
+
+        let err = timeout_error();
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        assert_eq!(err.to_string(), "timeout while waiting for data");
+    }
+
+    #[test]
+    fn take_from_buffer_consumes_requested_bytes() {
+        let mut chipset = new_chipset(DummyTransport::default());
+        chipset.read_buffer.extend([0x10, 0x20, 0x30]);
+
+        let mut out = Vec::new();
+        chipset.take_from_buffer(&mut out, 2);
+        assert_eq!(out, vec![0x10, 0x20]);
+        assert_eq!(chipset.read_buffer, VecDeque::from(vec![0x30]));
+    }
+
+    #[test]
+    fn read_exact_uses_buffer_and_transport_reads() {
+        let transport = DummyTransport::with_reads(vec![Ok(vec![0xB0, 0xC0, 0xD0])]);
+        let mut chipset = new_chipset(transport);
+        chipset.read_buffer.extend([0xA0]);
+
+        let result = chipset
+            .read_exact(3, Instant::now() + Duration::from_millis(100))
+            .expect("read_exact should gather bytes");
+        assert_eq!(result, vec![0xA0, 0xB0, 0xC0]);
+        assert_eq!(chipset.read_buffer, VecDeque::from(vec![0xD0]));
+    }
+
+    #[test]
+    fn read_exact_maps_transport_timeout_to_standard_timeout_error() {
+        let transport = DummyTransport::with_reads(vec![Err(io::Error::new(
+            ErrorKind::TimedOut,
+            "transport timeout",
+        ))]);
+        let mut chipset = new_chipset(transport);
+
+        match chipset.read_exact(1, Instant::now() + Duration::from_millis(100)) {
+            Err(DriverError::Io(err)) => {
+                assert_eq!(err.kind(), ErrorKind::TimedOut);
+                assert_eq!(err.to_string(), "timeout while waiting for data");
+            }
+            Err(other) => panic!("expected DriverError::Io timeout, got {other}"),
+            Ok(bytes) => panic!("expected timeout error, got {bytes:?}"),
+        }
+    }
+
+    #[test]
+    fn read_exact_times_out_when_deadline_has_passed() {
+        let mut chipset = new_chipset(DummyTransport::default());
+        match chipset.read_exact(1, Instant::now()) {
+            Err(DriverError::Io(err)) => assert_eq!(err.kind(), ErrorKind::TimedOut),
+            Err(other) => panic!("expected timeout, got {other}"),
+            Ok(bytes) => panic!("expected timeout error, got {bytes:?}"),
+        }
+    }
+
+    #[test]
+    fn read_frame_bytes_handles_ack_and_data_frames() {
+        let payload = vec![0x59, 0x01, 0x02];
+        let data_frame = Frame::build(&payload).as_bytes().to_vec();
+
+        let transport =
+            DummyTransport::with_reads(vec![Ok(ACK_BYTES.to_vec()), Ok(data_frame.clone())]);
+        let mut chipset = new_chipset(transport);
+
+        let ack = chipset
+            .read_frame_bytes(Instant::now() + Duration::from_millis(100))
+            .expect("ACK frame should parse");
+        assert_eq!(ack, ACK_BYTES.to_vec());
+
+        let data = chipset
+            .read_frame_bytes(Instant::now() + Duration::from_millis(100))
+            .expect("data frame should parse");
+        assert_eq!(data, data_frame);
+    }
+
+    #[test]
+    fn read_frame_bytes_rejects_invalid_preamble() {
+        let transport = DummyTransport::with_reads(vec![Ok(vec![0x12, 0x00, 0xFF, 0x00, 0xFF])]);
+        let mut chipset = new_chipset(transport);
+        assert_driver_error_contains(
+            chipset.read_frame_bytes(Instant::now() + Duration::from_millis(100)),
+            "invalid frame preamble",
+        );
+    }
+
+    #[test]
+    fn wait_for_ack_accepts_ack_or_buffers_response_frame_bytes() {
+        let mut ack_chipset = new_chipset(DummyTransport::with_reads(vec![Ok(ACK_BYTES.to_vec())]));
+        ack_chipset.wait_for_ack().expect("ACK should be accepted");
+        assert!(ack_chipset.read_buffer.is_empty());
+
+        let response_frame = Frame::build(&[0x59, 0x00, 0x01]).as_bytes().to_vec();
+        let first_six = response_frame[..6].to_vec();
+        let mut response_chipset =
+            new_chipset(DummyTransport::with_reads(vec![Ok(first_six.clone())]));
+        response_chipset
+            .wait_for_ack()
+            .expect("response frame prefix should be buffered");
+        assert_eq!(
+            response_chipset
+                .read_buffer
+                .iter()
+                .copied()
+                .collect::<Vec<u8>>(),
+            first_six
+        );
+    }
+
+    #[test]
+    fn wait_for_ack_rejects_non_ack_non_frame_data() {
+        let mut chipset = new_chipset(DummyTransport::with_reads(vec![Ok(vec![
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+        ])]));
+        assert_driver_error_contains(chipset.wait_for_ack(), "expected ACK");
+    }
+
+    #[test]
+    fn get_firmware_version_parses_response_and_writes_command() {
+        let response = Frame::build(&[cmd::GET_FIRMWARE_VERSION_RES, 0x02, 0x01])
+            .as_bytes()
+            .to_vec();
+        let transport = DummyTransport::with_reads(vec![Ok(ACK_BYTES.to_vec()), Ok(response)]);
+        let mut chipset = new_chipset(transport);
+
+        let version = chipset
+            .get_firmware_version()
+            .expect("firmware version should parse");
+        assert_eq!(version, (0x01, 0x02));
+
+        let command_frame = chipset
+            .transport
+            .writes
+            .first()
+            .expect("command frame should be written");
+        let payload = Frame::parse(command_frame)
+            .and_then(|frame| frame.into_payload())
+            .expect("command frame should have payload");
+        assert_eq!(payload, vec![cmd::GET_FIRMWARE_VERSION]);
+    }
+
+    #[test]
+    fn get_firmware_version_rejects_wrong_response_code() {
+        let response = Frame::build(&[0x00, 0x02, 0x01]).as_bytes().to_vec();
+        let transport = DummyTransport::with_reads(vec![Ok(ACK_BYTES.to_vec()), Ok(response)]);
+        let mut chipset = new_chipset(transport);
+        assert_driver_error_contains(
+            chipset.get_firmware_version(),
+            "invalid firmware version response",
+        );
+    }
+
+    #[test]
+    fn send_to_card_builds_send_packet_command_and_checks_size() {
+        let transport = DummyTransport::with_reads(vec![Ok(ACK_BYTES.to_vec())]);
+        let mut chipset = new_chipset(transport);
+        chipset
+            .send_to_card(&[0xDE, 0xAD])
+            .expect("send_to_card should write a command");
+
+        let written = chipset
+            .transport
+            .writes
+            .first()
+            .expect("at least one frame should be written");
+        let payload = Frame::parse(written)
+            .and_then(|frame| frame.into_payload())
+            .expect("written frame should have payload");
+        assert_eq!(payload, vec![cmd::SEND_PACKET, 0x03, 0xDE, 0xAD]);
+
+        let mut oversized_chipset = new_chipset(DummyTransport::default());
+        let oversized = vec![0x00; MAX_DATA_SIZE - 1];
+        assert_driver_error_contains(
+            oversized_chipset.send_to_card(&oversized),
+            "data too long for send_to_card",
+        );
+    }
+
+    #[test]
+    fn recv_from_card_returns_payload_and_validates_response_code() {
+        let valid_response = Frame::build(&[cmd::SEND_PACKET_RES, 0x02, 0xAA, 0xBB, 0xCC])
+            .as_bytes()
+            .to_vec();
+        let transport = DummyTransport::with_reads(vec![Ok(valid_response)]);
+        let mut chipset = new_chipset(transport);
+        let payload = chipset
+            .recv_from_card(Duration::from_millis(50))
+            .expect("valid card response should parse");
+        assert_eq!(payload, vec![0xAA, 0xBB]);
+
+        let bad_code = Frame::build(&[0x01, 0x01, 0xAA]).as_bytes().to_vec();
+        let transport = DummyTransport::with_reads(vec![Ok(bad_code)]);
+        let mut chipset = new_chipset(transport);
+        assert_driver_error_contains(
+            chipset.recv_from_card(Duration::from_millis(50)),
+            "invalid card response",
+        );
+    }
+
+    #[test]
+    fn recv_from_card_rejects_short_response() {
+        let short_response = Frame::build(&[cmd::SEND_PACKET_RES]).as_bytes().to_vec();
+        let transport = DummyTransport::with_reads(vec![Ok(short_response)]);
+        let mut chipset = new_chipset(transport);
+        assert_driver_error_contains(
+            chipset.recv_from_card(Duration::from_millis(50)),
+            "card response too short",
+        );
+    }
+}

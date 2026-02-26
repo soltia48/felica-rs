@@ -27,3 +27,32 @@ pub trait Transport {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct DummyTransport;
+
+    impl Transport for DummyTransport {
+        fn write(&mut self, _data: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn close(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_metadata_methods_return_none() {
+        let transport = DummyTransport;
+        assert_eq!(transport.manufacturer_name(), None);
+        assert_eq!(transport.product_name(), None);
+    }
+}

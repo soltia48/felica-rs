@@ -1422,3 +1422,289 @@ fn generate_registration_package(
 fn unexpected_response(command: &'static str) -> FelicaStandardError {
     FelicaStandardError::Protocol(format!("unexpected response for {command} command"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::errors::DriverError;
+    use crate::felica_standard::secure::build_secure_response_frame;
+    use std::collections::VecDeque;
+
+    struct MockDriver {
+        detect_result: Option<DriverResult<Type3TagPollingResult>>,
+        transceive_responses: VecDeque<DriverResult<Vec<u8>>>,
+    }
+
+    impl MockDriver {
+        fn with_polling_result(polling_result: Type3TagPollingResult) -> Self {
+            Self {
+                detect_result: Some(Ok(polling_result)),
+                transceive_responses: VecDeque::new(),
+            }
+        }
+
+        fn with_detect_error(message: &str) -> Self {
+            Self {
+                detect_result: Some(Err(DriverError::other(message))),
+                transceive_responses: VecDeque::new(),
+            }
+        }
+
+        fn queue_response(&mut self, response: Vec<u8>) {
+            self.transceive_responses.push_back(Ok(response));
+        }
+    }
+
+    impl FelicaDriver for MockDriver {
+        fn detect_type_f(
+            &mut self,
+            _target: &RemoteTarget,
+            _system_code: u16,
+            _request_code: u8,
+            _time_slots: u8,
+        ) -> DriverResult<Type3TagPollingResult> {
+            self.detect_result
+                .take()
+                .unwrap_or_else(|| Err(DriverError::other("detect_type_f not configured")))
+        }
+
+        fn transceive(
+            &mut self,
+            _target: &RemoteTarget,
+            _data: &[u8],
+            _timeout_ms: Option<u16>,
+        ) -> DriverResult<Vec<u8>> {
+            self.transceive_responses
+                .pop_front()
+                .unwrap_or_else(|| Err(DriverError::other("transceive not configured")))
+        }
+    }
+
+    fn sample_idm() -> [u8; 8] {
+        [1, 2, 3, 4, 5, 6, 7, 8]
+    }
+
+    fn sample_polling_result() -> Type3TagPollingResult {
+        Type3TagPollingResult {
+            idm: sample_idm().to_vec(),
+            pmm: vec![0; 8],
+            optional: vec![],
+        }
+    }
+
+    fn assert_invalid_parameter_contains<T>(
+        result: Result<T, FelicaStandardError>,
+        expected: &str,
+    ) {
+        match result {
+            Err(FelicaStandardError::InvalidParameter(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "unexpected invalid-parameter message: {message}"
+                );
+            }
+            Err(other) => panic!("expected InvalidParameter error, got {other}"),
+            Ok(_) => panic!("expected InvalidParameter error, got Ok"),
+        }
+    }
+
+    fn assert_protocol_error_contains<T>(result: Result<T, FelicaStandardError>, expected: &str) {
+        match result {
+            Err(FelicaStandardError::Protocol(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "unexpected protocol message: {message}"
+                );
+            }
+            Err(other) => panic!("expected Protocol error, got {other}"),
+            Ok(_) => panic!("expected Protocol error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn helper_len_and_index_validation() {
+        assert!(ensure_len_in_range("x", 1, 1, 2).is_ok());
+        assert!(ensure_len_in_range("x", 2, 1, 2).is_ok());
+        assert_invalid_parameter_contains(ensure_len_in_range("x", 0, 1, 2), "between 1 and 2");
+
+        let block_list = vec![BlockListElement::new(0x0001, 1, 0)];
+        assert_invalid_parameter_contains(
+            validate_block_list_indices(&block_list, 1),
+            "out-of-range service index",
+        );
+    }
+
+    #[test]
+    fn helper_data_length_and_registration_package_validation() {
+        assert!(ensure_block_data_length(2, 32).is_ok());
+        assert_invalid_parameter_contains(
+            ensure_block_data_length(2, 31),
+            "data length must equal 16 * block_list length",
+        );
+
+        assert_invalid_parameter_contains(
+            generate_registration_package(&[0x00; 10], &[0x11; DES_BLOCK_SIZE]),
+            "multiple of 8 bytes",
+        );
+
+        let package = generate_registration_package(&[0xAB; 16], &[0x11; DES_BLOCK_SIZE]).unwrap();
+        assert_eq!(package.len(), 24);
+    }
+
+    #[test]
+    fn polling_propagates_driver_error() {
+        let mut driver = MockDriver::with_detect_error("detect failed");
+        let result = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00);
+        match result {
+            Err(FelicaStandardError::Driver(DriverError::Other(message))) => {
+                assert!(message.contains("detect failed"));
+            }
+            Err(other) => panic!("expected driver error, got {other}"),
+            Ok(_) => panic!("expected polling to fail"),
+        }
+    }
+
+    #[test]
+    fn request_service_rejects_empty_service_codes() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+
+        assert_invalid_parameter_contains(felica.request_service(&[]), "service_codes");
+    }
+
+    #[test]
+    fn request_response_reports_unexpected_response_variant() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let unexpected_frame = FelicaStandardResponse::RequestService {
+            idm: sample_idm(),
+            key_versions: vec![0x1234],
+        }
+        .to_frame()
+        .unwrap();
+        driver.queue_response(unexpected_frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+
+        assert_protocol_error_contains(
+            felica.request_response(),
+            "unexpected response for Request Response command",
+        );
+    }
+
+    #[test]
+    fn read_without_encryption_maps_status_error() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let frame = FelicaStandardResponse::ReadWithoutEncryption {
+            idm: sample_idm(),
+            status_flag1: 0xA5,
+            status_flag2: 0x01,
+            result: None,
+        }
+        .to_frame()
+        .unwrap();
+        driver.queue_response(frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        let result = felica.read_without_encryption(
+            &[ServiceCode::new(0x090F)],
+            &[BlockListElement::new(0x0001, 0, 0)],
+        );
+
+        match result {
+            Err(FelicaStandardError::Status {
+                command,
+                status_flag1,
+                status_flag2,
+                ..
+            }) => {
+                assert_eq!(command, "Read Without Encryption");
+                assert_eq!(status_flag1, 0xA5);
+                assert_eq!(status_flag2, 0x01);
+            }
+            Err(other) => panic!("expected status error, got {other}"),
+            Ok(_) => panic!("expected read_without_encryption to fail"),
+        }
+    }
+
+    #[test]
+    fn secure_read_round_trip_with_mock_driver() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let tx_id = [1, 2, 3, 4, 5, 6];
+        let tx_key = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        let block = [0xAB; BLOCK_SIZE];
+
+        let secure_payload = FelicaStandardResponse::Read {
+            status_flag1: 0x00,
+            status_flag2: 0x00,
+            result: Some(super::super::types::ReadResult {
+                blocks: vec![block],
+            }),
+        }
+        .to_secure_payload()
+        .unwrap();
+
+        let response_frame = build_secure_response_frame(
+            super::super::constants::READ_COMMAND_CODE + 1,
+            3,
+            &tx_id,
+            &tx_key,
+            &secure_payload,
+        )
+        .expect("secure response frame build should succeed");
+        driver.queue_response(response_frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        felica.authenticated_context = Some(AuthenticatedContext::new(1, tx_id, tx_key));
+
+        let blocks = felica
+            .read(&[BlockListElement::new(0x0001, 0, 0)])
+            .expect("secure read should succeed");
+        assert_eq!(blocks, vec![block]);
+        assert_eq!(
+            felica.authenticated_context().unwrap().transaction_number(),
+            3
+        );
+    }
+
+    #[test]
+    fn secure_read_rejects_bad_response_length_field() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let bad_frame = vec![
+            0x05,
+            super::super::constants::READ_COMMAND_CODE + 1,
+            0xAA,
+            0xBB,
+        ];
+        driver.queue_response(bad_frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        felica.authenticated_context = Some(AuthenticatedContext::new(
+            1,
+            [1, 2, 3, 4, 5, 6],
+            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+        ));
+
+        assert_protocol_error_contains(
+            felica.read(&[BlockListElement::new(0x0001, 0, 0)]),
+            "length field does not match payload",
+        );
+    }
+
+    #[test]
+    fn send_command_rejects_when_idm_length_is_not_8() {
+        let mut driver = MockDriver::with_polling_result(Type3TagPollingResult {
+            idm: vec![1, 2, 3, 4, 5, 6, 7],
+            pmm: vec![0; 8],
+            optional: vec![],
+        });
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+
+        assert_invalid_parameter_contains(felica.request_response(), "IDm must be 8 bytes long");
+    }
+}

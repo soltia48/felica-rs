@@ -204,3 +204,67 @@ fn rusb_to_io_error(err: rusb::Error) -> io::Error {
         other => Error::other(other),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_transport() -> Rcs320Transport {
+        Rcs320Transport {
+            handle: None,
+            interrupt_ep_in: 0x81,
+            interface: 0,
+            manufacturer: Some("Sony".to_string()),
+            product: Some("RC-S320".to_string()),
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
+
+    #[test]
+    fn rusb_to_io_error_maps_error_kinds() {
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::Timeout).kind(),
+            ErrorKind::TimedOut
+        );
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::NoDevice).kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            rusb_to_io_error(rusb::Error::Access).kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(rusb_to_io_error(rusb::Error::Busy).kind(), ErrorKind::Other);
+        assert_eq!(rusb_to_io_error(rusb::Error::Pipe).kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn set_timeout_and_metadata_accessors_work() {
+        let mut transport = dummy_transport();
+        transport.set_timeout(Duration::from_millis(250));
+        assert_eq!(transport.timeout, Duration::from_millis(250));
+        assert_eq!(transport.manufacturer_name(), Some("Sony"));
+        assert_eq!(transport.product_name(), Some("RC-S320"));
+    }
+
+    #[test]
+    fn control_send_and_interrupt_recv_fail_when_handle_is_closed() {
+        let mut transport = dummy_transport();
+        let send_err = transport
+            .control_send(&[0x00])
+            .expect_err("closed handle should fail control_send");
+        assert_eq!(send_err.kind(), ErrorKind::NotConnected);
+
+        let recv_err = transport
+            .interrupt_recv(Duration::from_millis(10))
+            .expect_err("closed handle should fail interrupt_recv");
+        assert_eq!(recv_err.kind(), ErrorKind::NotConnected);
+    }
+
+    #[test]
+    fn close_is_noop_when_handle_already_none() {
+        let mut transport = dummy_transport();
+        transport.close().expect("close should succeed");
+        assert!(transport.handle.is_none());
+    }
+}

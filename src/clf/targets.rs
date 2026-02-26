@@ -159,3 +159,85 @@ impl TargetData {
         *self = Self::default();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_brty_accepts_numeric_uppercase_suffix_and_rejects_invalid_forms() {
+        assert!(validate_brty("106A"));
+        assert!(validate_brty("424F"));
+        assert!(!validate_brty(""));
+        assert!(!validate_brty("A"));
+        assert!(!validate_brty("106a"));
+        assert!(!validate_brty("10AF")); // non-digit in numeric portion
+    }
+
+    #[test]
+    fn parse_brty_supports_single_and_split_send_receive_values() {
+        let (send, recv) = parse_brty("106A").expect("single bitrate should parse");
+        assert_eq!(send, "106A");
+        assert_eq!(recv, "106A");
+
+        let (send, recv) = parse_brty("212F/424F").expect("split bitrate should parse");
+        assert_eq!(send, "212F");
+        assert_eq!(recv, "424F");
+    }
+
+    #[test]
+    fn parse_brty_rejects_missing_or_invalid_values() {
+        let err = parse_brty("").expect_err("empty bitrate should fail");
+        assert_eq!(err.0, "missing bitrate");
+
+        let err = parse_brty("abc").expect_err("invalid send bitrate should fail");
+        assert_eq!(err.0, "invalid bitrate: abc");
+
+        let err = parse_brty("106A/42f").expect_err("invalid receive bitrate should fail");
+        assert_eq!(err.0, "invalid receive bitrate: 42f");
+    }
+
+    #[test]
+    fn remote_target_parses_bitrate_and_exposes_mutable_fields() {
+        let mut target = RemoteTarget::new("212F/424F").expect("remote target should be created");
+        assert_eq!(target.brty(), "212F");
+        assert_eq!(target.brty_send(), "212F");
+        assert_eq!(target.brty_recv(), "424F");
+        assert!(target.fields().sensf_req.is_none());
+
+        target.fields_mut().sensf_req = Some(vec![0x00, 0xFF]);
+        assert_eq!(target.fields().sensf_req, Some(vec![0x00, 0xFF]));
+    }
+
+    #[test]
+    fn local_target_validates_and_updates_bitrate() {
+        let mut target = LocalTarget::new("106A").expect("local target should be created");
+        assert_eq!(target.brty(), "106A");
+        assert_eq!(target.brty_send(), "106A");
+        assert_eq!(target.brty_recv(), "106A");
+
+        target.set_brty("424F").expect("set_brty should succeed");
+        assert_eq!(target.brty(), "424F");
+
+        let err = target
+            .set_brty("42f")
+            .expect_err("invalid bitrate should fail");
+        assert_eq!(err.0, "invalid bitrate: 42f");
+    }
+
+    #[test]
+    fn target_data_reset_restores_default_values() {
+        let mut data = TargetData {
+            sens_req: Some(vec![0x01]),
+            dep_req: Some(vec![0xAA]),
+            mf_halted: true,
+            arae: true,
+            ..TargetData::default()
+        };
+        data.reset();
+        assert!(data.sens_req.is_none());
+        assert!(data.dep_req.is_none());
+        assert!(!data.mf_halted);
+        assert!(!data.arae);
+    }
+}

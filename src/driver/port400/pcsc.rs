@@ -1095,3 +1095,381 @@ impl<'a, 'b, T: Transport> TransparentExchange<'a, 'b, T> {
         self.execute().map(|result| result.payload)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct DummyTransport {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl DummyTransport {
+        fn with_reads(reads: Vec<io::Result<Vec<u8>>>) -> Self {
+            Self {
+                reads: reads.into(),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl Transport for DummyTransport {
+        fn write(&mut self, data: &[u8]) -> io::Result<()> {
+            self.writes.push(data.to_vec());
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
+            match self.reads.pop_front() {
+                Some(chunk) => chunk,
+                None => Ok(Vec::new()),
+            }
+        }
+
+        fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
+        match result {
+            Err(DriverError::Other(message)) => assert!(
+                message.contains(expected),
+                "unexpected DriverError::Other message: {message}"
+            ),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected DriverError::Other, got Ok"),
+        }
+    }
+
+    #[test]
+    fn build_flag_mask_reflects_disabled_bits() {
+        let all_true = TransmissionFlags {
+            append_crc: true,
+            discard_crc: true,
+            insert_parity: true,
+            expect_parity: true,
+            append_protocol_prologue: true,
+            tx_valid_bits: None,
+        };
+        assert_eq!(Pcsc::<DummyTransport>::build_flag_mask(&all_true), 0x0000);
+        assert_eq!(
+            Pcsc::<DummyTransport>::build_flag_mask(&TransmissionFlags::felica()),
+            0x001C
+        );
+        let all_false = TransmissionFlags {
+            append_crc: false,
+            discard_crc: false,
+            insert_parity: false,
+            expect_parity: false,
+            append_protocol_prologue: false,
+            tx_valid_bits: Some(7),
+        };
+        assert_eq!(Pcsc::<DummyTransport>::build_flag_mask(&all_false), 0x001F);
+    }
+
+    #[test]
+    fn push_extended_tlv_encodes_tag_and_length() {
+        let mut tlv = Vec::new();
+        Pcsc::<DummyTransport>::push_extended_tlv(&mut tlv, 0x95, &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(tlv, vec![0x95, 0x82, 0x00, 0x03, 0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn verify_status_accepts_success_and_rejects_errors() {
+        Pcsc::<DummyTransport>::verify_status(&[0x90, 0x00]).expect("9000 status should pass");
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::verify_status(&[0x6A, 0x82]),
+            "CCID status 6A82",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::verify_status(&[0x90]),
+            "short CCID status",
+        );
+    }
+
+    #[test]
+    fn parse_length_supports_short_and_long_forms() {
+        assert_eq!(
+            Pcsc::<DummyTransport>::parse_length(&[0x7F]).expect("short length"),
+            (0x7F, 1)
+        );
+        assert_eq!(
+            Pcsc::<DummyTransport>::parse_length(&[0x81, 0x80]).expect("0x81 length"),
+            (0x80, 2)
+        );
+        assert_eq!(
+            Pcsc::<DummyTransport>::parse_length(&[0x82, 0x01, 0x00]).expect("0x82 length"),
+            (0x0100, 3)
+        );
+        assert_eq!(
+            Pcsc::<DummyTransport>::parse_length(&[0x84, 0x00, 0x00, 0x01, 0x00])
+                .expect("0x84 length"),
+            (0x0100, 5)
+        );
+    }
+
+    #[test]
+    fn parse_length_reports_malformed_encodings() {
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_length(&[]),
+            "missing length field",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_length(&[0x85, 0x00]),
+            "unsupported TLV length encoding",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_length(&[0x82, 0x01]),
+            "incomplete TLV length field",
+        );
+    }
+
+    #[test]
+    fn parse_status_block_accepts_valid_tlvs() {
+        Pcsc::<DummyTransport>::parse_status_block(&[0xC0, 0x03, 0x00, 0x90, 0x00])
+            .expect("status TLV should parse");
+        Pcsc::<DummyTransport>::parse_status_block(&[
+            VENDOR_SPECIFIC_TAG,
+            VENDOR_TAG_RESPONSE,
+            0x02,
+            0xAA,
+            0xBB,
+            0xC0,
+            0x03,
+            0x00,
+            0x90,
+            0x00,
+        ])
+        .expect("vendor + status TLV should parse");
+    }
+
+    #[test]
+    fn parse_status_block_reports_invalid_inputs() {
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_status_block(&[0xC0, 0x04, 0x00, 0x90, 0x00]),
+            "status TLV length out of range",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_status_block(&[0xC0, 0x03, 0x01, 0x90, 0x00]),
+            "status 019000",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_status_block(&[
+                VENDOR_SPECIFIC_TAG,
+                VENDOR_TAG_RESPONSE,
+                0x02,
+                0xAA,
+            ]),
+            "vendor TLV length out of range",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_status_block(&[VENDOR_SPECIFIC_TAG, 0x10]),
+            "unexpected vendor tag 10",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_status_block(&[0x01, 0x00]),
+            "unexpected TLV tag 01",
+        );
+    }
+
+    #[test]
+    fn parse_transparent_response_parses_payload_and_metadata() {
+        let parsed = Pcsc::<DummyTransport>::parse_transparent_response(&[
+            0xC0,
+            0x03,
+            0x00,
+            0x90,
+            0x00,
+            RESPONSE_BIT_FRAMING_TAG,
+            0x01,
+            0x00,
+            RESPONSE_STATUS_TAG,
+            0x02,
+            0x5A,
+            0x00,
+            RESPONSE_DATA_TAG,
+            0x03,
+            0xAA,
+            0xBB,
+            0xCC,
+            VENDOR_SPECIFIC_TAG,
+            VENDOR_TAG_RESPONSE,
+            0x01,
+            0x99,
+        ])
+        .expect("transparent response should parse");
+        assert_eq!(parsed.payload, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(parsed.rf_status, Some(0x5A));
+        assert_eq!(parsed.valid_bits, Some(8));
+    }
+
+    #[test]
+    fn parse_transparent_response_supports_extended_data_length() {
+        let parsed = Pcsc::<DummyTransport>::parse_transparent_response(&[
+            RESPONSE_DATA_TAG,
+            0x82,
+            0x00,
+            0x02,
+            0x11,
+            0x22,
+            0xC0,
+            0x03,
+            0x00,
+            0x90,
+            0x00,
+        ])
+        .expect("extended length data TLV should parse");
+        assert_eq!(parsed.payload, vec![0x11, 0x22]);
+    }
+
+    #[test]
+    fn parse_transparent_response_reports_invalid_inputs() {
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_BIT_FRAMING_TAG]),
+            "bit framing TLV truncated",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[
+                RESPONSE_BIT_FRAMING_TAG,
+                0x02,
+                0x01,
+                0x02,
+            ]),
+            "bit framing TLV length out of range",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_STATUS_TAG, 0x01, 0x00]),
+            "response status TLV length out of range",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_DATA_TAG]),
+            "data TLV truncated",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_DATA_TAG, 0x02, 0xAA]),
+            "data TLV length out of range",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[VENDOR_SPECIFIC_TAG]),
+            "vendor TLV truncated",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[VENDOR_SPECIFIC_TAG, 0x01, 0x00]),
+            "unexpected vendor tag 01",
+        );
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_transparent_response(&[0x01, 0x00]),
+            "unexpected TLV tag 01",
+        );
+    }
+
+    #[test]
+    fn ccid_response_parse_maps_status_variants() {
+        let mut header = [0u8; 10];
+        header[0] = 0x83;
+        header[1..5].copy_from_slice(&4u32.to_le_bytes());
+        header[6] = 0x10;
+
+        let (ok, ok_status) =
+            CcidResponse::parse(&header, 0x10).expect("success header should parse");
+        assert_eq!(ok.length, 4);
+        assert_eq!(ok_status, CommandStatus::Success);
+
+        header[7] = 0x40;
+        header[8] = SLOT_BUSY_ERROR;
+        let (_, busy_status) =
+            CcidResponse::parse(&header, 0x10).expect("slot busy header should parse");
+        assert_eq!(busy_status, CommandStatus::SlotBusy);
+
+        header[7] = 0x40;
+        header[8] = 0x12;
+        let (_, fail_status) =
+            CcidResponse::parse(&header, 0x10).expect("failure header should parse");
+        assert_eq!(fail_status, CommandStatus::Failure(0x12));
+
+        header[7] = 0x80;
+        let (_, te_status) =
+            CcidResponse::parse(&header, 0x10).expect("time extension header should parse");
+        assert_eq!(te_status, CommandStatus::TimeExtension);
+
+        header[6] = 0x11;
+        let (seq, seq_status) =
+            CcidResponse::parse(&header, 0x10).expect("seq mismatch should parse");
+        assert_eq!(seq.length, 0);
+        assert_eq!(seq_status, CommandStatus::SequenceMismatch);
+    }
+
+    #[test]
+    fn ccid_response_parse_rejects_invalid_headers() {
+        assert_driver_error_contains(CcidResponse::parse(&[0u8; 9], 1), "short CCID header");
+
+        let mut header = [0u8; 10];
+        header[0] = 0x6B;
+        assert_driver_error_contains(CcidResponse::parse(&header, 0), "invalid CCID message");
+    }
+
+    #[test]
+    fn escape_command_serializes_with_and_without_data() {
+        let no_data = EscapeCommand::new(GET_DATA_INS, 0xF2, 0x00).into_bytes();
+        assert_eq!(no_data, vec![0xFF, GET_DATA_INS, 0xF2, 0x00]);
+
+        let with_data = EscapeCommand::with_data(0x5A, 0x00, 0x00, &[0x12, 0x34]).into_bytes();
+        assert_eq!(with_data, vec![0xFF, 0x5A, 0x00, 0x00, 0x02, 0x12, 0x34]);
+    }
+
+    #[test]
+    fn ccid_transport_build_escape_frame_and_sequence_wrap() {
+        let mut ccid = CcidTransport::new(DummyTransport::default());
+        let frame = ccid.build_escape_frame(&[0xAA, 0xBB], 0x05);
+        assert_eq!(
+            frame,
+            vec![
+                0x6B, 0x02, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xAA, 0xBB
+            ]
+        );
+
+        ccid.sequence = 0xFF;
+        assert_eq!(ccid.next_sequence(), 0x00);
+        assert_eq!(ccid.next_sequence(), 0x01);
+    }
+
+    #[test]
+    fn ccid_transport_read_exact_uses_buffer_and_transport_reads() {
+        let transport = DummyTransport::with_reads(vec![
+            Ok(vec![0x01, 0x02, 0x03]),
+            Ok(vec![0x04]),
+            Ok(vec![0x05, 0x06]),
+        ]);
+        let mut ccid = CcidTransport::new(transport);
+
+        let first = ccid
+            .read_exact(2, Duration::from_millis(10))
+            .expect("first read");
+        assert_eq!(first, vec![0x01, 0x02]);
+
+        let second = ccid
+            .read_exact(3, Duration::from_millis(10))
+            .expect("second read");
+        assert_eq!(second, vec![0x03, 0x04, 0x05]);
+
+        let third = ccid
+            .read_exact(1, Duration::from_millis(10))
+            .expect("third read");
+        assert_eq!(third, vec![0x06]);
+    }
+
+    #[test]
+    fn ccid_transport_read_exact_times_out_with_zero_deadline() {
+        let mut ccid = CcidTransport::new(DummyTransport::default());
+        let result = ccid.read_exact(1, Duration::from_millis(0));
+        match result {
+            Err(DriverError::Io(err)) => assert_eq!(err.kind(), ErrorKind::TimedOut),
+            Err(other) => panic!("expected DriverError::Io timeout, got {other}"),
+            Ok(data) => panic!("expected timeout error, got {data:?}"),
+        }
+    }
+}

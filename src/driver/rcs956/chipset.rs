@@ -670,3 +670,176 @@ fn remaining_until(deadline: Instant) -> Option<Duration> {
 fn timeout_error() -> io::Error {
     io::Error::new(ErrorKind::TimedOut, "timeout while waiting for data")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct DummyTransport {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl DummyTransport {
+        fn with_reads(reads: Vec<io::Result<Vec<u8>>>) -> Self {
+            Self {
+                reads: reads.into(),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl Transport for DummyTransport {
+        fn write(&mut self, data: &[u8]) -> io::Result<()> {
+            self.writes.push(data.to_vec());
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
+            match self.reads.pop_front() {
+                Some(chunk) => chunk,
+                None => Ok(Vec::new()),
+            }
+        }
+
+        fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn new_chipset(transport: DummyTransport) -> Chipset<DummyTransport> {
+        Chipset {
+            transport,
+            firmware_version: (0, 0, 0),
+            read_buffer: VecDeque::new(),
+        }
+    }
+
+    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
+        match result {
+            Err(DriverError::Other(message)) => assert!(
+                message.contains(expected),
+                "unexpected DriverError::Other message: {message}"
+            ),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected DriverError::Other, got Ok"),
+        }
+    }
+
+    #[test]
+    fn extract_response_payload_validates_frame_shape_and_command_code() {
+        let ok_frame = Frame::build(&[CONTROLLER_TO_HOST, 0x03, 0xAA]);
+        let ok_payload =
+            Chipset::<DummyTransport>::extract_response_payload(ok_frame, 0x02).expect("valid");
+        assert_eq!(ok_payload, vec![0xAA]);
+
+        assert_driver_error_contains(
+            Chipset::<DummyTransport>::extract_response_payload(Frame::ack(), 0x02),
+            "unexpected frame type",
+        );
+
+        match Chipset::<DummyTransport>::extract_response_payload(Frame::build(&[0x7F]), 0x02) {
+            Err(DriverError::Status(status)) => assert_eq!(status.errno, err::ERROR_FRAME),
+            Err(other) => panic!("expected status error, got {other}"),
+            Ok(payload) => panic!("expected status error, got payload {payload:?}"),
+        }
+
+        assert_driver_error_contains(
+            Chipset::<DummyTransport>::extract_response_payload(Frame::build(&[0xD4, 0x03]), 0x02),
+            "invalid response identifier",
+        );
+        assert_driver_error_contains(
+            Chipset::<DummyTransport>::extract_response_payload(
+                Frame::build(&[CONTROLLER_TO_HOST, 0x04]),
+                0x02,
+            ),
+            "unexpected response code",
+        );
+    }
+
+    #[test]
+    fn parse_response_frame_accepts_valid_normal_and_extended_frames() {
+        let chipset = new_chipset(DummyTransport::default());
+
+        let normal = Frame::build(&[CONTROLLER_TO_HOST, 0x03, 0x11]);
+        chipset
+            .parse_response_frame(normal.as_bytes())
+            .expect("normal frame should parse");
+
+        let extended_payload = vec![0xAB; 300];
+        let extended = Frame::build(&extended_payload);
+        chipset
+            .parse_response_frame(extended.as_bytes())
+            .expect("extended frame should parse");
+    }
+
+    #[test]
+    fn parse_response_frame_rejects_invalid_lengths_and_checksums() {
+        let chipset = new_chipset(DummyTransport::default());
+
+        assert_driver_error_contains(
+            chipset.parse_response_frame(&[0x00, 0x00, 0xFF, 0x01, 0xFF, 0xD5]),
+            "normal frame too short",
+        );
+
+        let mut bad_lcs = Frame::build(&[0xD5, 0x03]).as_bytes().to_vec();
+        bad_lcs[4] ^= 0x01;
+        assert_driver_error_contains(
+            chipset.parse_response_frame(&bad_lcs),
+            "frame length checksum error",
+        );
+
+        let mut bad_len = Frame::build(&[0xD5, 0x03]).as_bytes().to_vec();
+        bad_len[3] = bad_len[3].wrapping_add(1);
+        bad_len[4] = bad_len[4].wrapping_sub(1);
+        assert_driver_error_contains(
+            chipset.parse_response_frame(&bad_len),
+            "frame length value mismatch",
+        );
+
+        let mut bad_extended_lcs = Frame::build(&vec![0xAA; 300]).as_bytes().to_vec();
+        bad_extended_lcs[7] ^= 0x01;
+        assert_driver_error_contains(
+            chipset.parse_response_frame(&bad_extended_lcs),
+            "frame length checksum error",
+        );
+    }
+
+    #[test]
+    fn read_frame_from_transport_prefers_buffer_and_handles_empty_reads() {
+        let mut buffered = new_chipset(DummyTransport::default());
+        buffered.read_buffer.extend([0x01, 0x02, 0x03]);
+        let from_buffer = buffered
+            .read_frame_from_transport(Duration::from_millis(10))
+            .expect("buffered frame should be returned");
+        assert_eq!(from_buffer, vec![0x01, 0x02, 0x03]);
+        assert!(buffered.read_buffer.is_empty());
+
+        let mut from_transport = new_chipset(DummyTransport::with_reads(vec![Ok(vec![
+            0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00,
+        ])]));
+        let bytes = from_transport
+            .read_frame_from_transport(Duration::from_millis(10))
+            .expect("transport frame should be returned");
+        assert_eq!(bytes, vec![0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00]);
+
+        let mut empty = new_chipset(DummyTransport::with_reads(vec![Ok(Vec::new())]));
+        match empty.read_frame_from_transport(Duration::from_millis(10)) {
+            Err(DriverError::Io(err)) => assert_eq!(err.kind(), ErrorKind::TimedOut),
+            Err(other) => panic!("expected timeout io error, got {other}"),
+            Ok(data) => panic!("expected timeout error, got {data:?}"),
+        }
+    }
+
+    #[test]
+    fn remaining_until_and_timeout_error_behave_as_expected() {
+        assert!(remaining_until(Instant::now() + Duration::from_secs(1)).is_some());
+        assert!(remaining_until(Instant::now()).is_none());
+
+        let err = timeout_error();
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        assert_eq!(err.to_string(), "timeout while waiting for data");
+    }
+}

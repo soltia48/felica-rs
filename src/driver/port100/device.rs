@@ -274,3 +274,116 @@ impl<T: Transport> Device<T> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::errors::CommunicationFault;
+    use std::time::Duration;
+
+    struct DummyTransport;
+
+    impl Transport for DummyTransport {
+        fn write(&mut self, _data: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn read(&mut self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn close(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_target(brty: &str, sel_res: Option<Vec<u8>>) -> RemoteTarget {
+        let mut target = RemoteTarget::new(brty).expect("target should be created");
+        target.data.sel_res = sel_res;
+        target
+    }
+
+    #[test]
+    fn initiator_params_for_brty_matches_expected_protocol_defaults() {
+        assert_eq!(
+            initiator_params_for_brty("106A").as_slice(),
+            &[("add_parity", 1), ("check_parity", 1)]
+        );
+        assert_eq!(
+            initiator_params_for_brty("106B").as_slice(),
+            &[
+                ("initial_guard_time", 20),
+                ("add_sof", 1),
+                ("check_sof", 1),
+                ("add_eof", 1),
+                ("check_eof", 1),
+            ]
+        );
+        assert!(initiator_params_for_brty("424F").is_empty());
+    }
+
+    #[test]
+    fn is_type2_target_checks_brty_and_sel_res_bits() {
+        assert!(is_type2_target(&make_target("106A", Some(vec![0x00]))));
+        assert!(is_type2_target(&make_target("106A", Some(vec![0x1F]))));
+        assert!(!is_type2_target(&make_target("106A", Some(vec![0x20]))));
+        assert!(!is_type2_target(&make_target("212F", Some(vec![0x00]))));
+        assert!(!is_type2_target(&make_target("106A", None)));
+    }
+
+    #[test]
+    fn initiator_exchange_profile_enables_crc_stripping_for_type2_target() {
+        let type2 = make_target("106A", Some(vec![0x00]));
+        let profile = InitiatorExchangeProfile::for_target(&type2);
+        assert!(profile.strip_crc());
+        assert!(profile.params().contains(&("add_parity", 1)));
+        assert!(profile.params().contains(&("check_parity", 1)));
+        assert!(profile.params().contains(&("check_crc", 0)));
+
+        let non_type2 = make_target("106A", Some(vec![0x20]));
+        let profile = InitiatorExchangeProfile::for_target(&non_type2);
+        assert!(!profile.strip_crc());
+        assert!(!profile.params().contains(&("check_crc", 0)));
+    }
+
+    #[test]
+    fn map_fault_converts_faults_and_preserves_non_fault_errors() {
+        let ok: Result<u8> = Device::<DummyTransport>::map_fault(Ok(7), false);
+        assert_eq!(ok.expect("ok should pass through"), 7);
+
+        match Device::<DummyTransport>::map_fault::<()>(
+            Err(DriverError::Fault(CommunicationFault::new(0x00000080))),
+            false,
+        ) {
+            Err(DriverError::Communication(CommunicationError::Timeout(message))) => {
+                assert!(message.contains("RECEIVE_TIMEOUT_ERROR"));
+            }
+            other => panic!("expected timeout communication error, got {other:?}"),
+        }
+
+        match Device::<DummyTransport>::map_fault::<()>(
+            Err(DriverError::Fault(CommunicationFault::new(0x00000400))),
+            true,
+        ) {
+            Err(DriverError::Communication(CommunicationError::BrokenLink(message))) => {
+                assert!(message.contains("RF_OFF_ERROR"));
+            }
+            other => panic!("expected broken-link communication error, got {other:?}"),
+        }
+
+        match Device::<DummyTransport>::map_fault::<()>(
+            Err(DriverError::Fault(CommunicationFault::new(0x00000400))),
+            false,
+        ) {
+            Err(DriverError::Communication(CommunicationError::Transmission(message))) => {
+                assert!(message.contains("RF_OFF_ERROR"));
+            }
+            other => panic!("expected transmission communication error, got {other:?}"),
+        }
+
+        match Device::<DummyTransport>::map_fault::<()>(Err(DriverError::other("x")), false) {
+            Err(DriverError::Other(message)) => assert_eq!(message, "x"),
+            other => panic!("expected DriverError::Other, got {other:?}"),
+        }
+    }
+}

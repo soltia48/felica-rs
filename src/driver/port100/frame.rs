@@ -157,3 +157,100 @@ impl<'a> DataFrameLayout<'a> {
         self.data_start.checked_add(self.length)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ack_and_error_frames() {
+        let ack = Frame::parse(&ACK_BYTES).expect("ACK frame should parse");
+        assert_eq!(ack.frame_type(), &FrameType::Ack);
+        assert!(ack.payload().is_none());
+        assert!(ack.clone().into_payload().is_none());
+
+        let error = Frame::parse(&ERROR_BYTES).expect("ERROR frame should parse");
+        assert_eq!(error.frame_type(), &FrameType::Error);
+        assert!(error.payload().is_none());
+        assert!(error.clone().into_payload().is_none());
+    }
+
+    #[test]
+    fn build_and_parse_extended_data_frame_round_trip() {
+        let payload = vec![0x10, 0x20, 0x30, 0x40, 0x50];
+        let frame = Frame::build(&payload);
+        assert_eq!(frame.as_bytes()[0..3], PREAMBLE);
+        assert_eq!(frame.as_bytes()[3..5], EXTENDED_LENGTH_MARKER);
+
+        let parsed = Frame::parse(frame.as_bytes()).expect("built frame should parse");
+        assert_eq!(parsed.frame_type(), &FrameType::Data(payload.clone()));
+        assert_eq!(parsed.payload(), Some(payload.as_slice()));
+        assert_eq!(parsed.clone().into_payload(), Some(payload));
+    }
+
+    #[test]
+    fn parse_accepts_normal_non_extended_data_frame() {
+        let payload = vec![0xAA];
+        let frame = vec![0x00, 0x00, 0xFF, 0x01, 0xFF, 0xAA, 0x56, 0x00];
+        let parsed = Frame::parse(&frame).expect("normal frame should parse");
+        assert_eq!(parsed.frame_type(), &FrameType::Data(payload.clone()));
+        assert_eq!(parsed.payload(), Some(payload.as_slice()));
+    }
+
+    #[test]
+    fn build_and_parse_zero_length_payload() {
+        let frame = Frame::build(&[]);
+        let parsed = Frame::parse(frame.as_bytes()).expect("empty payload frame should parse");
+        assert_eq!(parsed.frame_type(), &FrameType::Data(vec![]));
+        assert_eq!(parsed.payload(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_preamble() {
+        let invalid = vec![0x12, 0x00, 0xFF, 0x00, 0x00];
+        assert!(Frame::parse(&invalid).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_length_checksum() {
+        let payload = vec![0x01, 0x02, 0x03];
+        let mut frame = Frame::build(&payload).as_bytes().to_vec();
+        frame[7] ^= 0x01; // LCS byte for extended frame
+        assert!(Frame::parse(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_data_checksum() {
+        let payload = vec![0x01, 0x02, 0x03];
+        let mut frame = Frame::build(&payload).as_bytes().to_vec();
+        let last_data_index = frame.len() - 2;
+        frame[last_data_index] ^= 0x01; // DCS
+        assert!(Frame::parse(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_postamble() {
+        let payload = vec![0x01, 0x02, 0x03];
+        let mut frame = Frame::build(&payload).as_bytes().to_vec();
+        let postamble_index = frame.len() - 1;
+        frame[postamble_index] = 0x01;
+        assert!(Frame::parse(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_non_extended_frame_with_invalid_checksums() {
+        let mut bad_lcs = vec![0x00, 0x00, 0xFF, 0x01, 0xFE, 0xAA, 0x56, 0x00];
+        assert!(Frame::parse(&bad_lcs).is_none());
+
+        bad_lcs = vec![0x00, 0x00, 0xFF, 0x01, 0xFF, 0xAA, 0x57, 0x00];
+        assert!(Frame::parse(&bad_lcs).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_truncated_frame() {
+        let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let frame = Frame::build(&payload);
+        let truncated = &frame.as_bytes()[..frame.as_bytes().len() - 1];
+        assert!(Frame::parse(truncated).is_none());
+    }
+}

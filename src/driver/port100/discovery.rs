@@ -1200,3 +1200,151 @@ fn expect_exact_field<'a>(
     }
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_supported_bitrate_accepts_allowed_values_and_rejects_others() {
+        assert!(ensure_supported_bitrate("106A", &["106A", "212F"], "unsupported ").is_ok());
+        match ensure_supported_bitrate("424A", &["106A", "212F"], "unsupported ") {
+            Err(DriverError::UnsupportedTarget(err)) => {
+                assert_eq!(err.0, "unsupported 424A");
+            }
+            Err(other) => panic!("expected UnsupportedTarget error, got {other}"),
+            Ok(_) => panic!("expected error for unsupported bitrate"),
+        }
+    }
+
+    #[test]
+    fn type1_atqa_and_cascade_uid_helpers_work() {
+        assert!(is_type1_atqa(&[0x00, 0x44]));
+        assert!(is_type1_atqa(&[0x20]));
+        assert!(!is_type1_atqa(&[0x1F]));
+        assert!(!is_type1_atqa(&[]));
+
+        assert_eq!(cascade_uid(&[1, 2, 3, 4]), vec![1, 2, 3, 4]);
+        assert_eq!(cascade_uid(&[1, 2, 3, 4, 5]), vec![0x88, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            cascade_uid(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            vec![0x88, 1, 2, 3, 0x88, 4, 5, 6, 7, 8, 9, 10]
+        );
+    }
+
+    #[test]
+    fn tt4_session_tracks_pending_and_rats_data() {
+        let mut session = Tt4Session::new();
+        assert!(!session.has_session());
+        assert!(session.take_response().is_none());
+
+        session.start(vec![0xE0, 0x50], vec![0x06, 0x77]);
+        assert!(session.has_session());
+        let (rats_cmd, rats_res) = session.rats().expect("RATS should be present");
+        assert_eq!(rats_cmd, &[0xE0, 0x50]);
+        assert_eq!(rats_res, &[0x06, 0x77]);
+        assert_eq!(session.take_response(), Some(vec![0x06, 0x77]));
+        assert!(session.take_response().is_none());
+
+        session.queue_response(vec![0x90, 0x00]);
+        assert_eq!(session.take_response(), Some(vec![0x90, 0x00]));
+        session.clear();
+        assert!(!session.has_session());
+    }
+
+    #[test]
+    fn bitrate_and_exchange_view_decode_fields_consistently() {
+        assert_eq!(Bitrate::from_str("106A"), Bitrate::A106);
+        assert_eq!(Bitrate::from_str("212F"), Bitrate::F212);
+        assert_eq!(Bitrate::from_str("424F"), Bitrate::F424);
+        assert_eq!(Bitrate::from_str("999X"), Bitrate::Unknown(0));
+        assert_eq!(Bitrate::A106.as_str(), "106A");
+        assert_eq!(Bitrate::Unknown(99).as_str(), "unknown bitrate");
+
+        let raw = vec![11, 0, 0x03, 0, 0, 0, 0, 3, 0xAA, 0xBB];
+        let view = ExchangeView::new(&raw);
+        assert_eq!(view.bitrate(), Bitrate::A106);
+        assert_eq!(view.payload(), &[3, 0xAA, 0xBB]);
+        assert!(view.len_matches_len_byte());
+        assert!(view.is_activation_frame());
+        assert_eq!(view.raw(), raw.as_slice());
+
+        let raw_unknown = vec![0xFF, 0, 0x00, 0, 0, 0, 0, 3, 0xAA];
+        let unknown = ExchangeView::new(&raw_unknown);
+        assert_eq!(unknown.bitrate(), Bitrate::Unknown(0xFF));
+        assert!(!unknown.is_activation_frame());
+        assert!(!unknown.len_matches_len_byte());
+    }
+
+    #[test]
+    fn timeout_window_and_clamp_timeout_cover_edge_cases() {
+        assert_eq!(clamp_timeout(-1.0), 0);
+        assert_eq!(clamp_timeout(0.0), 0);
+        assert_eq!(clamp_timeout(0.0006), 1);
+        assert_eq!(clamp_timeout(1.5), 1500);
+        assert_eq!(clamp_timeout(100_000.0), 0xFFFF);
+
+        assert!(TimeoutWindow::new(0.0).is_none());
+        let mut window = TimeoutWindow::new(0.05).expect("positive timeout should create window");
+        assert!(window.active());
+        assert!(window.remaining() > 0);
+        let _ = window.deadline();
+        window.deadline = Instant::now();
+        window.refresh();
+        assert!(!window.active());
+        assert_eq!(window.remaining(), 0);
+    }
+
+    #[test]
+    fn build_sensf_res_payload_handles_request_code_variants() {
+        let res = Type3TagPollingResult {
+            idm: vec![0x01; 8],
+            pmm: vec![0x02; 8],
+            optional: vec![0xFE, 0x00],
+        };
+        let req1 = build_sensf_res_payload(&res, 0x01, "212F");
+        assert_eq!(req1[0], 0x01);
+        assert_eq!(&req1[1..9], &[0x01; 8]);
+        assert_eq!(&req1[9..17], &[0x02; 8]);
+        assert_eq!(&req1[17..], &[0xFE, 0x00]);
+
+        let req2_212 = build_sensf_res_payload(&res, 0x02, "212F");
+        assert_eq!(&req2_212[17..], &[0x00, 0x01]);
+        let req2_424 = build_sensf_res_payload(&res, 0x02, "424F");
+        assert_eq!(&req2_424[17..], &[0x00, 0x02]);
+
+        let req_other = build_sensf_res_payload(&res, 0x03, "212F");
+        assert_eq!(req_other.len(), 17);
+    }
+
+    #[test]
+    fn nfca_params_from_local_validates_required_fields_and_lengths() {
+        let mut target = LocalTarget::new("106A").expect("local target");
+        target.data.sens_res = Some(vec![0x04, 0x00]);
+        target.data.sdd_res = Some(vec![0x08, 0x11, 0x22, 0x33]);
+        target.data.sel_res = Some(vec![0x20]);
+        assert_eq!(
+            nfca_params_from_local(&target).expect("params should be built"),
+            vec![0x04, 0x00, 0x11, 0x22, 0x33, 0x20]
+        );
+
+        let mut missing = LocalTarget::new("106A").expect("local target");
+        missing.data.sdd_res = Some(vec![0x08, 0x11, 0x22, 0x33]);
+        missing.data.sel_res = Some(vec![0x20]);
+        match nfca_params_from_local(&missing) {
+            Err(DriverError::Other(message)) => assert_eq!(message, "sens_res is required"),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected error for missing sens_res"),
+        }
+
+        let mut invalid = LocalTarget::new("106A").expect("local target");
+        invalid.data.sens_res = Some(vec![0x04, 0x00]);
+        invalid.data.sdd_res = Some(vec![0x09, 0x11, 0x22, 0x33]);
+        invalid.data.sel_res = Some(vec![0x20]);
+        match nfca_params_from_local(&invalid) {
+            Err(DriverError::Other(message)) => assert_eq!(message, "sdd_res[0] must be 0x08"),
+            Err(other) => panic!("expected DriverError::Other, got {other}"),
+            Ok(_) => panic!("expected error for invalid sdd_res"),
+        }
+    }
+}

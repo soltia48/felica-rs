@@ -316,3 +316,33 @@ fn build_sensf_req(system_code: u16, request_code: u8, time_slots: u8) -> Vec<u8
     // First byte 0x00 is the Polling command code (SENSF_REQ command)
     vec![0x00, sc_bytes[0], sc_bytes[1], request_code, time_slots]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brty_code_maps_supported_values() {
+        assert_eq!(brty_code("106A").expect("106A should map"), 0);
+        assert_eq!(brty_code("212F").expect("212F should map"), 1);
+        assert_eq!(brty_code("424F").expect("424F should map"), 2);
+        assert_eq!(brty_code("106B").expect("106B should map"), 3);
+    }
+
+    #[test]
+    fn brty_code_rejects_unsupported_values() {
+        match brty_code("848B") {
+            Err(DriverError::UnsupportedTarget(err)) => {
+                assert_eq!(err.0, "unsupported bitrate 848B");
+            }
+            Err(other) => panic!("expected UnsupportedTarget error, got {other}"),
+            Ok(code) => panic!("expected error, got code {code}"),
+        }
+    }
+
+    #[test]
+    fn build_sensf_req_uses_big_endian_system_code_order() {
+        let request = build_sensf_req(0xFE00, 0x01, 0x0F);
+        assert_eq!(request, vec![0x00, 0xFE, 0x00, 0x01, 0x0F]);
+    }
+}

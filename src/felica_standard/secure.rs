@@ -460,3 +460,258 @@ impl AuthenticationContext {
         encrypt_3des_block(random_2, &self.alpha, &self.l)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_protocol_error_contains<T>(result: Result<T, FelicaStandardError>, expected: &str) {
+        match result {
+            Err(FelicaStandardError::Protocol(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "unexpected protocol error message: {message}"
+                );
+            }
+            Err(other) => panic!("expected protocol error, got {other}"),
+            Ok(_) => panic!("expected protocol error, got Ok"),
+        }
+    }
+
+    fn assert_secure_session_error_contains<T>(
+        result: Result<T, FelicaStandardError>,
+        expected: &str,
+    ) {
+        match result {
+            Err(FelicaStandardError::SecureSession(message)) => {
+                assert!(
+                    message.contains(expected),
+                    "unexpected secure-session error message: {message}"
+                );
+            }
+            Err(other) => panic!("expected secure-session error, got {other}"),
+            Ok(_) => panic!("expected secure-session error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn authenticated_context_increment_and_overflow() {
+        let mut context = AuthenticatedContext::new(
+            u16::MAX - 1,
+            [1, 2, 3, 4, 5, 6],
+            [7, 8, 9, 10, 11, 12, 13, 14],
+        );
+        assert_eq!(context.increment_transaction_number().unwrap(), u16::MAX);
+        assert_secure_session_error_contains(
+            context.increment_transaction_number(),
+            "transaction number overflow",
+        );
+    }
+
+    #[test]
+    fn build_authentication2_payload_layout() {
+        let tx_number = 0x3412;
+        let tx_id = [1, 2, 3, 4, 5, 6];
+        let idi = [0x11; 8];
+        let pmi = [0x22; 8];
+
+        let payload = build_authentication2_payload(tx_number, &tx_id, &idi, &pmi);
+        assert_eq!(payload.len(), 24);
+        assert_eq!(&payload[0..2], &tx_number.to_le_bytes());
+        assert_eq!(&payload[2..8], &tx_id);
+        assert_eq!(&payload[8..16], &idi);
+        assert_eq!(&payload[16..24], &pmi);
+    }
+
+    #[test]
+    fn secure_command_context_capture_and_build_payload() {
+        let mut context = AuthenticatedContext::new(
+            0x0020,
+            [1, 2, 3, 4, 5, 6],
+            [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7],
+        );
+
+        let captured = SecureCommandContext::capture(&mut context).unwrap();
+        assert_eq!(context.transaction_number(), 0x0021u16);
+        assert_eq!(captured.transaction_number, 0x0021);
+        assert_eq!(captured.transaction_id, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            captured.transaction_key,
+            [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7]
+        );
+
+        let payload = captured.build_payload(&[0x55, 0x66, 0x77]);
+        assert_eq!(&payload[0..2], &0x0021u16.to_le_bytes());
+        assert_eq!(&payload[2..8], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(&payload[8..], &[0x55, 0x66, 0x77]);
+    }
+
+    #[test]
+    fn secure_command_encrypt_and_decrypt_round_trip() {
+        let mut context = AuthenticatedContext::new(
+            0,
+            [1, 2, 3, 4, 5, 6],
+            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+        );
+        let captured = SecureCommandContext::capture(&mut context).unwrap();
+        let payload = captured.build_payload(&[0xAA, 0xBB, 0xCC]);
+        let padded_payload = pad_to_des_block_size(payload.clone());
+
+        let encrypted = captured.encrypt_request(0x42, payload).unwrap();
+        let decrypted = captured.decrypt_response(&encrypted).unwrap();
+        assert!(check_packet_mac(&decrypted, 0x42));
+        assert_eq!(
+            &decrypted[..padded_payload.len()],
+            padded_payload.as_slice()
+        );
+    }
+
+    #[test]
+    fn secure_command_encrypt_rejects_too_long_payload() {
+        let mut context = AuthenticatedContext::new(
+            0,
+            [1, 2, 3, 4, 5, 6],
+            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+        );
+        let captured = SecureCommandContext::capture(&mut context).unwrap();
+        let payload = vec![0xAB; 248];
+        assert_protocol_error_contains(
+            captured.encrypt_request(0x42, payload),
+            "exceeds maximum frame length",
+        );
+    }
+
+    #[test]
+    fn encrypt_and_decrypt_des_cbc_round_trip() {
+        let key = [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
+        let data = [0x10u8; 16];
+        let encrypted = encrypt_des_cbc_zero_iv(&data, &key).unwrap();
+        let decrypted = decrypt_des_cbc_zero_iv(&encrypted, &key).unwrap();
+        assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn des_cbc_rejects_non_aligned_payload() {
+        let key = [0u8; 8];
+        assert!(
+            encrypt_des_cbc_zero_iv(&[1, 2, 3], &key)
+                .unwrap_err()
+                .contains("multiple of 8")
+        );
+        assert!(
+            decrypt_des_cbc_zero_iv(&[1, 2, 3], &key)
+                .unwrap_err()
+                .contains("multiple of 8")
+        );
+    }
+
+    #[test]
+    fn strip_secure_padding_only_when_valid() {
+        let mut valid = vec![1, 2, 3, 2, 2];
+        strip_secure_padding(&mut valid);
+        assert_eq!(valid, vec![1, 2, 3]);
+
+        let mut invalid_value = vec![1, 2, 3, 1, 2];
+        strip_secure_padding(&mut invalid_value);
+        assert_eq!(invalid_value, vec![1, 2, 3, 1, 2]);
+
+        let mut invalid_len = vec![1, 2, 3, 8];
+        strip_secure_padding(&mut invalid_len);
+        assert_eq!(invalid_len, vec![1, 2, 3, 8]);
+    }
+
+    #[test]
+    fn calculate_command_mac_rejects_bad_inputs() {
+        assert!(
+            calculate_command_mac(0x10, &[1, 2, 3])
+                .unwrap_err()
+                .contains("multiple of 8")
+        );
+        assert!(
+            calculate_command_mac(0x10, &[0xAA; 248])
+                .unwrap_err()
+                .contains("exceeds maximum frame length")
+        );
+    }
+
+    #[test]
+    fn build_secure_response_frame_and_parse_round_trip() {
+        let response_code = 0x33;
+        let tx_number = 0x2211;
+        let tx_id = [1, 2, 3, 4, 5, 6];
+        let key = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        let response_payload = [0xAA, 0xBB, 0xCC];
+
+        let frame =
+            build_secure_response_frame(response_code, tx_number, &tx_id, &key, &response_payload)
+                .expect("failed to build secure response frame");
+        assert_eq!(frame[0] as usize, frame.len());
+        assert_eq!(frame[1], response_code);
+
+        let decrypted = decrypt_des_cbc_zero_iv(&frame[2..], &key).unwrap();
+        assert!(check_packet_mac(&decrypted, response_code));
+
+        let parsed = SecureResponse::parse(&decrypted, response_code).unwrap();
+        assert_eq!(parsed.header.transaction_number, tx_number);
+        assert_eq!(parsed.header.transaction_id, tx_id);
+        assert_eq!(&parsed.payload[..response_payload.len()], &response_payload);
+
+        let tampered = decrypted[..decrypted.len() - 1].to_vec();
+        assert!(!check_packet_mac(&tampered, response_code));
+        assert_secure_session_error_contains(
+            SecureResponse::parse(&decrypted, response_code.wrapping_add(1)),
+            "MAC verification failed",
+        );
+    }
+
+    #[test]
+    fn secure_response_header_apply_validates_and_updates_context() {
+        let mut context = AuthenticatedContext::new(
+            10,
+            [1, 2, 3, 4, 5, 6],
+            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+        );
+        let header_ok = SecureResponseHeader::new(11, [1, 2, 3, 4, 5, 6]);
+        header_ok.apply(&mut context).unwrap();
+        assert_eq!(context.transaction_number(), 11);
+
+        let header_stale = SecureResponseHeader::new(11, [1, 2, 3, 4, 5, 6]);
+        assert_secure_session_error_contains(header_stale.apply(&mut context), "did not advance");
+
+        let header_bad_id = SecureResponseHeader::new(12, [9, 9, 9, 9, 9, 9]);
+        assert_secure_session_error_contains(header_bad_id.apply(&mut context), "ID mismatch");
+    }
+
+    #[test]
+    fn authentication2_response_decrypt_success_and_failures() {
+        let key = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        let raw_payload = vec![0x01, 0x02, 0x03];
+        let expected_payload = pad_to_des_block_size(raw_payload.clone());
+        let encrypted = encrypt_authentication2_payload(&raw_payload, &key)
+            .expect("failed to encrypt authentication2 payload");
+
+        let response = Authentication2Response {
+            encrypted_payload: encrypted.clone(),
+        };
+        let decrypted = response.decrypt_payload(&key).unwrap();
+        assert_eq!(decrypted, expected_payload);
+
+        let mut tampered = encrypted.clone();
+        tampered[0] ^= 0xFF;
+        let tampered_response = Authentication2Response {
+            encrypted_payload: tampered,
+        };
+        assert_secure_session_error_contains(
+            tampered_response.decrypt_payload(&key),
+            "MAC verification failed",
+        );
+
+        let malformed = Authentication2Response {
+            encrypted_payload: vec![0x01, 0x02, 0x03],
+        };
+        assert_secure_session_error_contains(
+            malformed.decrypt_payload(&key),
+            "multiple of 8 bytes",
+        );
+    }
+}
