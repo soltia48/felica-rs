@@ -3,7 +3,8 @@ use super::error::FelicaStandardError;
 use super::response::FelicaStandardResponse;
 use super::secure::{
     AuthenticatedContext, Authentication2Response, Authentication2V2Response,
-    AuthenticationContext, SecureCommandContext, SecureResponse, encrypt_des_cbc_zero_iv,
+    AuthenticationContext, DecryptedSecureResponse, SecureCommandContext, SecureSessionCredentials,
+    SecureSessionScheme, generate_registration_package_des,
 };
 use super::types::{
     BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
@@ -866,7 +867,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let mut issue_parameter = [0u8; 8];
         issue_parameter.copy_from_slice(&payload[16..24]);
 
-        let context = AuthenticatedContext::new(transaction_number, transaction_id, random_2);
+        let context = AuthenticatedContext::new(
+            transaction_number,
+            transaction_id,
+            SecureSessionCredentials::Des(random_2),
+        );
         self.authenticated_context = Some(context);
 
         Ok(MutualAuthenticationResult {
@@ -877,6 +882,18 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
     pub fn authenticated_context(&self) -> Option<&AuthenticatedContext> {
         self.authenticated_context.as_ref()
+    }
+
+    pub fn set_authenticated_context(&mut self, context: AuthenticatedContext) {
+        self.authenticated_context = Some(context);
+    }
+
+    pub fn clear_authenticated_context(&mut self) {
+        self.authenticated_context = None;
+    }
+
+    pub fn authenticated_scheme(&self) -> Option<SecureSessionScheme> {
+        self.authenticated_context.as_ref().map(|ctx| ctx.scheme())
     }
 
     fn secure_context_mut(&mut self) -> Result<&mut AuthenticatedContext, FelicaStandardError> {
@@ -895,12 +912,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             let session = self.secure_context_mut()?;
             SecureCommandContext::capture(session)?
         };
-        let payload = command_context.build_payload(command_payload);
-        let encrypted = command_context.encrypt_request(command_code, payload)?;
+        let payload = command_context.build_secure_payload(command_payload);
+        let encrypted = command_context.encrypt_command(command_code, payload)?;
         let encrypted_response =
             self.send_encrypted_command(command_code, &encrypted, timeout_ms)?;
-        let decrypted_response = command_context.decrypt_response(&encrypted_response)?;
-        self.process_encrypted_response(command_code, &decrypted_response)
+        let decrypted_response =
+            command_context.decrypt_response(command_code + 1, &encrypted_response)?;
+        self.process_encrypted_response(decrypted_response)
     }
 
     fn send_encrypted_command(
@@ -936,16 +954,16 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
     fn process_encrypted_response(
         &mut self,
-        command_code: u8,
-        decrypted_response: &[u8],
+        decrypted_response: DecryptedSecureResponse,
     ) -> Result<Vec<u8>, FelicaStandardError> {
-        let SecureResponse { header, payload } =
-            SecureResponse::parse(decrypted_response, command_code + 1)?;
-        {
-            let context = self.secure_context_mut()?;
-            header.apply(context)?;
+        let context = self.secure_context_mut()?;
+        if decrypted_response.transaction_number <= context.transaction_number() {
+            return Err(FelicaStandardError::SecureSession(
+                "secure response transaction number did not advance".into(),
+            ));
         }
-        Ok(payload.to_vec())
+        context.set_transaction_number(decrypted_response.transaction_number);
+        Ok(decrypted_response.payload)
     }
 
     pub fn read(
@@ -1174,7 +1192,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         package_plain.extend_from_slice(area0_key);
         package_plain.extend_from_slice(&[0u8; 4]);
 
-        let package = generate_registration_package(&package_plain, package_key)?;
+        let package = generate_registration_package_des(&package_plain, package_key)?;
 
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
@@ -1235,7 +1253,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         package_plain.extend_from_slice(&key_version.to_le_bytes());
         package_plain.extend_from_slice(area_key);
 
-        let package = generate_registration_package(&package_plain, package_key)?;
+        let package = generate_registration_package_des(&package_plain, package_key)?;
 
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
@@ -1278,7 +1296,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         package_plain.extend_from_slice(&key_version.to_le_bytes());
         package_plain.extend_from_slice(service_key);
 
-        let package = generate_registration_package(&package_plain, package_key)?;
+        let package = generate_registration_package_des(&package_plain, package_key)?;
 
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(
@@ -1388,37 +1406,6 @@ fn ensure_block_data_length(
     }
 }
 
-fn generate_registration_package(
-    package_plain: &[u8],
-    package_key: &[u8; DES_BLOCK_SIZE],
-) -> Result<Vec<u8>, FelicaStandardError> {
-    if package_plain.is_empty() || !package_plain.len().is_multiple_of(DES_BLOCK_SIZE) {
-        return Err(FelicaStandardError::InvalidParameter(
-            "registration package must be multiple of 8 bytes".into(),
-        ));
-    }
-
-    let mut mac_key = [0u8; DES_BLOCK_SIZE];
-    for (dst, src) in mac_key.iter_mut().zip(package_key.iter()) {
-        *dst = *src ^ 0xFF;
-    }
-
-    let encrypted_plain =
-        encrypt_des_cbc_zero_iv(package_plain, &mac_key).map_err(FelicaStandardError::Protocol)?;
-    if encrypted_plain.len() < DES_BLOCK_SIZE {
-        return Err(FelicaStandardError::Protocol(
-            "registration package MAC calculation failed".into(),
-        ));
-    }
-
-    let mac = &encrypted_plain[encrypted_plain.len() - DES_BLOCK_SIZE..];
-    let mut package_with_mac = Vec::with_capacity(package_plain.len() + DES_BLOCK_SIZE);
-    package_with_mac.extend_from_slice(package_plain);
-    package_with_mac.extend_from_slice(mac);
-
-    encrypt_des_cbc_zero_iv(&package_with_mac, package_key).map_err(FelicaStandardError::Protocol)
-}
-
 fn unexpected_response(command: &'static str) -> FelicaStandardError {
     FelicaStandardError::Protocol(format!("unexpected response for {command} command"))
 }
@@ -1427,7 +1414,10 @@ fn unexpected_response(command: &'static str) -> FelicaStandardError {
 mod tests {
     use super::*;
     use crate::driver::errors::DriverError;
-    use crate::felica_standard::secure::build_secure_response_frame;
+    use crate::felica_standard::secure::{
+        build_secure_response_frame_des, build_secure_response_frame_v2_aes128,
+        generate_registration_package_des,
+    };
     use std::collections::VecDeque;
 
     struct MockDriver {
@@ -1543,11 +1533,12 @@ mod tests {
         );
 
         assert_invalid_parameter_contains(
-            generate_registration_package(&[0x00; 10], &[0x11; DES_BLOCK_SIZE]),
+            generate_registration_package_des(&[0x00; 10], &[0x11; DES_BLOCK_SIZE]),
             "multiple of 8 bytes",
         );
 
-        let package = generate_registration_package(&[0xAB; 16], &[0x11; DES_BLOCK_SIZE]).unwrap();
+        let package =
+            generate_registration_package_des(&[0xAB; 16], &[0x11; DES_BLOCK_SIZE]).unwrap();
         assert_eq!(package.len(), 24);
     }
 
@@ -1646,7 +1637,7 @@ mod tests {
         .to_secure_payload()
         .unwrap();
 
-        let response_frame = build_secure_response_frame(
+        let response_frame = build_secure_response_frame_des(
             super::super::constants::READ_COMMAND_CODE + 1,
             3,
             &tx_id,
@@ -1658,7 +1649,11 @@ mod tests {
 
         let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
             .expect("polling should succeed");
-        felica.authenticated_context = Some(AuthenticatedContext::new(1, tx_id, tx_key));
+        felica.authenticated_context = Some(AuthenticatedContext::new(
+            1,
+            tx_id,
+            SecureSessionCredentials::Des(tx_key),
+        ));
 
         let blocks = felica
             .read(&[BlockListElement::new(0x0001, 0, 0)])
@@ -1667,6 +1662,59 @@ mod tests {
         assert_eq!(
             felica.authenticated_context().unwrap().transaction_number(),
             3
+        );
+        assert_eq!(
+            felica.authenticated_scheme(),
+            Some(SecureSessionScheme::Des)
+        );
+    }
+
+    #[test]
+    fn secure_read_round_trip_with_mock_driver_v2() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let tx_id = [1, 2, 3, 4, 5, 6];
+        let tx_key = [0x21u8; 16];
+        let block = [0xCD; BLOCK_SIZE];
+
+        let secure_payload = FelicaStandardResponse::Read {
+            status_flag1: 0x00,
+            status_flag2: 0x00,
+            result: Some(super::super::types::ReadResult {
+                blocks: vec![block],
+            }),
+        }
+        .to_secure_payload()
+        .unwrap();
+
+        let response_frame = build_secure_response_frame_v2_aes128(
+            super::super::constants::READ_COMMAND_CODE + 1,
+            3,
+            &tx_id,
+            &tx_key,
+            &secure_payload,
+        )
+        .expect("secure response frame build should succeed");
+        driver.queue_response(response_frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        felica.set_authenticated_context(AuthenticatedContext::new(
+            1,
+            tx_id,
+            SecureSessionCredentials::Aes128(tx_key),
+        ));
+
+        let blocks = felica
+            .read(&[BlockListElement::new(0x0001, 0, 0)])
+            .expect("secure read should succeed");
+        assert_eq!(blocks, vec![block]);
+        assert_eq!(
+            felica.authenticated_context().unwrap().transaction_number(),
+            3
+        );
+        assert_eq!(
+            felica.authenticated_scheme(),
+            Some(SecureSessionScheme::Aes128)
         );
     }
 
@@ -1686,13 +1734,59 @@ mod tests {
         felica.authenticated_context = Some(AuthenticatedContext::new(
             1,
             [1, 2, 3, 4, 5, 6],
-            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+            SecureSessionCredentials::Des([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]),
         ));
 
         assert_protocol_error_contains(
             felica.read(&[BlockListElement::new(0x0001, 0, 0)]),
             "length field does not match payload",
         );
+    }
+
+    #[test]
+    fn authentication1_v2_parses_v2_response() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let frame = FelicaStandardResponse::Authentication1V2 {
+            idm: sample_idm(),
+            challenge_1b: [0x11; 16],
+            challenge_2a: [0x22; 16],
+            challenge_3c: [0x33; 4],
+        }
+        .to_frame()
+        .unwrap();
+        driver.queue_response(frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        let nodes = [0x0100u16, 0x0101u16];
+        let challenge_1a = [0x44; 16];
+
+        let result = felica
+            .authentication1_v2(0x00, &nodes, &challenge_1a)
+            .expect("authentication1_v2 should succeed");
+        assert_eq!(result.0, [0x11; 16]);
+        assert_eq!(result.1, [0x22; 16]);
+        assert_eq!(result.2, [0x33; 4]);
+    }
+
+    #[test]
+    fn authentication2_v2_reports_scheme() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let frame = FelicaStandardResponse::Authentication2V2(Authentication2V2Response {
+            encrypted_payload: vec![0xAA; 8],
+        })
+        .to_frame()
+        .unwrap();
+        driver.queue_response(frame);
+
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        let challenge_2b = [0x55; 16];
+
+        let response = felica
+            .authentication2_v2(&challenge_2b)
+            .expect("authentication2_v2 should succeed");
+        assert_eq!(response.scheme(), SecureSessionScheme::Aes128);
     }
 
     #[test]

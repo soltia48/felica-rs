@@ -24,6 +24,15 @@ pub const BLOCK_SIZE: usize = 16;
 /// DES block size in bytes.
 pub const DES_BLOCK_SIZE: usize = 8;
 
+/// DES MAC size in bytes.
+pub const DES_MAC_SIZE: usize = 8;
+
+/// AES-128 block size in bytes.
+pub const V2_AES128_BLOCK_SIZE: usize = 16;
+
+/// AES-128 MAC size in bytes for FeliCa Standard v2 secure messaging.
+pub const V2_AES128_MAC_SIZE: usize = 8;
+
 // Standard command codes
 /// Polling command code.
 pub const POLLING_COMMAND_CODE: u8 = 0x00;
@@ -242,6 +251,9 @@ mod tests {
         assert_eq!(IDM_LEN, 8);
         assert_eq!(BLOCK_SIZE, 16);
         assert_eq!(DES_BLOCK_SIZE, 8);
+        assert_eq!(DES_MAC_SIZE, 8);
+        assert_eq!(V2_AES128_BLOCK_SIZE, 16);
+        assert_eq!(V2_AES128_MAC_SIZE, 8);
         assert!(MAX_SERVICE_CODES >= MAX_RW_SERVICE_CODES);
         assert!(MAX_BLOCK_LIST_LEN >= MAX_SERVICE_CODES);
         assert!(MAX_NODE_CODES >= MAX_NODE_PROPERTY_CODES);

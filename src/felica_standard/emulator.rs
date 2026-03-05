@@ -1,8 +1,8 @@
 use super::command::{is_register_command, is_secure_command_code};
 use super::secure::{
-    AuthenticationContext, build_authentication2_payload, build_secure_response_frame,
-    check_packet_mac, decrypt_des_cbc_zero_iv, encrypt_authentication2_payload,
-    generate_service_keys, strip_secure_padding,
+    AuthenticationContext, build_authentication2_payload, build_secure_response_frame_des,
+    check_packet_mac_des, decrypt_des_cbc_zero_iv, encrypt_authentication2_payload,
+    generate_service_keys_des, strip_secure_padding_des,
 };
 use super::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
@@ -650,7 +650,8 @@ impl EmulatedSystem {
             service_codes.push(code);
         }
 
-        let (group_key, user_key) = generate_service_keys(&system_key, &area_keys, &service_keys);
+        let (group_key, user_key) =
+            generate_service_keys_des(&system_key, &area_keys, &service_keys);
         let context = AuthenticationContext::new(&idm, &group_key, &user_key);
         let random_1 = context.decrypt_challenge1a(&challenge_1a);
         let mut random_2 = [0u8; 8];
@@ -808,7 +809,7 @@ impl EmulatedSystem {
             )
         };
         let decrypted = decrypt_des_cbc_zero_iv(encrypted_payload, &transaction_key).ok()?;
-        if !check_packet_mac(&decrypted, command_code) {
+        if !check_packet_mac_des(&decrypted, command_code) {
             return None;
         }
         if decrypted.len() < DES_BLOCK_SIZE {
@@ -830,7 +831,7 @@ impl EmulatedSystem {
         let response_transaction_number = transaction_number.checked_add(1)?;
 
         let mut command_payload = payload[8..].to_vec();
-        strip_secure_padding(&mut command_payload);
+        strip_secure_padding_des(&mut command_payload);
         let command =
             FelicaStandardCommand::parse_secure_payload(command_code, &command_payload).ok()?;
 
@@ -868,7 +869,7 @@ impl EmulatedSystem {
         let response_payload = response.to_secure_payload().ok()?;
 
         let response_code = command_code.wrapping_add(1);
-        let frame = build_secure_response_frame(
+        let frame = build_secure_response_frame_des(
             response_code,
             response_transaction_number,
             &transaction_id,

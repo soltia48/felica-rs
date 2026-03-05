@@ -22,7 +22,7 @@
 use hex::encode;
 use nfc_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, SearchServiceCodeResult,
-    ServiceCode, generate_service_keys,
+    ServiceCode, generate_service_keys_des,
 };
 use nfc_rs::{Reader, ReaderPreference, RemoteDriver, open_reader};
 use serde::{Deserialize, Serialize};
@@ -1012,7 +1012,11 @@ fn derive_service_keys_for_auth(
         .ok_or_else(|| format!("missing service key {}", hex_u16(service_code.raw())))?;
 
     let service_keys = [*service_key];
-    Ok(generate_service_keys(system_key, &area_keys, &service_keys))
+    Ok(generate_service_keys_des(
+        system_key,
+        &area_keys,
+        &service_keys,
+    ))
 }
 
 fn normalize_area_path_for_auth(area_codes: &[u16]) -> Vec<u16> {

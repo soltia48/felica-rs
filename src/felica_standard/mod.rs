@@ -45,7 +45,9 @@ pub use emulator::{
 pub use error::FelicaStandardError;
 pub use response::FelicaStandardResponse;
 pub use secure::{
-    AuthenticatedContext, Authentication2Response, Authentication2V2Response, generate_service_keys,
+    AuthenticatedContext, Authentication2Response, Authentication2V2Response,
+    SecureSessionCredentials, SecureSessionCredentialsRef, SecureSessionScheme,
+    generate_service_keys_des,
 };
 pub use type3::Type3TagPollingResult;
 pub use types::{

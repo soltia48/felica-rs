@@ -24,7 +24,7 @@ use encoding_rs::SHIFT_JIS;
 use hex::encode;
 use nfc_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, ServiceCode,
-    generate_service_keys,
+    generate_service_keys_des,
 };
 use nfc_rs::{ReaderPreference, RemoteDriver, open_reader};
 use serde::Deserialize;
@@ -606,7 +606,11 @@ fn derive_service_keys(
         }
     }
 
-    Some(generate_service_keys(system_key, &area_keys, &service_keys))
+    Some(generate_service_keys_des(
+        system_key,
+        &area_keys,
+        &service_keys,
+    ))
 }
 
 fn print_section(title: &str) {

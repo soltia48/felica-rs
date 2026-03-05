@@ -1,6 +1,28 @@
-use super::{DES_BLOCK_SIZE, FelicaStandardError, frame_with_length_prefix};
-use des::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
+use super::{
+    DES_BLOCK_SIZE, DES_MAC_SIZE, FelicaStandardError, V2_AES128_BLOCK_SIZE, V2_AES128_MAC_SIZE,
+    frame_with_length_prefix,
+};
+use aes::Aes128;
+use cbc::{Decryptor as CbcDecryptor, Encryptor as CbcEncryptor};
+use des::cipher::{
+    BlockDecrypt, BlockDecryptMut, BlockEncrypt, BlockEncryptMut, KeyInit, KeyIvInit, StreamCipher,
+    block_padding::NoPadding, generic_array::GenericArray,
+};
 use des::{Des, TdesEde3};
+use ofb::Ofb;
+
+const TRANSACTION_NUMBER_SIZE: usize = 2;
+const TRANSACTION_ID_SIZE: usize = 6;
+const DES_SECURE_HEADER_SIZE: usize = TRANSACTION_NUMBER_SIZE + TRANSACTION_ID_SIZE;
+const AES128_V2_RESPONSE_MARKERS: [u8; 3] = [0x00, 0x01, 0x02];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecureSessionScheme {
+    /// FeliCa Standard secure messaging (DES/3DES).
+    Des,
+    /// FeliCa Standard v2 secure messaging (AES).
+    Aes128,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authentication2Response {
@@ -13,19 +35,65 @@ pub struct Authentication2V2Response {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecureSessionCredentials {
+    Des([u8; 8]),
+    Aes128([u8; 16]),
+}
+
+impl SecureSessionCredentials {
+    pub fn scheme(self) -> SecureSessionScheme {
+        match self {
+            Self::Des(_) => SecureSessionScheme::Des,
+            Self::Aes128(_) => SecureSessionScheme::Aes128,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecureSessionCredentialsRef<'a> {
+    Des(&'a [u8; 8]),
+    Aes128(&'a [u8; 16]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthenticatedContext {
     transaction_number: u16,
     transaction_id: [u8; 6],
-    transaction_key: [u8; 8],
+    credentials: SecureSessionCredentials,
 }
 
 impl AuthenticatedContext {
-    pub fn new(transaction_number: u16, transaction_id: [u8; 6], transaction_key: [u8; 8]) -> Self {
+    pub fn new(
+        transaction_number: u16,
+        transaction_id: [u8; 6],
+        credentials: SecureSessionCredentials,
+    ) -> Self {
         Self {
             transaction_number,
             transaction_id,
-            transaction_key,
+            credentials,
         }
+    }
+
+    pub fn scheme(&self) -> SecureSessionScheme {
+        self.credentials.scheme()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ensure_scheme(
+        &self,
+        expected: SecureSessionScheme,
+    ) -> Result<(), FelicaStandardError> {
+        if self.scheme() != expected {
+            let label = match expected {
+                SecureSessionScheme::Des => "DES",
+                SecureSessionScheme::Aes128 => "AES",
+            };
+            return Err(FelicaStandardError::SecureSession(format!(
+                "authenticated secure session scheme is not {label}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn transaction_number(&self) -> u16 {
@@ -36,8 +104,11 @@ impl AuthenticatedContext {
         &self.transaction_id
     }
 
-    pub fn transaction_key(&self) -> &[u8; 8] {
-        &self.transaction_key
+    pub fn credentials(&self) -> SecureSessionCredentialsRef<'_> {
+        match &self.credentials {
+            SecureSessionCredentials::Des(key) => SecureSessionCredentialsRef::Des(key),
+            SecureSessionCredentials::Aes128(key) => SecureSessionCredentialsRef::Aes128(key),
+        }
     }
 
     pub fn increment_transaction_number(&mut self) -> Result<u16, FelicaStandardError> {
@@ -61,7 +132,7 @@ pub(crate) fn build_authentication2_payload(
     idi: &[u8; 8],
     pmi: &[u8; 8],
 ) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(24);
+    let mut payload = Vec::with_capacity(TRANSACTION_NUMBER_SIZE + TRANSACTION_ID_SIZE + 8 + 8);
     payload.extend_from_slice(&transaction_number.to_le_bytes());
     payload.extend_from_slice(transaction_id);
     payload.extend_from_slice(idi);
@@ -74,7 +145,7 @@ pub(crate) fn encrypt_authentication2_payload(
     session_key: &[u8; 8],
 ) -> Option<Vec<u8>> {
     let mut padded = pad_to_des_block_size(payload.to_vec());
-    let mac = calculate_command_mac(0x13, &padded).ok()?;
+    let mac = calculate_command_mac_des(0x13, &padded).ok()?;
     padded.extend_from_slice(&mac);
     encrypt_des_cbc_zero_iv(&padded, session_key).ok()
 }
@@ -82,7 +153,7 @@ pub(crate) fn encrypt_authentication2_payload(
 pub(crate) struct SecureCommandContext {
     transaction_number: u16,
     transaction_id: [u8; 6],
-    transaction_key: [u8; 8],
+    credentials: SecureSessionCredentials,
 }
 
 impl SecureCommandContext {
@@ -90,40 +161,78 @@ impl SecureCommandContext {
         let transaction_number = context.increment_transaction_number()?;
         let mut transaction_id = [0u8; 6];
         transaction_id.copy_from_slice(context.transaction_id());
-        let mut transaction_key = [0u8; 8];
-        transaction_key.copy_from_slice(context.transaction_key());
+        let credentials = context.credentials;
         Ok(Self {
             transaction_number,
             transaction_id,
-            transaction_key,
+            credentials,
         })
     }
 
-    pub(crate) fn build_payload(&self, command_payload: &[u8]) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(8 + command_payload.len());
+    pub(crate) fn build_payload_des(&self, command_payload: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(DES_SECURE_HEADER_SIZE + command_payload.len());
         payload.extend_from_slice(&self.transaction_number.to_le_bytes());
         payload.extend_from_slice(&self.transaction_id);
         payload.extend_from_slice(command_payload);
         payload
     }
 
-    pub(crate) fn encrypt_request(
+    pub(crate) fn build_secure_payload(&self, command_payload: &[u8]) -> Vec<u8> {
+        match self.credentials.scheme() {
+            SecureSessionScheme::Des => self.build_payload_des(command_payload),
+            SecureSessionScheme::Aes128 => command_payload.to_vec(),
+        }
+    }
+
+    fn transaction_counter_bytes(&self) -> [u8; 2] {
+        self.transaction_number.to_le_bytes()
+    }
+
+    pub(crate) fn encrypt_command(
         &self,
         command_code: u8,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, FelicaStandardError> {
-        let padded_payload = pad_to_des_block_size(payload);
-        let mac = calculate_command_mac(command_code, &padded_payload)
-            .map_err(FelicaStandardError::Protocol)?;
-        let mut command_data = padded_payload;
-        command_data.extend_from_slice(&mac);
-        encrypt_des_cbc_zero_iv(&command_data, &self.transaction_key)
-            .map_err(FelicaStandardError::Protocol)
+        match self.credentials {
+            SecureSessionCredentials::Des(key) => {
+                let padded_payload = pad_to_des_block_size(payload);
+                let mac = calculate_command_mac_des(command_code, &padded_payload)
+                    .map_err(FelicaStandardError::Protocol)?;
+                let mut command_data = padded_payload;
+                command_data.extend_from_slice(&mac);
+                encrypt_des_cbc_zero_iv(&command_data, &key).map_err(FelicaStandardError::Protocol)
+            }
+            SecureSessionCredentials::Aes128(key) => encrypt_secure_request_v2_aes128(
+                command_code,
+                self.transaction_counter_bytes(),
+                &self.transaction_id,
+                &key,
+                &payload,
+            )
+            .map_err(FelicaStandardError::Protocol),
+        }
     }
 
-    pub(crate) fn decrypt_response(&self, data: &[u8]) -> Result<Vec<u8>, FelicaStandardError> {
-        decrypt_des_cbc_zero_iv(data, &self.transaction_key).map_err(FelicaStandardError::Protocol)
+    pub(crate) fn decrypt_response(
+        &self,
+        response_code: u8,
+        data: &[u8],
+    ) -> Result<DecryptedSecureResponse, FelicaStandardError> {
+        match self.credentials {
+            SecureSessionCredentials::Des(key) => {
+                decrypt_secure_response_des(response_code, &self.transaction_id, &key, data)
+            }
+            SecureSessionCredentials::Aes128(key) => {
+                decrypt_secure_response_v2_aes128(response_code, &self.transaction_id, &key, data)
+                    .map_err(FelicaStandardError::Protocol)
+            }
+        }
     }
+}
+
+pub(crate) struct DecryptedSecureResponse {
+    pub(crate) transaction_number: u16,
+    pub(crate) payload: Vec<u8>,
 }
 
 pub(crate) struct SecureResponseHeader {
@@ -139,6 +248,7 @@ impl SecureResponseHeader {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn apply(
         &self,
         context: &mut AuthenticatedContext,
@@ -170,74 +280,168 @@ impl<'a> SecureResponse<'a> {
                 "secure response shorter than minimum encrypted payload".into(),
             ));
         }
-        if !check_packet_mac(data, response_code) {
+        if !check_packet_mac_des(data, response_code) {
             return Err(FelicaStandardError::SecureSession(
                 "secure response MAC verification failed".into(),
             ));
         }
-        if data.len() < 8 {
-            return Err(FelicaStandardError::Protocol(
-                "secure response shorter than transaction header".into(),
-            ));
-        }
         let transaction_number = u16::from_le_bytes([data[0], data[1]]);
-        let mut transaction_id = [0u8; 6];
-        transaction_id.copy_from_slice(&data[2..8]);
+        let mut transaction_id = [0u8; TRANSACTION_ID_SIZE];
+        transaction_id.copy_from_slice(&data[TRANSACTION_NUMBER_SIZE..DES_SECURE_HEADER_SIZE]);
         let header = SecureResponseHeader::new(transaction_number, transaction_id);
         Ok(Self {
             header,
-            payload: &data[8..],
+            payload: &data[DES_SECURE_HEADER_SIZE..],
         })
     }
 }
 
 impl Authentication2Response {
+    pub fn scheme(&self) -> SecureSessionScheme {
+        SecureSessionScheme::Des
+    }
+
     pub fn decrypt_payload(&self, session_key: &[u8; 8]) -> Result<Vec<u8>, FelicaStandardError> {
         let plaintext = decrypt_des_cbc_zero_iv(&self.encrypted_payload, session_key)
             .map_err(FelicaStandardError::SecureSession)?;
-        if !check_packet_mac(&plaintext, 0x13) {
+        if !check_packet_mac_des(&plaintext, 0x13) {
             return Err(FelicaStandardError::SecureSession(
                 "authentication2 response MAC verification failed".into(),
             ));
         }
-        if plaintext.len() < 8 {
+        if plaintext.len() < DES_MAC_SIZE {
             return Err(FelicaStandardError::Protocol(
                 "authentication2 response payload too short".into(),
             ));
         }
-        let payload = &plaintext[..plaintext.len() - 8];
+        let payload = &plaintext[..plaintext.len() - DES_MAC_SIZE];
         Ok(payload.to_vec())
     }
 }
 
-fn xor_blocks(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
-    let mut out = [0u8; 8];
-    for i in 0..8 {
+impl Authentication2V2Response {
+    pub fn scheme(&self) -> SecureSessionScheme {
+        SecureSessionScheme::Aes128
+    }
+}
+
+fn decrypt_secure_response_des(
+    response_code: u8,
+    expected_transaction_id: &[u8; 6],
+    key: &[u8; 8],
+    encrypted_data: &[u8],
+) -> Result<DecryptedSecureResponse, FelicaStandardError> {
+    let plaintext =
+        decrypt_des_cbc_zero_iv(encrypted_data, key).map_err(FelicaStandardError::Protocol)?;
+    let parsed = SecureResponse::parse(&plaintext, response_code)?;
+    if parsed.header.transaction_id != *expected_transaction_id {
+        return Err(FelicaStandardError::SecureSession(
+            "secure response transaction ID mismatch".into(),
+        ));
+    }
+    let payload = strip_des_response_mac_and_padding(parsed.payload)?;
+    Ok(DecryptedSecureResponse {
+        transaction_number: parsed.header.transaction_number,
+        payload,
+    })
+}
+
+fn strip_des_response_mac_and_padding(
+    payload_with_mac: &[u8],
+) -> Result<Vec<u8>, FelicaStandardError> {
+    if payload_with_mac.len() < DES_MAC_SIZE {
+        return Err(FelicaStandardError::Protocol(
+            "secure response payload shorter than MAC".into(),
+        ));
+    }
+    let mut payload = payload_with_mac[..payload_with_mac.len() - DES_MAC_SIZE].to_vec();
+    strip_secure_padding_des(&mut payload);
+    Ok(payload)
+}
+
+fn xor_block<const BLOCK_SIZE: usize>(
+    a: &[u8; BLOCK_SIZE],
+    b: &[u8; BLOCK_SIZE],
+) -> [u8; BLOCK_SIZE] {
+    let mut out = [0u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
         out[i] = a[i] ^ b[i];
     }
     out
+}
+
+fn pad_to_block_size_pkcs7(mut data: Vec<u8>, block_size: usize) -> Vec<u8> {
+    let remainder = data.len() % block_size;
+    if remainder != 0 {
+        let pad_len = (block_size - remainder) as u8;
+        for _ in 0..pad_len {
+            data.push(pad_len);
+        }
+    }
+    data
+}
+
+fn strip_padding_pkcs7(data: &mut Vec<u8>, block_size: usize) {
+    let Some(&pad_len) = data.last() else {
+        return;
+    };
+    if pad_len == 0 || pad_len as usize >= block_size {
+        return;
+    }
+    let pad_len = pad_len as usize;
+    if pad_len <= data.len()
+        && data[data.len() - pad_len..]
+            .iter()
+            .all(|&b| b == pad_len as u8)
+    {
+        data.truncate(data.len() - pad_len);
+    }
+}
+
+fn xor_blocks(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
+    xor_block(a, b)
 }
 
 fn des_cipher(key: &[u8; 8]) -> Des {
     Des::new(GenericArray::from_slice(key))
 }
 
-pub(crate) fn encrypt_des_block(data: &[u8; 8], key: &[u8; 8]) -> [u8; 8] {
+fn encrypt_des_block_internal(data: &[u8; DES_BLOCK_SIZE], key: &[u8; DES_BLOCK_SIZE]) -> [u8; 8] {
     let cipher = des_cipher(key);
-    let mut block = GenericArray::clone_from_slice(data);
-    cipher.encrypt_block(&mut block);
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&block);
+    let mut block_array = GenericArray::clone_from_slice(data);
+    cipher.encrypt_block(&mut block_array);
+    let mut out = [0u8; DES_BLOCK_SIZE];
+    out.copy_from_slice(&block_array);
     out
 }
 
-pub(crate) fn decrypt_des_block(data: &[u8; 8], key: &[u8; 8]) -> [u8; 8] {
+fn decrypt_des_block_internal(data: &[u8; DES_BLOCK_SIZE], key: &[u8; DES_BLOCK_SIZE]) -> [u8; 8] {
     let cipher = des_cipher(key);
-    let mut block = GenericArray::clone_from_slice(data);
-    cipher.decrypt_block(&mut block);
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&block);
+    let mut block_array = GenericArray::clone_from_slice(data);
+    cipher.decrypt_block(&mut block_array);
+    let mut out = [0u8; DES_BLOCK_SIZE];
+    out.copy_from_slice(&block_array);
     out
+}
+
+fn encrypt_aes128_block_internal(
+    data: &[u8; V2_AES128_BLOCK_SIZE],
+    key: &[u8; V2_AES128_BLOCK_SIZE],
+) -> [u8; V2_AES128_BLOCK_SIZE] {
+    let cipher = Aes128::new(GenericArray::from_slice(key));
+    let mut block_array = GenericArray::clone_from_slice(data);
+    cipher.encrypt_block(&mut block_array);
+    let mut out = [0u8; V2_AES128_BLOCK_SIZE];
+    out.copy_from_slice(&block_array);
+    out
+}
+
+pub(crate) fn encrypt_des_block(data: &[u8; 8], key: &[u8; 8]) -> [u8; 8] {
+    encrypt_des_block_internal(data, key)
+}
+
+pub(crate) fn decrypt_des_block(data: &[u8; 8], key: &[u8; 8]) -> [u8; 8] {
+    decrypt_des_block_internal(data, key)
 }
 
 fn encrypt_3des_block(data: &[u8; 8], key1: &[u8; 8], key2: &[u8; 8]) -> [u8; 8] {
@@ -270,20 +474,14 @@ pub(crate) fn encrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
     if !data.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("secure command payload length must be multiple of 8 bytes".into());
     }
-    let cipher = des_cipher(key);
-    let mut prev_block = [0u8; DES_BLOCK_SIZE];
-    let mut out = Vec::with_capacity(data.len());
-    for chunk in data.chunks(DES_BLOCK_SIZE) {
-        let mut block = [0u8; DES_BLOCK_SIZE];
-        block.copy_from_slice(chunk);
-        for i in 0..DES_BLOCK_SIZE {
-            block[i] ^= prev_block[i];
-        }
-        let mut block_array = GenericArray::clone_from_slice(&block);
-        cipher.encrypt_block(&mut block_array);
-        out.extend_from_slice(&block_array);
-        prev_block.copy_from_slice(&block_array);
-    }
+    let iv = [0u8; DES_BLOCK_SIZE];
+    let mut out = vec![0u8; data.len()];
+    let encrypted_len = CbcEncryptor::<Des>::new_from_slices(key, &iv)
+        .map_err(|_| "failed to initialize DES-CBC encryptor".to_string())?
+        .encrypt_padded_b2b_mut::<NoPadding>(data, &mut out)
+        .map_err(|_| "secure command payload length must be multiple of 8 bytes".to_string())?
+        .len();
+    out.truncate(encrypted_len);
     Ok(out)
 }
 
@@ -291,51 +489,208 @@ pub(crate) fn decrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
     if !data.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("authentication2 response length must be multiple of 8 bytes".into());
     }
-    let cipher = des_cipher(key);
-    let mut prev_block = [0u8; 8];
-    let mut out = Vec::with_capacity(data.len());
-    for chunk in data.chunks(DES_BLOCK_SIZE) {
-        let mut block = GenericArray::clone_from_slice(chunk);
-        cipher.decrypt_block(&mut block);
-        let mut plain = [0u8; 8];
-        for i in 0..DES_BLOCK_SIZE {
-            plain[i] = block[i] ^ prev_block[i];
-        }
-        out.extend_from_slice(&plain);
-        prev_block.copy_from_slice(chunk);
-    }
+    let iv = [0u8; DES_BLOCK_SIZE];
+    let mut out = vec![0u8; data.len()];
+    let decrypted_len = CbcDecryptor::<Des>::new_from_slices(key, &iv)
+        .map_err(|_| "failed to initialize DES-CBC decryptor".to_string())?
+        .decrypt_padded_b2b_mut::<NoPadding>(data, &mut out)
+        .map_err(|_| "authentication2 response length must be multiple of 8 bytes".to_string())?
+        .len();
+    out.truncate(decrypted_len);
     Ok(out)
 }
 
-fn pad_to_des_block_size(mut data: Vec<u8>) -> Vec<u8> {
-    let remainder = data.len() % DES_BLOCK_SIZE;
-    if remainder != 0 {
-        let pad_len = (DES_BLOCK_SIZE - remainder) as u8;
-        for _ in 0..pad_len {
-            data.push(pad_len);
+fn pad_to_des_block_size(data: Vec<u8>) -> Vec<u8> {
+    pad_to_block_size_pkcs7(data, DES_BLOCK_SIZE)
+}
+
+pub(crate) fn strip_secure_padding_des(data: &mut Vec<u8>) {
+    strip_padding_pkcs7(data, DES_BLOCK_SIZE);
+}
+
+fn ceil_to_multiple(value: usize, block_size: usize) -> usize {
+    value.div_ceil(block_size) * block_size
+}
+
+fn iso7816_pad(partial: &[u8]) -> [u8; V2_AES128_BLOCK_SIZE] {
+    let mut out = [0u8; V2_AES128_BLOCK_SIZE];
+    out[..partial.len()].copy_from_slice(partial);
+    out[partial.len()] = 0x80;
+    out
+}
+
+fn build_initial_vector_v2_aes128(
+    marker: u8,
+    frame_length: u8,
+    code: u8,
+    counter_bytes: [u8; 2],
+    transaction_id: &[u8; 6],
+) -> [u8; V2_AES128_BLOCK_SIZE] {
+    let mut iv = [0u8; V2_AES128_BLOCK_SIZE];
+    iv[0] = marker;
+    iv[1] = frame_length;
+    iv[2] = code;
+    iv[3..5].copy_from_slice(&counter_bytes);
+    iv[5..11].copy_from_slice(transaction_id);
+    iv
+}
+
+fn checked_frame_length_u8(frame_length: usize, context: &str) -> Result<u8, String> {
+    if frame_length > u8::MAX as usize {
+        return Err(context.into());
+    }
+    Ok(frame_length as u8)
+}
+
+fn calculate_mac_v2_aes128(
+    iv: &[u8; V2_AES128_BLOCK_SIZE],
+    payload: &[u8],
+    key: &[u8; V2_AES128_BLOCK_SIZE],
+) -> [u8; V2_AES128_MAC_SIZE] {
+    let mut b0 = [0u8; V2_AES128_BLOCK_SIZE];
+    b0[0] = 0x19;
+    b0[1..14].copy_from_slice(&iv[1..14]);
+    b0[14..16].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+
+    let mut x = encrypt_aes128_block_internal(&b0, key);
+    let full_len = (payload.len() / V2_AES128_BLOCK_SIZE) * V2_AES128_BLOCK_SIZE;
+    for chunk in payload[..full_len].chunks(V2_AES128_BLOCK_SIZE) {
+        let mut block = [0u8; V2_AES128_BLOCK_SIZE];
+        block.copy_from_slice(chunk);
+        x = encrypt_aes128_block_internal(&xor_block(&x, &block), key);
+    }
+    let rem = &payload[full_len..];
+    if !rem.is_empty() {
+        let padded = iso7816_pad(rem);
+        x = encrypt_aes128_block_internal(&xor_block(&x, &padded), key);
+    }
+    let mut mac = [0u8; V2_AES128_MAC_SIZE];
+    mac.copy_from_slice(&x[..V2_AES128_MAC_SIZE]);
+    mac
+}
+
+fn crypt_payload_and_mac_v2_aes128(
+    key: &[u8; V2_AES128_BLOCK_SIZE],
+    iv: &[u8; V2_AES128_BLOCK_SIZE],
+    payload: &[u8],
+    mac: &[u8; V2_AES128_MAC_SIZE],
+) -> Result<(Vec<u8>, [u8; V2_AES128_MAC_SIZE]), String> {
+    let mut stream = Ofb::<Aes128>::new_from_slices(key, iv)
+        .map_err(|_| "failed to initialize AES-128 OFB stream".to_string())?;
+
+    let mut payload_out = payload.to_vec();
+    stream.apply_keystream(&mut payload_out);
+    let aligned = ceil_to_multiple(payload.len(), V2_AES128_BLOCK_SIZE);
+    if aligned > payload.len() {
+        let mut skip = vec![0u8; aligned - payload.len()];
+        stream.apply_keystream(&mut skip);
+    }
+
+    let mut mac_out = *mac;
+    stream.apply_keystream(&mut mac_out);
+    Ok((payload_out, mac_out))
+}
+
+fn encrypt_secure_request_v2_aes128(
+    command_code: u8,
+    counter_bytes: [u8; 2],
+    transaction_id: &[u8; 6],
+    key: &[u8; V2_AES128_BLOCK_SIZE],
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    let frame_length = checked_frame_length_u8(
+        1usize + 1 + TRANSACTION_NUMBER_SIZE + payload.len() + V2_AES128_MAC_SIZE,
+        "secure command payload exceeds maximum frame length",
+    )?;
+    let iv = build_initial_vector_v2_aes128(
+        0x01,
+        frame_length,
+        command_code,
+        counter_bytes,
+        transaction_id,
+    );
+    let mac = calculate_mac_v2_aes128(&iv, payload, key);
+    let (cipher_payload, cipher_mac) = crypt_payload_and_mac_v2_aes128(key, &iv, payload, &mac)?;
+    let mut out = Vec::with_capacity(2 + cipher_payload.len() + V2_AES128_MAC_SIZE);
+    out.extend_from_slice(&counter_bytes);
+    out.extend_from_slice(&cipher_payload);
+    out.extend_from_slice(&cipher_mac);
+    Ok(out)
+}
+
+fn decrypt_secure_response_v2_aes128(
+    response_code: u8,
+    transaction_id: &[u8; 6],
+    key: &[u8; V2_AES128_BLOCK_SIZE],
+    data: &[u8],
+) -> Result<DecryptedSecureResponse, String> {
+    if data.len() < TRANSACTION_NUMBER_SIZE + V2_AES128_MAC_SIZE {
+        return Err("secure response too short for AES v2 framing".into());
+    }
+    let mut counter_bytes = [0u8; 2];
+    counter_bytes.copy_from_slice(&data[..2]);
+    let transaction_number = u16::from_le_bytes(counter_bytes);
+    let cipher_payload = &data[2..data.len() - V2_AES128_MAC_SIZE];
+    let mut cipher_mac = [0u8; V2_AES128_MAC_SIZE];
+    cipher_mac.copy_from_slice(&data[data.len() - V2_AES128_MAC_SIZE..]);
+
+    let frame_length = checked_frame_length_u8(
+        TRANSACTION_NUMBER_SIZE + data.len(),
+        "secure response exceeds maximum frame length",
+    )?;
+    for marker in AES128_V2_RESPONSE_MARKERS {
+        let iv = build_initial_vector_v2_aes128(
+            marker,
+            frame_length,
+            response_code,
+            counter_bytes,
+            transaction_id,
+        );
+        let (payload, mac_plain) =
+            crypt_payload_and_mac_v2_aes128(key, &iv, cipher_payload, &cipher_mac)?;
+        if mac_plain == calculate_mac_v2_aes128(&iv, &payload, key) {
+            return Ok(DecryptedSecureResponse {
+                transaction_number,
+                payload,
+            });
         }
     }
-    data
+    Err("secure response MAC verification failed for AES v2".into())
 }
 
-pub(crate) fn strip_secure_padding(data: &mut Vec<u8>) {
-    let Some(&pad_len) = data.last() else {
-        return;
-    };
-    if pad_len == 0 || pad_len as usize >= DES_BLOCK_SIZE {
-        return;
-    }
-    let pad_len = pad_len as usize;
-    if pad_len <= data.len()
-        && data[data.len() - pad_len..]
-            .iter()
-            .all(|&b| b == pad_len as u8)
-    {
-        data.truncate(data.len() - pad_len);
-    }
+#[allow(dead_code)]
+pub(crate) fn build_secure_response_frame_v2_aes128(
+    response_code: u8,
+    transaction_number: u16,
+    transaction_id: &[u8; 6],
+    transaction_key: &[u8; V2_AES128_BLOCK_SIZE],
+    response_payload: &[u8],
+) -> Option<Vec<u8>> {
+    let frame_length = checked_frame_length_u8(
+        1usize + 1 + TRANSACTION_NUMBER_SIZE + response_payload.len() + V2_AES128_MAC_SIZE,
+        "secure response exceeds maximum frame length",
+    )
+    .ok()?;
+    let counter_bytes = transaction_number.to_le_bytes();
+    let iv = build_initial_vector_v2_aes128(
+        0x00,
+        frame_length,
+        response_code,
+        counter_bytes,
+        transaction_id,
+    );
+    let mac = calculate_mac_v2_aes128(&iv, response_payload, transaction_key);
+    let (cipher_payload, cipher_mac) =
+        crypt_payload_and_mac_v2_aes128(transaction_key, &iv, response_payload, &mac).ok()?;
+    let mut frame_payload = Vec::with_capacity(1 + 2 + cipher_payload.len() + V2_AES128_MAC_SIZE);
+    frame_payload.push(response_code);
+    frame_payload.extend_from_slice(&counter_bytes);
+    frame_payload.extend_from_slice(&cipher_payload);
+    frame_payload.extend_from_slice(&cipher_mac);
+    Some(frame_with_length_prefix(&frame_payload))
 }
 
-pub fn generate_service_keys(
+pub fn generate_service_keys_des(
     system_key: &[u8; 8],
     area_keys: &[[u8; 8]],
     service_keys: &[[u8; 8]],
@@ -352,14 +707,45 @@ pub fn generate_service_keys(
     (group_service_key, user_service_key)
 }
 
-pub(crate) fn calculate_command_mac(
+pub(crate) fn generate_registration_package_des(
+    package_plain: &[u8],
+    package_key: &[u8; DES_BLOCK_SIZE],
+) -> Result<Vec<u8>, FelicaStandardError> {
+    if package_plain.is_empty() || !package_plain.len().is_multiple_of(DES_BLOCK_SIZE) {
+        return Err(FelicaStandardError::InvalidParameter(
+            "registration package must be multiple of 8 bytes".into(),
+        ));
+    }
+
+    let mut mac_key = [0u8; DES_BLOCK_SIZE];
+    for (dst, src) in mac_key.iter_mut().zip(package_key.iter()) {
+        *dst = *src ^ 0xFF;
+    }
+
+    let encrypted_plain =
+        encrypt_des_cbc_zero_iv(package_plain, &mac_key).map_err(FelicaStandardError::Protocol)?;
+    if encrypted_plain.len() < DES_BLOCK_SIZE {
+        return Err(FelicaStandardError::Protocol(
+            "registration package MAC calculation failed".into(),
+        ));
+    }
+
+    let mac = &encrypted_plain[encrypted_plain.len() - DES_BLOCK_SIZE..];
+    let mut package_with_mac = Vec::with_capacity(package_plain.len() + DES_BLOCK_SIZE);
+    package_with_mac.extend_from_slice(package_plain);
+    package_with_mac.extend_from_slice(mac);
+
+    encrypt_des_cbc_zero_iv(&package_with_mac, package_key).map_err(FelicaStandardError::Protocol)
+}
+
+pub(crate) fn calculate_command_mac_des(
     command_code: u8,
     payload: &[u8],
 ) -> Result<[u8; DES_BLOCK_SIZE], String> {
     if !payload.len().is_multiple_of(DES_BLOCK_SIZE) {
         return Err("secure command payload must be multiple of 8 bytes".into());
     }
-    let total_length = 2 + payload.len() + DES_BLOCK_SIZE;
+    let total_length = 2 + payload.len() + DES_MAC_SIZE;
     if total_length > u8::MAX as usize {
         return Err("secure command payload exceeds maximum frame length".into());
     }
@@ -374,26 +760,26 @@ pub(crate) fn calculate_command_mac(
     Ok(mac)
 }
 
-pub(crate) fn check_packet_mac(data: &[u8], expected_response_code: u8) -> bool {
-    if !data.len().is_multiple_of(DES_BLOCK_SIZE) || data.len() < 16 {
+pub(crate) fn check_packet_mac_des(data: &[u8], expected_response_code: u8) -> bool {
+    if !data.len().is_multiple_of(DES_BLOCK_SIZE) || data.len() < DES_BLOCK_SIZE + DES_MAC_SIZE {
         return false;
     }
-    let (payload, mac) = data.split_at(data.len() - 8);
+    let (payload, mac) = data.split_at(data.len() - DES_MAC_SIZE);
     if payload.is_empty() {
         return false;
     }
-    let mut x = [0u8; 8];
+    let mut x = [0u8; DES_MAC_SIZE];
     x.copy_from_slice(mac);
     let mut current = x;
     for block in payload.chunks(DES_BLOCK_SIZE).rev() {
-        let mut block_arr = [0u8; 8];
+        let mut block_arr = [0u8; DES_BLOCK_SIZE];
         block_arr.copy_from_slice(block);
         current = decrypt_des_block(&current, &block_arr);
     }
     current[0] == (data.len() as u8 + 2) && current[1] == expected_response_code
 }
 
-pub(crate) fn build_secure_response_frame(
+pub(crate) fn build_secure_response_frame_des(
     response_code: u8,
     transaction_number: u16,
     transaction_id: &[u8; 6],
@@ -405,7 +791,7 @@ pub(crate) fn build_secure_response_frame(
     payload.extend_from_slice(transaction_id);
     payload.extend_from_slice(response_payload);
     let mut padded = pad_to_des_block_size(payload);
-    let mac = calculate_command_mac(response_code, &padded).ok()?;
+    let mac = calculate_command_mac_des(response_code, &padded).ok()?;
     padded.extend_from_slice(&mac);
     let encrypted = encrypt_des_cbc_zero_iv(&padded, transaction_key).ok()?;
     let mut frame_payload = Vec::with_capacity(1 + encrypted.len());
@@ -465,6 +851,22 @@ impl AuthenticationContext {
 mod tests {
     use super::*;
 
+    fn bytes_from_hex(input: &str) -> Vec<u8> {
+        let mut cleaned = String::with_capacity(input.len());
+        for ch in input.chars() {
+            if !ch.is_ascii_whitespace() {
+                cleaned.push(ch);
+            }
+        }
+        let mut out = Vec::with_capacity(cleaned.len() / 2);
+        for i in (0..cleaned.len()).step_by(2) {
+            let byte = u8::from_str_radix(&cleaned[i..i + 2], 16)
+                .expect("invalid hex literal in test vector");
+            out.push(byte);
+        }
+        out
+    }
+
     fn assert_protocol_error_contains<T>(result: Result<T, FelicaStandardError>, expected: &str) {
         match result {
             Err(FelicaStandardError::Protocol(message)) => {
@@ -499,8 +901,9 @@ mod tests {
         let mut context = AuthenticatedContext::new(
             u16::MAX - 1,
             [1, 2, 3, 4, 5, 6],
-            [7, 8, 9, 10, 11, 12, 13, 14],
+            SecureSessionCredentials::Des([7, 8, 9, 10, 11, 12, 13, 14]),
         );
+        assert_eq!(context.scheme(), SecureSessionScheme::Des);
         assert_eq!(context.increment_transaction_number().unwrap(), u16::MAX);
         assert_secure_session_error_contains(
             context.increment_transaction_number(),
@@ -528,7 +931,7 @@ mod tests {
         let mut context = AuthenticatedContext::new(
             0x0020,
             [1, 2, 3, 4, 5, 6],
-            [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7],
+            SecureSessionCredentials::Des([0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7]),
         );
 
         let captured = SecureCommandContext::capture(&mut context).unwrap();
@@ -536,11 +939,11 @@ mod tests {
         assert_eq!(captured.transaction_number, 0x0021);
         assert_eq!(captured.transaction_id, [1, 2, 3, 4, 5, 6]);
         assert_eq!(
-            captured.transaction_key,
-            [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7]
+            captured.credentials,
+            SecureSessionCredentials::Des([0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7])
         );
 
-        let payload = captured.build_payload(&[0x55, 0x66, 0x77]);
+        let payload = captured.build_payload_des(&[0x55, 0x66, 0x77]);
         assert_eq!(&payload[0..2], &0x0021u16.to_le_bytes());
         assert_eq!(&payload[2..8], &[1, 2, 3, 4, 5, 6]);
         assert_eq!(&payload[8..], &[0x55, 0x66, 0x77]);
@@ -551,19 +954,15 @@ mod tests {
         let mut context = AuthenticatedContext::new(
             0,
             [1, 2, 3, 4, 5, 6],
-            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+            SecureSessionCredentials::Des([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]),
         );
         let captured = SecureCommandContext::capture(&mut context).unwrap();
-        let payload = captured.build_payload(&[0xAA, 0xBB, 0xCC]);
-        let padded_payload = pad_to_des_block_size(payload.clone());
+        let payload = captured.build_payload_des(&[0xAA, 0xBB, 0xCC]);
 
-        let encrypted = captured.encrypt_request(0x42, payload).unwrap();
-        let decrypted = captured.decrypt_response(&encrypted).unwrap();
-        assert!(check_packet_mac(&decrypted, 0x42));
-        assert_eq!(
-            &decrypted[..padded_payload.len()],
-            padded_payload.as_slice()
-        );
+        let encrypted = captured.encrypt_command(0x42, payload).unwrap();
+        let decrypted = captured.decrypt_response(0x42, &encrypted).unwrap();
+        assert_eq!(decrypted.transaction_number, captured.transaction_number);
+        assert_eq!(decrypted.payload, vec![0xAA, 0xBB, 0xCC]);
     }
 
     #[test]
@@ -571,12 +970,12 @@ mod tests {
         let mut context = AuthenticatedContext::new(
             0,
             [1, 2, 3, 4, 5, 6],
-            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+            SecureSessionCredentials::Des([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]),
         );
         let captured = SecureCommandContext::capture(&mut context).unwrap();
         let payload = vec![0xAB; 248];
         assert_protocol_error_contains(
-            captured.encrypt_request(0x42, payload),
+            captured.encrypt_command(0x42, payload),
             "exceeds maximum frame length",
         );
     }
@@ -608,30 +1007,106 @@ mod tests {
     #[test]
     fn strip_secure_padding_only_when_valid() {
         let mut valid = vec![1, 2, 3, 2, 2];
-        strip_secure_padding(&mut valid);
+        strip_secure_padding_des(&mut valid);
         assert_eq!(valid, vec![1, 2, 3]);
 
         let mut invalid_value = vec![1, 2, 3, 1, 2];
-        strip_secure_padding(&mut invalid_value);
+        strip_secure_padding_des(&mut invalid_value);
         assert_eq!(invalid_value, vec![1, 2, 3, 1, 2]);
 
         let mut invalid_len = vec![1, 2, 3, 8];
-        strip_secure_padding(&mut invalid_len);
+        strip_secure_padding_des(&mut invalid_len);
         assert_eq!(invalid_len, vec![1, 2, 3, 8]);
     }
 
     #[test]
     fn calculate_command_mac_rejects_bad_inputs() {
         assert!(
-            calculate_command_mac(0x10, &[1, 2, 3])
+            calculate_command_mac_des(0x10, &[1, 2, 3])
                 .unwrap_err()
                 .contains("multiple of 8")
         );
         assert!(
-            calculate_command_mac(0x10, &[0xAA; 248])
+            calculate_command_mac_des(0x10, &[0xAA; 248])
                 .unwrap_err()
                 .contains("exceeds maximum frame length")
         );
+    }
+
+    #[test]
+    fn authenticated_context_v2_holds_key() {
+        let key = [0x55u8; V2_AES128_BLOCK_SIZE];
+        let context =
+            AuthenticatedContext::new(7, [1, 2, 3, 4, 5, 6], SecureSessionCredentials::Aes128(key));
+        assert_eq!(context.scheme(), SecureSessionScheme::Aes128);
+        assert_eq!(
+            context.credentials(),
+            SecureSessionCredentialsRef::Aes128(&key)
+        );
+        assert!(context.ensure_scheme(SecureSessionScheme::Aes128).is_ok());
+        assert!(context.ensure_scheme(SecureSessionScheme::Des).is_err());
+    }
+
+    #[test]
+    fn secure_v2_encrypt_matches_reference_vector() {
+        let payload = bytes_from_hex(
+            "0000000100000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let tx_id = [0x5E, 0xC8, 0xB5, 0x97, 0x17, 0x04];
+        let expected = bytes_from_hex(
+            "41cfae0d2f92b2259287e05646e140e5924ee27f79cb69a2047da5f9353eed59e35fbc90a5d731d268b2db6739e56bd6",
+        );
+        let encoded = encrypt_secure_request_v2_aes128(
+            0x48,
+            [0x41, 0xCF],
+            &tx_id,
+            &[0u8; V2_AES128_BLOCK_SIZE],
+            &payload,
+        )
+        .expect("AES v2 encode should succeed");
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn secure_v2_decrypt_matches_reference_vector() {
+        let encrypted = bytes_from_hex(
+            "41cfae0d2f92b2259287e05646e140e5924ee27f79cb69a2047da5f9353eed59e35fbc90a5d731d268b2db6739e56bd6",
+        );
+        let tx_id = [0x5E, 0xC8, 0xB5, 0x97, 0x17, 0x04];
+        let decoded = decrypt_secure_response_v2_aes128(
+            0x48,
+            &tx_id,
+            &[0u8; V2_AES128_BLOCK_SIZE],
+            &encrypted,
+        )
+        .unwrap();
+        assert_eq!(decoded.transaction_number, u16::from_le_bytes([0x41, 0xCF]));
+        assert_eq!(
+            decoded.payload,
+            bytes_from_hex(
+                "0000000100000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            )
+        );
+    }
+
+    #[test]
+    fn build_secure_response_frame_v2_round_trip() {
+        let response_code = 0x15;
+        let tx_number = 3u16;
+        let tx_id = [1, 2, 3, 4, 5, 6];
+        let key = [0x10u8; V2_AES128_BLOCK_SIZE];
+        let payload = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+
+        let frame =
+            build_secure_response_frame_v2_aes128(response_code, tx_number, &tx_id, &key, &payload)
+                .expect("failed to build secure response frame v2");
+        assert_eq!(frame[0] as usize, frame.len());
+        assert_eq!(frame[1], response_code);
+
+        let decoded =
+            decrypt_secure_response_v2_aes128(response_code, &tx_id, &key, &frame[2..]).unwrap();
+        assert_eq!(decoded.transaction_number, tx_number);
+        assert_eq!(decoded.payload, payload);
     }
 
     #[test]
@@ -642,14 +1117,19 @@ mod tests {
         let key = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
         let response_payload = [0xAA, 0xBB, 0xCC];
 
-        let frame =
-            build_secure_response_frame(response_code, tx_number, &tx_id, &key, &response_payload)
-                .expect("failed to build secure response frame");
+        let frame = build_secure_response_frame_des(
+            response_code,
+            tx_number,
+            &tx_id,
+            &key,
+            &response_payload,
+        )
+        .expect("failed to build secure response frame");
         assert_eq!(frame[0] as usize, frame.len());
         assert_eq!(frame[1], response_code);
 
         let decrypted = decrypt_des_cbc_zero_iv(&frame[2..], &key).unwrap();
-        assert!(check_packet_mac(&decrypted, response_code));
+        assert!(check_packet_mac_des(&decrypted, response_code));
 
         let parsed = SecureResponse::parse(&decrypted, response_code).unwrap();
         assert_eq!(parsed.header.transaction_number, tx_number);
@@ -657,7 +1137,7 @@ mod tests {
         assert_eq!(&parsed.payload[..response_payload.len()], &response_payload);
 
         let tampered = decrypted[..decrypted.len() - 1].to_vec();
-        assert!(!check_packet_mac(&tampered, response_code));
+        assert!(!check_packet_mac_des(&tampered, response_code));
         assert_secure_session_error_contains(
             SecureResponse::parse(&decrypted, response_code.wrapping_add(1)),
             "MAC verification failed",
@@ -669,7 +1149,7 @@ mod tests {
         let mut context = AuthenticatedContext::new(
             10,
             [1, 2, 3, 4, 5, 6],
-            [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17],
+            SecureSessionCredentials::Des([0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17]),
         );
         let header_ok = SecureResponseHeader::new(11, [1, 2, 3, 4, 5, 6]);
         header_ok.apply(&mut context).unwrap();
@@ -693,6 +1173,7 @@ mod tests {
         let response = Authentication2Response {
             encrypted_payload: encrypted.clone(),
         };
+        assert_eq!(response.scheme(), SecureSessionScheme::Des);
         let decrypted = response.decrypt_payload(&key).unwrap();
         assert_eq!(decrypted, expected_payload);
 
@@ -713,5 +1194,13 @@ mod tests {
             malformed.decrypt_payload(&key),
             "multiple of 8 bytes",
         );
+    }
+
+    #[test]
+    fn authentication2_v2_response_reports_v2_scheme() {
+        let response = Authentication2V2Response {
+            encrypted_payload: vec![0xAA; 8],
+        };
+        assert_eq!(response.scheme(), SecureSessionScheme::Aes128);
     }
 }
