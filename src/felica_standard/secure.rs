@@ -15,7 +15,7 @@ use ofb::Ofb;
 const TRANSACTION_NUMBER_SIZE: usize = 2;
 const TRANSACTION_ID_SIZE: usize = 6;
 const DES_SECURE_HEADER_SIZE: usize = TRANSACTION_NUMBER_SIZE + TRANSACTION_ID_SIZE;
-const AES128_V2_RESPONSE_MARKERS: [u8; 3] = [0x00, 0x01, 0x02];
+const AES128_V2_IV_MARKER: u8 = 0x01;
 const AES128_V2_AUTH_CONTEXT_SUFFIX: [u8; 2] = [0x01, 0x00];
 const AES128_V2_DERIVE_ENCRYPTION_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
     0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
@@ -669,14 +669,13 @@ fn ceil_to_multiple(value: usize, block_size: usize) -> usize {
 }
 
 fn build_initial_vector_v2_aes128(
-    marker: u8,
     frame_length: u8,
     code: u8,
     counter_bytes: [u8; 2],
     transaction_id: &[u8; 6],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {
     let mut iv = [0u8; V2_AES128_BLOCK_SIZE];
-    iv[0] = marker;
+    iv[0] = AES128_V2_IV_MARKER;
     iv[1] = frame_length;
     iv[2] = code;
     iv[3..5].copy_from_slice(&counter_bytes);
@@ -745,13 +744,8 @@ fn encrypt_secure_request_v2_aes128(
         1usize + 1 + TRANSACTION_NUMBER_SIZE + payload.len() + V2_AES128_MAC_SIZE,
         "secure command payload exceeds maximum frame length",
     )?;
-    let iv = build_initial_vector_v2_aes128(
-        0x01,
-        frame_length,
-        command_code,
-        counter_bytes,
-        transaction_id,
-    );
+    let iv =
+        build_initial_vector_v2_aes128(frame_length, command_code, counter_bytes, transaction_id);
     let mac = calculate_mac_v2_aes128(&iv, payload, mac_key);
     let (cipher_payload, cipher_mac) =
         crypt_payload_and_mac_v2_aes128(encryption_key, &iv, payload, &mac)?;
@@ -783,22 +777,15 @@ fn decrypt_secure_response_v2_aes128(
         TRANSACTION_NUMBER_SIZE + data.len(),
         "secure response exceeds maximum frame length",
     )?;
-    for marker in AES128_V2_RESPONSE_MARKERS {
-        let iv = build_initial_vector_v2_aes128(
-            marker,
-            frame_length,
-            response_code,
-            counter_bytes,
-            transaction_id,
-        );
-        let (payload, mac_plain) =
-            crypt_payload_and_mac_v2_aes128(encryption_key, &iv, cipher_payload, &cipher_mac)?;
-        if mac_plain == calculate_mac_v2_aes128(&iv, &payload, mac_key) {
-            return Ok(DecryptedSecureResponse {
-                transaction_number,
-                payload,
-            });
-        }
+    let iv =
+        build_initial_vector_v2_aes128(frame_length, response_code, counter_bytes, transaction_id);
+    let (payload, mac_plain) =
+        crypt_payload_and_mac_v2_aes128(encryption_key, &iv, cipher_payload, &cipher_mac)?;
+    if mac_plain == calculate_mac_v2_aes128(&iv, &payload, mac_key) {
+        return Ok(DecryptedSecureResponse {
+            transaction_number,
+            payload,
+        });
     }
     Err("secure response MAC verification failed for AES v2".into())
 }
@@ -818,13 +805,8 @@ pub(crate) fn build_secure_response_frame_v2_aes128(
     )
     .ok()?;
     let counter_bytes = transaction_number.to_le_bytes();
-    let iv = build_initial_vector_v2_aes128(
-        0x01,
-        frame_length,
-        response_code,
-        counter_bytes,
-        transaction_id,
-    );
+    let iv =
+        build_initial_vector_v2_aes128(frame_length, response_code, counter_bytes, transaction_id);
     let mac = calculate_mac_v2_aes128(&iv, response_payload, mac_key);
     let (cipher_payload, cipher_mac) =
         crypt_payload_and_mac_v2_aes128(encryption_key, &iv, response_payload, &mac).ok()?;
