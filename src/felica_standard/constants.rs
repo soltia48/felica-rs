@@ -106,6 +106,12 @@ pub const AUTHENTICATION1_V2_COMMAND_CODE: u8 = 0x40;
 /// Authentication2 V2 command code.
 pub const AUTHENTICATION2_V2_COMMAND_CODE: u8 = 0x42;
 
+/// Read v2 command code.
+pub const READ_V2_COMMAND_CODE: u8 = 0x44;
+
+/// Write v2 command code.
+pub const WRITE_V2_COMMAND_CODE: u8 = 0x46;
+
 /// Get Container ID command code.
 pub const GET_CONTAINER_ID_COMMAND_CODE: u8 = 0x70;
 
@@ -201,6 +207,12 @@ pub const AUTHENTICATION1_V2_RESPONSE_CODE: u8 = 0x41;
 /// Authentication2 V2 response code.
 pub const AUTHENTICATION2_V2_RESPONSE_CODE: u8 = 0x43;
 
+/// Read v2 response code.
+pub const READ_V2_RESPONSE_CODE: u8 = 0x45;
+
+/// Write v2 response code.
+pub const WRITE_V2_RESPONSE_CODE: u8 = 0x47;
+
 /// Get Container ID response code.
 pub const GET_CONTAINER_ID_RESPONSE_CODE: u8 = 0x71;
 
@@ -240,6 +252,8 @@ mod tests {
             AUTHENTICATION2_V2_RESPONSE_CODE,
             AUTHENTICATION2_V2_COMMAND_CODE + 1
         );
+        assert_eq!(READ_V2_RESPONSE_CODE, READ_V2_COMMAND_CODE + 1);
+        assert_eq!(WRITE_V2_RESPONSE_CODE, WRITE_V2_COMMAND_CODE + 1);
         assert_eq!(
             GET_CONTAINER_ID_RESPONSE_CODE,
             GET_CONTAINER_ID_COMMAND_CODE + 1

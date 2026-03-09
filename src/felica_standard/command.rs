@@ -7,14 +7,15 @@ use super::{
     GET_NODE_PROPERTY_COMMAND_CODE, GET_PLATFORM_INFORMATION_COMMAND_CODE,
     GET_SYSTEM_STATUS_COMMAND_CODE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
     MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, NodePropertyType,
-    POLLING_COMMAND_CODE, READ_COMMAND_CODE, READ_WITHOUT_ENCRYPTION_COMMAND_CODE,
-    REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
+    POLLING_COMMAND_CODE, READ_COMMAND_CODE, READ_V2_COMMAND_CODE,
+    READ_WITHOUT_ENCRYPTION_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
+    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
     REQUEST_BLOCK_INFORMATION_COMMAND_CODE, REQUEST_BLOCK_INFORMATION_EX_COMMAND_CODE,
     REQUEST_CODE_LIST_COMMAND_CODE, REQUEST_RESPONSE_COMMAND_CODE, REQUEST_SERVICE_COMMAND_CODE,
     REQUEST_SERVICE_V2_COMMAND_CODE, REQUEST_SPECIFICATION_VERSION_COMMAND_CODE,
     REQUEST_SYSTEM_CODE_COMMAND_CODE, RESET_MODE_COMMAND_CODE, SEARCH_SERVICE_CODE_COMMAND_CODE,
     SET_PARAMETER_COMMAND_CODE, ServiceCode, SetParameterEncryptionType, SetParameterPacketType,
-    WRITE_COMMAND_CODE, WRITE_WITHOUT_ENCRYPTION_COMMAND_CODE,
+    WRITE_COMMAND_CODE, WRITE_V2_COMMAND_CODE, WRITE_WITHOUT_ENCRYPTION_COMMAND_CODE,
 };
 
 pub enum FelicaStandardCommand {
@@ -66,6 +67,13 @@ pub enum FelicaStandardCommand {
         block_list: Vec<BlockListElement>,
     },
     Write {
+        block_list: Vec<BlockListElement>,
+        data: Vec<u8>,
+    },
+    ReadV2 {
+        block_list: Vec<BlockListElement>,
+    },
+    WriteV2 {
         block_list: Vec<BlockListElement>,
         data: Vec<u8>,
     },
@@ -353,6 +361,27 @@ impl FelicaStandardCommand {
                 payload.extend_bytes(data);
                 CommandEncoding::Secure {
                     opcode: WRITE_COMMAND_CODE,
+                    payload: payload.finish(),
+                }
+            }
+            FelicaStandardCommand::ReadV2 { block_list } => {
+                debug_assert!(!block_list.is_empty() && block_list.len() <= MAX_BLOCK_LIST_LEN);
+                let mut payload = PayloadWriter::with_capacity(1 + block_list.len() * 3);
+                append_block_list(&mut payload, block_list);
+                CommandEncoding::Secure {
+                    opcode: READ_V2_COMMAND_CODE,
+                    payload: payload.finish(),
+                }
+            }
+            FelicaStandardCommand::WriteV2 { block_list, data } => {
+                debug_assert!(!block_list.is_empty() && block_list.len() <= MAX_BLOCK_LIST_LEN);
+                debug_assert_eq!(data.len(), block_list.len() * BLOCK_SIZE);
+                let mut payload =
+                    PayloadWriter::with_capacity(1 + block_list.len() * 3 + data.len());
+                append_block_list(&mut payload, block_list);
+                payload.extend_bytes(data);
+                CommandEncoding::Secure {
+                    opcode: WRITE_V2_COMMAND_CODE,
                     payload: payload.finish(),
                 }
             }
@@ -718,6 +747,8 @@ impl FelicaStandardCommand {
             }
             READ_COMMAND_CODE
             | WRITE_COMMAND_CODE
+            | READ_V2_COMMAND_CODE
+            | WRITE_V2_COMMAND_CODE
             | REGISTER_ISSUE_ID_COMMAND_CODE
             | REGISTER_AREA_COMMAND_CODE
             | REGISTER_SERVICE_COMMAND_CODE
@@ -970,7 +1001,7 @@ impl FelicaStandardCommand {
         payload: &[u8],
     ) -> Result<Self, FelicaStandardError> {
         match command_code {
-            READ_COMMAND_CODE => {
+            READ_COMMAND_CODE | READ_V2_COMMAND_CODE => {
                 if payload.is_empty() {
                     return Err(FelicaStandardError::Protocol(
                         "secure read payload too short".into(),
@@ -983,9 +1014,13 @@ impl FelicaStandardCommand {
                     ));
                 }
                 let (block_list, _consumed) = parse_block_list(&payload[1..], block_count)?;
-                Ok(FelicaStandardCommand::Read { block_list })
+                if command_code == READ_V2_COMMAND_CODE {
+                    Ok(FelicaStandardCommand::ReadV2 { block_list })
+                } else {
+                    Ok(FelicaStandardCommand::Read { block_list })
+                }
             }
-            WRITE_COMMAND_CODE => {
+            WRITE_COMMAND_CODE | WRITE_V2_COMMAND_CODE => {
                 if payload.is_empty() {
                     return Err(FelicaStandardError::Protocol(
                         "secure write payload too short".into(),
@@ -1008,7 +1043,11 @@ impl FelicaStandardCommand {
                         FelicaStandardError::Protocol("secure write data truncated".into())
                     })?
                     .to_vec();
-                Ok(FelicaStandardCommand::Write { block_list, data })
+                if command_code == WRITE_V2_COMMAND_CODE {
+                    Ok(FelicaStandardCommand::WriteV2 { block_list, data })
+                } else {
+                    Ok(FelicaStandardCommand::Write { block_list, data })
+                }
             }
             REGISTER_ISSUE_ID_COMMAND_CODE => {
                 if payload.len() < 16 {
@@ -1150,6 +1189,8 @@ pub(crate) fn is_secure_command_code(command_code: u8) -> bool {
         command_code,
         READ_COMMAND_CODE
             | WRITE_COMMAND_CODE
+            | READ_V2_COMMAND_CODE
+            | WRITE_V2_COMMAND_CODE
             | REGISTER_ISSUE_ID_COMMAND_CODE
             | REGISTER_AREA_COMMAND_CODE
             | REGISTER_SERVICE_COMMAND_CODE
@@ -1284,6 +1325,34 @@ mod tests {
         let parsed = FelicaStandardCommand::parse_secure_payload(opcode, &payload).unwrap();
         match parsed {
             FelicaStandardCommand::Write {
+                block_list: parsed_block_list,
+                data: parsed_data,
+            } => {
+                assert_eq!(parsed_block_list, block_list);
+                assert_eq!(parsed_data, data);
+            }
+            _ => panic!("unexpected parsed secure command variant"),
+        }
+    }
+
+    #[test]
+    fn secure_write_v2_encoding_round_trip() {
+        let block_list = vec![BlockListElement::new(0x0003, 0x01, 0x00)];
+        let data = vec![0xAB; BLOCK_SIZE];
+        let command = FelicaStandardCommand::WriteV2 {
+            block_list: block_list.clone(),
+            data: data.clone(),
+        };
+
+        let (opcode, payload) = match command.encoding() {
+            CommandEncoding::Secure { opcode, payload } => (opcode, payload),
+            CommandEncoding::Plain(_) => panic!("expected secure encoding"),
+        };
+        assert_eq!(opcode, WRITE_V2_COMMAND_CODE);
+
+        let parsed = FelicaStandardCommand::parse_secure_payload(opcode, &payload).unwrap();
+        match parsed {
+            FelicaStandardCommand::WriteV2 {
                 block_list: parsed_block_list,
                 data: parsed_data,
             } => {

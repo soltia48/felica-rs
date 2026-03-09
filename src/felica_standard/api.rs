@@ -17,7 +17,8 @@ use super::types::{
 };
 use super::{
     BLOCK_SIZE, DES_BLOCK_SIZE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
-    MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, frame_with_length_prefix,
+    MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, READ_V2_COMMAND_CODE,
+    READ_V2_RESPONSE_CODE, WRITE_V2_COMMAND_CODE, WRITE_V2_RESPONSE_CODE, frame_with_length_prefix,
 };
 use crate::RemoteTarget;
 use crate::driver::errors::Result as DriverResult;
@@ -917,8 +918,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let encrypted = command_context.encrypt_command(command_code, payload)?;
         let encrypted_response =
             self.send_encrypted_command(command_code, &encrypted, timeout_ms)?;
-        let decrypted_response =
-            command_context.decrypt_response(command_code + 1, &encrypted_response)?;
+        let decrypted_response = command_context.decrypt_response(
+            expected_secure_response_code(command_code),
+            &encrypted_response,
+        )?;
         self.process_encrypted_response(decrypted_response)
     }
 
@@ -945,7 +948,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 "secure response length field does not match payload".into(),
             ));
         }
-        if response[1] != command_code + 1 {
+        if response[1] != expected_secure_response_code(command_code) {
             return Err(FelicaStandardError::Protocol(
                 "secure response command code mismatch".into(),
             ));
@@ -974,14 +977,16 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
 
         let timeout_ms = self.polling_result.read_timeout_ms(block_list.len());
-
-        let response = self.execute_command(
-            "Read",
-            FelicaStandardCommand::Read {
+        let read_command = match self.authenticated_scheme() {
+            Some(SecureSessionScheme::Aes128) => FelicaStandardCommand::ReadV2 {
                 block_list: block_list.to_vec(),
             },
-            timeout_ms,
-        )?;
+            _ => FelicaStandardCommand::Read {
+                block_list: block_list.to_vec(),
+            },
+        };
+
+        let response = self.execute_command("Read", read_command, timeout_ms)?;
 
         match response {
             FelicaStandardResponse::Read {
@@ -1019,15 +1024,18 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         ensure_block_data_length(block_list.len(), data.len())?;
 
         let timeout_ms = self.polling_result.write_timeout_ms(block_list.len());
-
-        let response = self.execute_command(
-            "Write",
-            FelicaStandardCommand::Write {
+        let write_command = match self.authenticated_scheme() {
+            Some(SecureSessionScheme::Aes128) => FelicaStandardCommand::WriteV2 {
                 block_list: block_list.to_vec(),
                 data: data.to_vec(),
             },
-            timeout_ms,
-        )?;
+            _ => FelicaStandardCommand::Write {
+                block_list: block_list.to_vec(),
+                data: data.to_vec(),
+            },
+        };
+
+        let response = self.execute_command("Write", write_command, timeout_ms)?;
 
         match response {
             FelicaStandardResponse::Write {
@@ -1471,6 +1479,14 @@ fn ensure_block_data_length(
     }
 }
 
+fn expected_secure_response_code(command_code: u8) -> u8 {
+    match command_code {
+        READ_V2_COMMAND_CODE => READ_V2_RESPONSE_CODE,
+        WRITE_V2_COMMAND_CODE => WRITE_V2_RESPONSE_CODE,
+        _ => command_code.wrapping_add(1),
+    }
+}
+
 fn unexpected_response(command: &'static str) -> FelicaStandardError {
     FelicaStandardError::Protocol(format!("unexpected response for {command} command"))
 }
@@ -1753,7 +1769,7 @@ mod tests {
         .unwrap();
 
         let response_frame = build_secure_response_frame_v2_aes128(
-            super::super::constants::READ_COMMAND_CODE + 1,
+            super::super::constants::READ_V2_COMMAND_CODE + 1,
             3,
             &tx_id,
             &encryption_key,

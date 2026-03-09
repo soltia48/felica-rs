@@ -8,7 +8,7 @@ use super::{
     GET_SYSTEM_STATUS_RESPONSE_CODE, GetAreaInformationResult, GetNodePropertyResult,
     GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
     MAX_SERVICE_CODES, NodeProperty, OptionVersion, POLLING_RESPONSE_CODE, READ_COMMAND_CODE,
-    READ_WITHOUT_ENCRYPTION_RESPONSE_CODE, REGISTER_AREA_COMMAND_CODE,
+    READ_V2_COMMAND_CODE, READ_WITHOUT_ENCRYPTION_RESPONSE_CODE, REGISTER_AREA_COMMAND_CODE,
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
     REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE, REQUEST_BLOCK_INFORMATION_RESPONSE_CODE,
     REQUEST_CODE_LIST_RESPONSE_CODE, REQUEST_RESPONSE_RESPONSE_CODE, REQUEST_SERVICE_RESPONSE_CODE,
@@ -18,7 +18,7 @@ use super::{
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
     RequestServiceV2Result, SEARCH_SERVICE_CODE_RESPONSE_CODE, SET_PARAMETER_RESPONSE_CODE,
     SearchServiceCodeResult, ServiceCode, SpecificationVersion, WRITE_COMMAND_CODE,
-    WRITE_WITHOUT_ENCRYPTION_RESPONSE_CODE, frame_with_length_prefix,
+    WRITE_V2_COMMAND_CODE, WRITE_WITHOUT_ENCRYPTION_RESPONSE_CODE, frame_with_length_prefix,
 };
 use crate::driver::errors::{DriverError, Result as DriverResult};
 
@@ -239,8 +239,8 @@ impl FelicaStandardResponse {
         data: &[u8],
     ) -> DriverResult<FelicaStandardResponse> {
         match command_code {
-            READ_COMMAND_CODE => Self::parse_secure_read(data),
-            WRITE_COMMAND_CODE => Self::parse_secure_write(data),
+            READ_COMMAND_CODE | READ_V2_COMMAND_CODE => Self::parse_secure_read(data),
+            WRITE_COMMAND_CODE | WRITE_V2_COMMAND_CODE => Self::parse_secure_write(data),
             REGISTER_ISSUE_ID_COMMAND_CODE => Self::parse_register_issue_id(data),
             REGISTER_AREA_COMMAND_CODE => Self::parse_register_area(data),
             REGISTER_SERVICE_COMMAND_CODE => Self::parse_register_service(data),
@@ -1918,6 +1918,33 @@ mod tests {
         data.extend_from_slice(&block);
 
         let parsed = FelicaStandardResponse::from_secure_bytes(READ_COMMAND_CODE, &data).unwrap();
+        match parsed {
+            FelicaStandardResponse::Read {
+                status_flag1,
+                status_flag2,
+                result,
+            } => {
+                assert_eq!(status_flag1, 0);
+                assert_eq!(status_flag2, 0);
+                let parsed_result = result.expect("missing secure read result");
+                assert_eq!(parsed_result.blocks.len(), 1);
+                assert_eq!(parsed_result.blocks[0], block);
+            }
+            _ => panic!("unexpected parsed response variant"),
+        }
+    }
+
+    #[test]
+    fn from_secure_bytes_parses_secure_read_v2_success() {
+        let mut block = [0u8; BLOCK_SIZE];
+        for (index, byte) in block.iter_mut().enumerate() {
+            *byte = (index as u8) ^ 0xA5;
+        }
+        let mut data = vec![0x00, 0x00, 0x01];
+        data.extend_from_slice(&block);
+
+        let parsed =
+            FelicaStandardResponse::from_secure_bytes(READ_V2_COMMAND_CODE, &data).unwrap();
         match parsed {
             FelicaStandardResponse::Read {
                 status_flag1,
