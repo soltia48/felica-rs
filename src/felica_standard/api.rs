@@ -3,8 +3,9 @@ use super::error::FelicaStandardError;
 use super::response::FelicaStandardResponse;
 use super::secure::{
     AuthenticatedContext, Authentication2Response, Authentication2V2Response,
-    AuthenticationContext, DecryptedSecureResponse, SecureCommandContext, SecureSessionCredentials,
-    SecureSessionScheme, generate_registration_package_des,
+    AuthenticationContext, AuthenticationContextV2Aes128, DecryptedSecureResponse,
+    SecureCommandContext, SecureSessionCredentials, SecureSessionScheme,
+    generate_registration_package_des,
 };
 use super::types::{
     BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
@@ -1177,6 +1178,70 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    pub fn mutual_authentication_v2(
+        &mut self,
+        operation_parameter: u8,
+        nodes: &[u16],
+        group_key: &[u8; 16],
+        individual_key: &[u8; 16],
+    ) -> Result<MutualAuthenticationResult, FelicaStandardError> {
+        if nodes.is_empty() {
+            return Err(FelicaStandardError::InvalidParameter(
+                "mutual authentication v2 requires at least one node code".into(),
+            ));
+        }
+
+        let idm = self.idm_bytes()?;
+        let mut random_1 = [0u8; 16];
+        OsRng.fill_bytes(&mut random_1);
+
+        let context = AuthenticationContextV2Aes128::new(&idm, group_key, individual_key);
+        let challenge_1a = context.encrypt_challenge1a(&random_1);
+        let (challenge_1b, challenge_2a, challenge_3c) =
+            self.authentication1_v2(operation_parameter, nodes, &challenge_1a)?;
+        if !context.verify_challenge1b(&random_1, &challenge_1b, &challenge_3c) {
+            return Err(FelicaStandardError::AuthenticationFailed(
+                "Authentication1 v2 verification failed".into(),
+            ));
+        }
+
+        let random_2 = context.decrypt_challenge2a(&challenge_2a, &challenge_3c);
+        let challenge_2b = context.encrypt_challenge2b(&random_2);
+        let auth2_response = self.authentication2_v2(&challenge_2b)?;
+
+        let mut transaction_id = [0u8; 6];
+        transaction_id.copy_from_slice(&random_1[2..8]);
+        let (encryption_key, mac_key) = context.derive_secure_session_keys(&random_2);
+
+        let (transaction_number, payload) =
+            auth2_response.decrypt_payload(&transaction_id, &encryption_key, &mac_key)?;
+        if payload.len() < 16 {
+            return Err(FelicaStandardError::Protocol(
+                "Authentication2 v2 response payload too short".into(),
+            ));
+        }
+
+        let mut issue_id = [0u8; 8];
+        issue_id.copy_from_slice(&payload[0..8]);
+        let mut issue_parameter = [0u8; 8];
+        issue_parameter.copy_from_slice(&payload[8..16]);
+
+        let authenticated = AuthenticatedContext::new(
+            transaction_number,
+            transaction_id,
+            SecureSessionCredentials::Aes128 {
+                encryption_key,
+                mac_key,
+            },
+        );
+        self.authenticated_context = Some(authenticated);
+
+        Ok(MutualAuthenticationResult {
+            issue_id,
+            issue_parameter,
+        })
+    }
+
     pub fn register_issue_id(
         &mut self,
         system_code: u16,
@@ -1673,7 +1738,8 @@ mod tests {
     fn secure_read_round_trip_with_mock_driver_v2() {
         let mut driver = MockDriver::with_polling_result(sample_polling_result());
         let tx_id = [1, 2, 3, 4, 5, 6];
-        let tx_key = [0x21u8; 16];
+        let encryption_key = [0x21u8; 16];
+        let mac_key = [0x31u8; 16];
         let block = [0xCD; BLOCK_SIZE];
 
         let secure_payload = FelicaStandardResponse::Read {
@@ -1690,7 +1756,8 @@ mod tests {
             super::super::constants::READ_COMMAND_CODE + 1,
             3,
             &tx_id,
-            &tx_key,
+            &encryption_key,
+            &mac_key,
             &secure_payload,
         )
         .expect("secure response frame build should succeed");
@@ -1701,7 +1768,10 @@ mod tests {
         felica.set_authenticated_context(AuthenticatedContext::new(
             1,
             tx_id,
-            SecureSessionCredentials::Aes128(tx_key),
+            SecureSessionCredentials::Aes128 {
+                encryption_key,
+                mac_key,
+            },
         ));
 
         let blocks = felica
@@ -1787,6 +1857,18 @@ mod tests {
             .authentication2_v2(&challenge_2b)
             .expect("authentication2_v2 should succeed");
         assert_eq!(response.scheme(), SecureSessionScheme::Aes128);
+    }
+
+    #[test]
+    fn mutual_authentication_v2_requires_nodes() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+
+        assert_invalid_parameter_contains(
+            felica.mutual_authentication_v2(0x00, &[], &[0u8; 16], &[0u8; 16]),
+            "requires at least one node code",
+        );
     }
 
     #[test]

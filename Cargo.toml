@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 aes = "0.8"
 cbc = "0.1"
+cmac = "0.7"
 des = "0.8"
 env_logger = "0.11.8"
 hex = "0.4"
