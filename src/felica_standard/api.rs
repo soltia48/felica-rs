@@ -1221,8 +1221,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         transaction_id.copy_from_slice(&random_1[2..8]);
         let (encryption_key, mac_key) = context.derive_secure_session_keys(&random_2);
 
-        let (transaction_number, payload) =
-            auth2_response.decrypt_payload(&transaction_id, &encryption_key, &mac_key)?;
+        let (transaction_number, payload) = auth2_response.decrypt_payload(
+            &transaction_id,
+            &challenge_3c,
+            &encryption_key,
+            &mac_key,
+        )?;
         if payload.len() < 16 {
             return Err(FelicaStandardError::Protocol(
                 "Authentication2 v2 response payload too short".into(),
@@ -1240,6 +1244,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             SecureSessionCredentials::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             },
         );
         self.authenticated_context = Some(authenticated);
@@ -1756,6 +1761,7 @@ mod tests {
         let tx_id = [1, 2, 3, 4, 5, 6];
         let encryption_key = [0x21u8; 16];
         let mac_key = [0x31u8; 16];
+        let challenge_3c = [0x00u8; 4];
         let block = [0xCD; BLOCK_SIZE];
 
         let secure_payload = FelicaStandardResponse::Read {
@@ -1772,6 +1778,7 @@ mod tests {
             super::super::constants::READ_V2_COMMAND_CODE + 1,
             3,
             &tx_id,
+            &challenge_3c,
             &encryption_key,
             &mac_key,
             &secure_payload,
@@ -1787,6 +1794,7 @@ mod tests {
             SecureSessionCredentials::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             },
         ));
 

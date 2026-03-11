@@ -48,6 +48,7 @@ pub enum SecureSessionCredentials {
     Aes128 {
         encryption_key: [u8; 16],
         mac_key: [u8; 16],
+        challenge_3c: [u8; 4],
     },
 }
 
@@ -66,6 +67,7 @@ pub enum SecureSessionCredentialsRef<'a> {
     Aes128 {
         encryption_key: &'a [u8; 16],
         mac_key: &'a [u8; 16],
+        challenge_3c: &'a [u8; 4],
     },
 }
 
@@ -124,9 +126,11 @@ impl AuthenticatedContext {
             SecureSessionCredentials::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             } => SecureSessionCredentialsRef::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             },
         }
     }
@@ -225,10 +229,12 @@ impl SecureCommandContext {
             SecureSessionCredentials::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             } => encrypt_secure_request_v2_aes128(
                 command_code,
                 self.transaction_counter_bytes(),
                 &self.transaction_id,
+                &challenge_3c,
                 &encryption_key,
                 &mac_key,
                 &payload,
@@ -249,9 +255,11 @@ impl SecureCommandContext {
             SecureSessionCredentials::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             } => decrypt_secure_response_v2_aes128(
                 response_code,
                 &self.transaction_id,
+                &challenge_3c,
                 &encryption_key,
                 &mac_key,
                 data,
@@ -358,12 +366,14 @@ impl Authentication2V2Response {
     pub fn decrypt_payload(
         &self,
         transaction_id: &[u8; 6],
+        challenge_3c: &[u8; 4],
         encryption_key: &[u8; V2_AES128_BLOCK_SIZE],
         mac_key: &[u8; V2_AES128_BLOCK_SIZE],
     ) -> Result<(u16, Vec<u8>), FelicaStandardError> {
         let decrypted = decrypt_secure_response_v2_aes128(
             AUTHENTICATION2_V2_RESPONSE_CODE,
             transaction_id,
+            challenge_3c,
             encryption_key,
             mac_key,
             &self.encrypted_payload,
@@ -673,6 +683,7 @@ fn build_initial_vector_v2_aes128(
     code: u8,
     counter_bytes: [u8; 2],
     transaction_id: &[u8; 6],
+    challenge_3c: &[u8; 4],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {
     let mut iv = [0u8; V2_AES128_BLOCK_SIZE];
     iv[0] = AES128_V2_IV_MARKER;
@@ -680,6 +691,7 @@ fn build_initial_vector_v2_aes128(
     iv[2] = code;
     iv[3..5].copy_from_slice(&counter_bytes);
     iv[5..11].copy_from_slice(transaction_id);
+    iv[11..14].copy_from_slice(&challenge_3c[1..4]);
     iv
 }
 
@@ -736,6 +748,7 @@ fn encrypt_secure_request_v2_aes128(
     command_code: u8,
     counter_bytes: [u8; 2],
     transaction_id: &[u8; 6],
+    challenge_3c: &[u8; 4],
     encryption_key: &[u8; V2_AES128_BLOCK_SIZE],
     mac_key: &[u8; V2_AES128_BLOCK_SIZE],
     payload: &[u8],
@@ -744,8 +757,13 @@ fn encrypt_secure_request_v2_aes128(
         1usize + 1 + TRANSACTION_NUMBER_SIZE + payload.len() + V2_AES128_MAC_SIZE,
         "secure command payload exceeds maximum frame length",
     )?;
-    let iv =
-        build_initial_vector_v2_aes128(frame_length, command_code, counter_bytes, transaction_id);
+    let iv = build_initial_vector_v2_aes128(
+        frame_length,
+        command_code,
+        counter_bytes,
+        transaction_id,
+        challenge_3c,
+    );
     let mac = calculate_mac_v2_aes128(&iv, payload, mac_key);
     let (cipher_payload, cipher_mac) =
         crypt_payload_and_mac_v2_aes128(encryption_key, &iv, payload, &mac)?;
@@ -759,6 +777,7 @@ fn encrypt_secure_request_v2_aes128(
 fn decrypt_secure_response_v2_aes128(
     response_code: u8,
     transaction_id: &[u8; 6],
+    challenge_3c: &[u8; 4],
     encryption_key: &[u8; V2_AES128_BLOCK_SIZE],
     mac_key: &[u8; V2_AES128_BLOCK_SIZE],
     data: &[u8],
@@ -777,8 +796,13 @@ fn decrypt_secure_response_v2_aes128(
         TRANSACTION_NUMBER_SIZE + data.len(),
         "secure response exceeds maximum frame length",
     )?;
-    let iv =
-        build_initial_vector_v2_aes128(frame_length, response_code, counter_bytes, transaction_id);
+    let iv = build_initial_vector_v2_aes128(
+        frame_length,
+        response_code,
+        counter_bytes,
+        transaction_id,
+        challenge_3c,
+    );
     let (payload, mac_plain) =
         crypt_payload_and_mac_v2_aes128(encryption_key, &iv, cipher_payload, &cipher_mac)?;
     if mac_plain == calculate_mac_v2_aes128(&iv, &payload, mac_key) {
@@ -795,6 +819,7 @@ pub(crate) fn build_secure_response_frame_v2_aes128(
     response_code: u8,
     transaction_number: u16,
     transaction_id: &[u8; 6],
+    challenge_3c: &[u8; 4],
     encryption_key: &[u8; V2_AES128_BLOCK_SIZE],
     mac_key: &[u8; V2_AES128_BLOCK_SIZE],
     response_payload: &[u8],
@@ -805,8 +830,13 @@ pub(crate) fn build_secure_response_frame_v2_aes128(
     )
     .ok()?;
     let counter_bytes = transaction_number.to_le_bytes();
-    let iv =
-        build_initial_vector_v2_aes128(frame_length, response_code, counter_bytes, transaction_id);
+    let iv = build_initial_vector_v2_aes128(
+        frame_length,
+        response_code,
+        counter_bytes,
+        transaction_id,
+        challenge_3c,
+    );
     let mac = calculate_mac_v2_aes128(&iv, response_payload, mac_key);
     let (cipher_payload, cipher_mac) =
         crypt_payload_and_mac_v2_aes128(encryption_key, &iv, response_payload, &mac).ok()?;
@@ -1165,12 +1195,14 @@ mod tests {
     fn authenticated_context_v2_holds_key() {
         let encryption_key = [0x55u8; V2_AES128_BLOCK_SIZE];
         let mac_key = [0x77u8; V2_AES128_BLOCK_SIZE];
+        let challenge_3c = [0x01, 0x02, 0x03, 0x04];
         let context = AuthenticatedContext::new(
             7,
             [1, 2, 3, 4, 5, 6],
             SecureSessionCredentials::Aes128 {
                 encryption_key,
                 mac_key,
+                challenge_3c,
             },
         );
         assert_eq!(context.scheme(), SecureSessionScheme::Aes128);
@@ -1179,6 +1211,7 @@ mod tests {
             SecureSessionCredentialsRef::Aes128 {
                 encryption_key: &encryption_key,
                 mac_key: &mac_key,
+                challenge_3c: &challenge_3c,
             }
         );
         assert!(context.ensure_scheme(SecureSessionScheme::Aes128).is_ok());
@@ -1224,6 +1257,7 @@ mod tests {
         let individual_key = [0x20u8; V2_AES128_BLOCK_SIZE];
         let random_1 = [0x30u8; V2_AES128_BLOCK_SIZE];
         let random_2 = [0x40u8; V2_AES128_BLOCK_SIZE];
+        let challenge_3c = [0x10, 0x11, 0x12, 0x13];
         let context = AuthenticationContextV2Aes128::new(&idm, &group_key, &individual_key);
         let (encryption_key, mac_key) = context.derive_secure_session_keys(&random_2);
 
@@ -1234,6 +1268,7 @@ mod tests {
             AUTHENTICATION2_V2_RESPONSE_CODE,
             0,
             &transaction_id,
+            &challenge_3c,
             &encryption_key,
             &mac_key,
             &payload,
@@ -1244,7 +1279,7 @@ mod tests {
         };
 
         let (transaction_number, decrypted_payload) = response
-            .decrypt_payload(&transaction_id, &encryption_key, &mac_key)
+            .decrypt_payload(&transaction_id, &challenge_3c, &encryption_key, &mac_key)
             .expect("failed to decrypt authentication2 v2 payload");
         assert_eq!(transaction_number, 0);
         assert_eq!(decrypted_payload, payload);
@@ -1252,7 +1287,19 @@ mod tests {
         let mut wrong_tx_id = transaction_id;
         wrong_tx_id[0] ^= 0xFF;
         assert_secure_session_error_contains(
-            response.decrypt_payload(&wrong_tx_id, &encryption_key, &mac_key),
+            response.decrypt_payload(&wrong_tx_id, &challenge_3c, &encryption_key, &mac_key),
+            "MAC verification failed",
+        );
+
+        let mut wrong_challenge_3c = challenge_3c;
+        wrong_challenge_3c[1] ^= 0xFF;
+        assert_secure_session_error_contains(
+            response.decrypt_payload(
+                &transaction_id,
+                &wrong_challenge_3c,
+                &encryption_key,
+                &mac_key,
+            ),
             "MAC verification failed",
         );
     }
@@ -1263,6 +1310,7 @@ mod tests {
             "0000000100000123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         );
         let tx_id = [0x5E, 0xC8, 0xB5, 0x97, 0x17, 0x04];
+        let challenge_3c = [0x00u8; 4];
         let expected = bytes_from_hex(
             "41cfae0d2f92b2259287e05646e140e5924ee27f79cb69a2047da5f9353eed59e35fbc90a5d731d25a0fcdbdd6802174",
         );
@@ -1270,6 +1318,7 @@ mod tests {
             0x48,
             [0x41, 0xCF],
             &tx_id,
+            &challenge_3c,
             &[0u8; V2_AES128_BLOCK_SIZE],
             &[0u8; V2_AES128_BLOCK_SIZE],
             &payload,
@@ -1284,9 +1333,11 @@ mod tests {
             "41cfae0d2f92b2259287e05646e140e5924ee27f79cb69a2047da5f9353eed59e35fbc90a5d731d25a0fcdbdd6802174",
         );
         let tx_id = [0x5E, 0xC8, 0xB5, 0x97, 0x17, 0x04];
+        let challenge_3c = [0x00u8; 4];
         let decoded = decrypt_secure_response_v2_aes128(
             0x48,
             &tx_id,
+            &challenge_3c,
             &[0u8; V2_AES128_BLOCK_SIZE],
             &[0u8; V2_AES128_BLOCK_SIZE],
             &encrypted,
@@ -1306,6 +1357,7 @@ mod tests {
         let response_code = 0x15;
         let tx_number = 3u16;
         let tx_id = [1, 2, 3, 4, 5, 6];
+        let challenge_3c = [0x00u8; 4];
         let encryption_key = [0x10u8; V2_AES128_BLOCK_SIZE];
         let mac_key = [0x20u8; V2_AES128_BLOCK_SIZE];
         let payload = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
@@ -1314,6 +1366,7 @@ mod tests {
             response_code,
             tx_number,
             &tx_id,
+            &challenge_3c,
             &encryption_key,
             &mac_key,
             &payload,
@@ -1325,6 +1378,7 @@ mod tests {
         let decoded = decrypt_secure_response_v2_aes128(
             response_code,
             &tx_id,
+            &challenge_3c,
             &encryption_key,
             &mac_key,
             &frame[2..],
