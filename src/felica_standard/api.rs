@@ -977,13 +977,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
 
         let timeout_ms = self.polling_result.read_timeout_ms(block_list.len());
-        let read_command = match self.authenticated_scheme() {
-            Some(SecureSessionScheme::Aes128) => FelicaStandardCommand::ReadV2 {
-                block_list: block_list.to_vec(),
-            },
-            _ => FelicaStandardCommand::Read {
-                block_list: block_list.to_vec(),
-            },
+        let read_command = FelicaStandardCommand::Read {
+            block_list: block_list.to_vec(),
         };
 
         let response = self.execute_command("Read", read_command, timeout_ms)?;
@@ -1015,6 +1010,48 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    pub fn read_v2(
+        &mut self,
+        block_list: &[BlockListElement],
+    ) -> Result<Vec<[u8; BLOCK_SIZE]>, FelicaStandardError> {
+        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+
+        let timeout_ms = self.polling_result.read_timeout_ms(block_list.len());
+        let response = self.execute_command(
+            "Read v2",
+            FelicaStandardCommand::ReadV2 {
+                block_list: block_list.to_vec(),
+            },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::ReadV2 {
+                status_flag1,
+                status_flag2,
+                result,
+                ..
+            } => {
+                if status_flag1 != 0 {
+                    Err(Self::status_error("Read v2", status_flag1, status_flag2))
+                } else {
+                    let result = result.ok_or_else(|| {
+                        FelicaStandardError::Protocol("Read v2 missing result payload".into())
+                    })?;
+                    let blocks = result.blocks;
+                    if blocks.len() != block_list.len() {
+                        Err(FelicaStandardError::Protocol(
+                            "encrypted read v2 response block count mismatch".into(),
+                        ))
+                    } else {
+                        Ok(blocks)
+                    }
+                }
+            }
+            _ => Err(unexpected_response("Read v2")),
+        }
+    }
+
     pub fn write(
         &mut self,
         block_list: &[BlockListElement],
@@ -1024,15 +1061,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         ensure_block_data_length(block_list.len(), data.len())?;
 
         let timeout_ms = self.polling_result.write_timeout_ms(block_list.len());
-        let write_command = match self.authenticated_scheme() {
-            Some(SecureSessionScheme::Aes128) => FelicaStandardCommand::WriteV2 {
-                block_list: block_list.to_vec(),
-                data: data.to_vec(),
-            },
-            _ => FelicaStandardCommand::Write {
-                block_list: block_list.to_vec(),
-                data: data.to_vec(),
-            },
+        let write_command = FelicaStandardCommand::Write {
+            block_list: block_list.to_vec(),
+            data: data.to_vec(),
         };
 
         let response = self.execute_command("Write", write_command, timeout_ms)?;
@@ -1052,6 +1083,39 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    pub fn write_v2(
+        &mut self,
+        block_list: &[BlockListElement],
+        data: &[u8],
+    ) -> Result<(), FelicaStandardError> {
+        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        ensure_block_data_length(block_list.len(), data.len())?;
+
+        let timeout_ms = self.polling_result.write_timeout_ms(block_list.len());
+        let response = self.execute_command(
+            "Write v2",
+            FelicaStandardCommand::WriteV2 {
+                block_list: block_list.to_vec(),
+                data: data.to_vec(),
+            },
+            timeout_ms,
+        )?;
+
+        match response {
+            FelicaStandardResponse::WriteV2 {
+                status_flag1,
+                status_flag2,
+            } => {
+                if status_flag1 != 0 || status_flag2 != 0 {
+                    Err(Self::status_error("Write v2", status_flag1, status_flag2))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(unexpected_response("Write v2")),
+        }
+    }
+
     pub fn change_keys(
         &mut self,
         change_key_params: &[ChangeKeyParameters],
@@ -1059,6 +1123,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         if change_key_params.is_empty() {
             return Err(FelicaStandardError::InvalidParameter(
                 "change_keys requires at least one entry".into(),
+            ));
+        }
+        if self.authenticated_scheme() == Some(SecureSessionScheme::Aes128) {
+            return Err(FelicaStandardError::InvalidParameter(
+                "change_keys is only supported for Write (DES)".into(),
             ));
         }
 
@@ -1799,8 +1868,8 @@ mod tests {
         ));
 
         let blocks = felica
-            .read(&[BlockListElement::new(0x0001, 0, 0)])
-            .expect("secure read should succeed");
+            .read_v2(&[BlockListElement::new(0x0001, 0, 0)])
+            .expect("secure read v2 should succeed");
         assert_eq!(blocks, vec![block]);
         assert_eq!(
             felica.authenticated_context().unwrap().transaction_number(),
@@ -1893,6 +1962,27 @@ mod tests {
             felica.mutual_authentication_v2(0x00, &[], &[0u8; 16], &[0u8; 16]),
             "requires at least one node code",
         );
+    }
+
+    #[test]
+    fn change_keys_rejects_aes128_session() {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+            .expect("polling should succeed");
+        felica.set_authenticated_context(AuthenticatedContext::new(
+            1,
+            [1, 2, 3, 4, 5, 6],
+            SecureSessionCredentials::Aes128 {
+                encryption_key: [0x11; 16],
+                mac_key: [0x22; 16],
+                challenge_3c: [0x00; 4],
+            },
+        ));
+
+        let params = [ChangeKeyParameters::new(
+            [0x01; 8], [0x02; 8], [0x03; 8], 0x0100,
+        )];
+        assert_invalid_parameter_contains(felica.change_keys(&params), "only supported for Write");
     }
 
     #[test]

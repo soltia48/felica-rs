@@ -153,6 +153,15 @@ pub enum FelicaStandardResponse {
         status_flag1: u8,
         status_flag2: u8,
     },
+    ReadV2 {
+        status_flag1: u8,
+        status_flag2: u8,
+        result: Option<ReadResult>,
+    },
+    WriteV2 {
+        status_flag1: u8,
+        status_flag2: u8,
+    },
     RegisterIssueId {
         status_flag1: u8,
         status_flag2: u8,
@@ -239,8 +248,10 @@ impl FelicaStandardResponse {
         data: &[u8],
     ) -> DriverResult<FelicaStandardResponse> {
         match command_code {
-            READ_COMMAND_CODE | READ_V2_COMMAND_CODE => Self::parse_secure_read(data),
-            WRITE_COMMAND_CODE | WRITE_V2_COMMAND_CODE => Self::parse_secure_write(data),
+            READ_COMMAND_CODE => Self::parse_secure_read(data, false),
+            READ_V2_COMMAND_CODE => Self::parse_secure_read(data, true),
+            WRITE_COMMAND_CODE => Self::parse_secure_write(data, false),
+            WRITE_V2_COMMAND_CODE => Self::parse_secure_write(data, true),
             REGISTER_ISSUE_ID_COMMAND_CODE => Self::parse_register_issue_id(data),
             REGISTER_AREA_COMMAND_CODE => Self::parse_register_area(data),
             REGISTER_SERVICE_COMMAND_CODE => Self::parse_register_service(data),
@@ -795,7 +806,7 @@ impl FelicaStandardResponse {
         })
     }
 
-    fn parse_secure_read(data: &[u8]) -> DriverResult<Self> {
+    fn parse_secure_read(data: &[u8], read_v2: bool) -> DriverResult<Self> {
         if data.len() < 3 {
             return Err(DriverError::Other(
                 "encrypted read response shorter than status flags".into(),
@@ -804,10 +815,18 @@ impl FelicaStandardResponse {
         let sf1 = data[0];
         let sf2 = data[1];
         if sf1 != 0 {
-            return Ok(FelicaStandardResponse::Read {
-                status_flag1: sf1,
-                status_flag2: sf2,
-                result: None,
+            return Ok(if read_v2 {
+                FelicaStandardResponse::ReadV2 {
+                    status_flag1: sf1,
+                    status_flag2: sf2,
+                    result: None,
+                }
+            } else {
+                FelicaStandardResponse::Read {
+                    status_flag1: sf1,
+                    status_flag2: sf2,
+                    result: None,
+                }
             });
         }
         let block_count = data[2] as usize;
@@ -823,22 +842,37 @@ impl FelicaStandardResponse {
             ));
         }
         let blocks = collect_blocks(&data[3..3 + block_count * BLOCK_SIZE], block_count);
-        Ok(FelicaStandardResponse::Read {
-            status_flag1: sf1,
-            status_flag2: sf2,
-            result: Some(ReadResult { blocks }),
+        Ok(if read_v2 {
+            FelicaStandardResponse::ReadV2 {
+                status_flag1: sf1,
+                status_flag2: sf2,
+                result: Some(ReadResult { blocks }),
+            }
+        } else {
+            FelicaStandardResponse::Read {
+                status_flag1: sf1,
+                status_flag2: sf2,
+                result: Some(ReadResult { blocks }),
+            }
         })
     }
 
-    fn parse_secure_write(data: &[u8]) -> DriverResult<Self> {
+    fn parse_secure_write(data: &[u8], write_v2: bool) -> DriverResult<Self> {
         if data.len() < 2 {
             return Err(DriverError::Other(
                 "encrypted write response shorter than status flags".into(),
             ));
         }
-        Ok(FelicaStandardResponse::Write {
-            status_flag1: data[0],
-            status_flag2: data[1],
+        Ok(if write_v2 {
+            FelicaStandardResponse::WriteV2 {
+                status_flag1: data[0],
+                status_flag2: data[1],
+            }
+        } else {
+            FelicaStandardResponse::Write {
+                status_flag1: data[0],
+                status_flag2: data[1],
+            }
         })
     }
 
@@ -1537,6 +1571,8 @@ impl FelicaStandardResponse {
             }
             FelicaStandardResponse::Read { .. }
             | FelicaStandardResponse::Write { .. }
+            | FelicaStandardResponse::ReadV2 { .. }
+            | FelicaStandardResponse::WriteV2 { .. }
             | FelicaStandardResponse::RegisterIssueId { .. }
             | FelicaStandardResponse::RegisterArea { .. }
             | FelicaStandardResponse::RegisterService { .. }
@@ -1551,6 +1587,8 @@ impl FelicaStandardResponse {
         match self {
             FelicaStandardResponse::Read { .. }
             | FelicaStandardResponse::Write { .. }
+            | FelicaStandardResponse::ReadV2 { .. }
+            | FelicaStandardResponse::WriteV2 { .. }
             | FelicaStandardResponse::RegisterIssueId { .. }
             | FelicaStandardResponse::RegisterArea { .. }
             | FelicaStandardResponse::RegisterService { .. }
@@ -1567,6 +1605,11 @@ impl FelicaStandardResponse {
     pub fn to_secure_payload(&self) -> Result<Vec<u8>, FelicaStandardError> {
         match self {
             FelicaStandardResponse::Read {
+                status_flag1,
+                status_flag2,
+                result,
+            }
+            | FelicaStandardResponse::ReadV2 {
                 status_flag1,
                 status_flag2,
                 result,
@@ -1599,6 +1642,10 @@ impl FelicaStandardResponse {
                 Ok(payload)
             }
             FelicaStandardResponse::Write {
+                status_flag1,
+                status_flag2,
+            }
+            | FelicaStandardResponse::WriteV2 {
                 status_flag1,
                 status_flag2,
             } => Ok(vec![*status_flag1, *status_flag2]),
@@ -1946,7 +1993,7 @@ mod tests {
         let parsed =
             FelicaStandardResponse::from_secure_bytes(READ_V2_COMMAND_CODE, &data).unwrap();
         match parsed {
-            FelicaStandardResponse::Read {
+            FelicaStandardResponse::ReadV2 {
                 status_flag1,
                 status_flag2,
                 result,
@@ -2468,6 +2515,28 @@ mod tests {
             } => {
                 assert_eq!(status_flag1, 0x12);
                 assert_eq!(status_flag2, 0x34);
+            }
+            _ => panic!("unexpected parsed response variant"),
+        }
+    }
+
+    #[test]
+    fn secure_write_v2_round_trip() {
+        let response = FelicaStandardResponse::WriteV2 {
+            status_flag1: 0x56,
+            status_flag2: 0x78,
+        };
+
+        let payload = response.to_secure_payload().unwrap();
+        let parsed =
+            FelicaStandardResponse::from_secure_bytes(WRITE_V2_COMMAND_CODE, &payload).unwrap();
+        match parsed {
+            FelicaStandardResponse::WriteV2 {
+                status_flag1,
+                status_flag2,
+            } => {
+                assert_eq!(status_flag1, 0x56);
+                assert_eq!(status_flag2, 0x78);
             }
             _ => panic!("unexpected parsed response variant"),
         }
