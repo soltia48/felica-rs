@@ -830,7 +830,7 @@ impl EmulatedSystem {
         }
         let response_transaction_number = transaction_number.checked_add(1)?;
 
-        let mut command_payload = payload[8..].to_vec();
+        let command_payload = payload[8..].to_vec();
         let command =
             FelicaStandardCommand::parse_secure_payload(command_code, &command_payload).ok()?;
 

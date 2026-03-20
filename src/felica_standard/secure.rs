@@ -532,23 +532,6 @@ fn pad_to_block_size_pkcs7(mut data: Vec<u8>, block_size: usize) -> Vec<u8> {
     data
 }
 
-fn strip_padding_pkcs7(data: &mut Vec<u8>, block_size: usize) {
-    let Some(&pad_len) = data.last() else {
-        return;
-    };
-    if pad_len == 0 || pad_len as usize >= block_size {
-        return;
-    }
-    let pad_len = pad_len as usize;
-    if pad_len <= data.len()
-        && data[data.len() - pad_len..]
-            .iter()
-            .all(|&b| b == pad_len as u8)
-    {
-        data.truncate(data.len() - pad_len);
-    }
-}
-
 fn xor_blocks(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
     xor_block(a, b)
 }
