@@ -2,7 +2,7 @@ use super::command::{is_register_command, is_secure_command_code};
 use super::secure::{
     AuthenticationContext, build_authentication2_payload, build_secure_response_frame_des,
     check_packet_mac_des, decrypt_des_cbc_zero_iv, encrypt_authentication2_payload,
-    generate_service_keys_des, strip_secure_padding_des,
+    generate_service_keys_des,
 };
 use super::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
@@ -831,7 +831,6 @@ impl EmulatedSystem {
         let response_transaction_number = transaction_number.checked_add(1)?;
 
         let mut command_payload = payload[8..].to_vec();
-        strip_secure_padding_des(&mut command_payload);
         let command =
             FelicaStandardCommand::parse_secure_payload(command_code, &command_payload).ok()?;
 

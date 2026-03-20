@@ -493,23 +493,20 @@ fn decrypt_secure_response_des(
             "secure response transaction ID mismatch".into(),
         ));
     }
-    let payload = strip_des_response_mac_and_padding(parsed.payload)?;
+    let payload = strip_des_response_mac(parsed.payload)?;
     Ok(DecryptedSecureResponse {
         transaction_number: parsed.header.transaction_number,
         payload,
     })
 }
 
-fn strip_des_response_mac_and_padding(
-    payload_with_mac: &[u8],
-) -> Result<Vec<u8>, FelicaStandardError> {
+fn strip_des_response_mac(payload_with_mac: &[u8]) -> Result<Vec<u8>, FelicaStandardError> {
     if payload_with_mac.len() < DES_MAC_SIZE {
         return Err(FelicaStandardError::Protocol(
             "secure response payload shorter than MAC".into(),
         ));
     }
-    let mut payload = payload_with_mac[..payload_with_mac.len() - DES_MAC_SIZE].to_vec();
-    strip_secure_padding_des(&mut payload);
+    let payload = payload_with_mac[..payload_with_mac.len() - DES_MAC_SIZE].to_vec();
     Ok(payload)
 }
 
@@ -668,10 +665,6 @@ pub(crate) fn decrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
 
 fn pad_to_des_block_size(data: Vec<u8>) -> Vec<u8> {
     pad_to_block_size_pkcs7(data, DES_BLOCK_SIZE)
-}
-
-pub(crate) fn strip_secure_padding_des(data: &mut Vec<u8>) {
-    strip_padding_pkcs7(data, DES_BLOCK_SIZE);
 }
 
 fn ceil_to_multiple(value: usize, block_size: usize) -> usize {
@@ -1120,7 +1113,10 @@ mod tests {
         let encrypted = captured.encrypt_command(0x42, payload).unwrap();
         let decrypted = captured.decrypt_response(0x42, &encrypted).unwrap();
         assert_eq!(decrypted.transaction_number, captured.transaction_number);
-        assert_eq!(decrypted.payload, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(
+            decrypted.payload,
+            vec![0xAA, 0xBB, 0xCC, 0x05, 0x05, 0x05, 0x05, 0x05]
+        );
     }
 
     #[test]
@@ -1160,21 +1156,6 @@ mod tests {
                 .unwrap_err()
                 .contains("multiple of 8")
         );
-    }
-
-    #[test]
-    fn strip_secure_padding_only_when_valid() {
-        let mut valid = vec![1, 2, 3, 2, 2];
-        strip_secure_padding_des(&mut valid);
-        assert_eq!(valid, vec![1, 2, 3]);
-
-        let mut invalid_value = vec![1, 2, 3, 1, 2];
-        strip_secure_padding_des(&mut invalid_value);
-        assert_eq!(invalid_value, vec![1, 2, 3, 1, 2]);
-
-        let mut invalid_len = vec![1, 2, 3, 8];
-        strip_secure_padding_des(&mut invalid_len);
-        assert_eq!(invalid_len, vec![1, 2, 3, 8]);
     }
 
     #[test]
