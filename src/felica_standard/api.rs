@@ -23,7 +23,6 @@ use super::{
 use crate::RemoteTarget;
 use crate::driver::errors::Result as DriverResult;
 use crate::felica_standard::Type3TagPollingResult;
-use rand::{RngCore, rngs::OsRng};
 use std::convert::TryInto;
 
 pub trait FelicaDriver {
@@ -832,8 +831,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             ));
         }
         let idm = self.idm_bytes()?;
-        let mut random_1 = [0u8; 8];
-        OsRng.fill_bytes(&mut random_1);
+        let random_1: [u8; 8] = rand::random();
 
         let context = AuthenticationContext::new(&idm, group_service_key, user_service_key);
 
@@ -1269,8 +1267,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
 
         let idm = self.idm_bytes()?;
-        let mut random_1 = [0u8; 16];
-        OsRng.fill_bytes(&mut random_1);
+        let random_1: [u8; 16] = rand::random();
 
         let context = AuthenticationContextV2Aes128::new(&idm, group_key, individual_key);
         let challenge_1a = context.encrypt_challenge1a(&random_1);

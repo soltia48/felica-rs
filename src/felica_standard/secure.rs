@@ -6,8 +6,8 @@ use aes::Aes128;
 use cbc::{Decryptor as CbcDecryptor, Encryptor as CbcEncryptor};
 use cmac::{Cmac, Mac};
 use des::cipher::{
-    BlockDecrypt, BlockDecryptMut, BlockEncrypt, BlockEncryptMut, KeyInit, KeyIvInit, StreamCipher,
-    block_padding::NoPadding, generic_array::GenericArray,
+    BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt, KeyInit, KeyIvInit,
+    StreamCipher, block_padding::NoPadding,
 };
 use des::{Des, TdesEde3};
 use ofb::Ofb;
@@ -537,12 +537,12 @@ fn xor_blocks(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
 }
 
 fn des_cipher(key: &[u8; 8]) -> Des {
-    Des::new(GenericArray::from_slice(key))
+    Des::new(key.into())
 }
 
 fn encrypt_des_block_internal(data: &[u8; DES_BLOCK_SIZE], key: &[u8; DES_BLOCK_SIZE]) -> [u8; 8] {
     let cipher = des_cipher(key);
-    let mut block_array = GenericArray::clone_from_slice(data);
+    let mut block_array = (*data).into();
     cipher.encrypt_block(&mut block_array);
     let mut out = [0u8; DES_BLOCK_SIZE];
     out.copy_from_slice(&block_array);
@@ -551,7 +551,7 @@ fn encrypt_des_block_internal(data: &[u8; DES_BLOCK_SIZE], key: &[u8; DES_BLOCK_
 
 fn decrypt_des_block_internal(data: &[u8; DES_BLOCK_SIZE], key: &[u8; DES_BLOCK_SIZE]) -> [u8; 8] {
     let cipher = des_cipher(key);
-    let mut block_array = GenericArray::clone_from_slice(data);
+    let mut block_array = (*data).into();
     cipher.decrypt_block(&mut block_array);
     let mut out = [0u8; DES_BLOCK_SIZE];
     out.copy_from_slice(&block_array);
@@ -562,8 +562,8 @@ fn encrypt_aes128_block_internal(
     data: &[u8; V2_AES128_BLOCK_SIZE],
     key: &[u8; V2_AES128_BLOCK_SIZE],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {
-    let cipher = Aes128::new(GenericArray::from_slice(key));
-    let mut block_array = GenericArray::clone_from_slice(data);
+    let cipher = Aes128::new(key.into());
+    let mut block_array = (*data).into();
     cipher.encrypt_block(&mut block_array);
     let mut out = [0u8; V2_AES128_BLOCK_SIZE];
     out.copy_from_slice(&block_array);
@@ -574,8 +574,8 @@ fn decrypt_aes128_block_internal(
     data: &[u8; V2_AES128_BLOCK_SIZE],
     key: &[u8; V2_AES128_BLOCK_SIZE],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {
-    let cipher = Aes128::new(GenericArray::from_slice(key));
-    let mut block_array = GenericArray::clone_from_slice(data);
+    let cipher = Aes128::new(key.into());
+    let mut block_array = (*data).into();
     cipher.decrypt_block(&mut block_array);
     let mut out = [0u8; V2_AES128_BLOCK_SIZE];
     out.copy_from_slice(&block_array);
@@ -595,8 +595,8 @@ fn encrypt_3des_block(data: &[u8; 8], key1: &[u8; 8], key2: &[u8; 8]) -> [u8; 8]
     triple_key[..8].copy_from_slice(key1);
     triple_key[8..16].copy_from_slice(key2);
     triple_key[16..24].copy_from_slice(key1);
-    let cipher = TdesEde3::new(GenericArray::from_slice(&triple_key));
-    let mut block = GenericArray::clone_from_slice(data);
+    let cipher = TdesEde3::new((&triple_key).into());
+    let mut block = (*data).into();
     cipher.encrypt_block(&mut block);
     let mut out = [0u8; 8];
     out.copy_from_slice(&block);
@@ -608,8 +608,8 @@ fn decrypt_3des_block(data: &[u8; 8], key1: &[u8; 8], key2: &[u8; 8]) -> [u8; 8]
     triple_key[..8].copy_from_slice(key1);
     triple_key[8..16].copy_from_slice(key2);
     triple_key[16..24].copy_from_slice(key1);
-    let cipher = TdesEde3::new(GenericArray::from_slice(&triple_key));
-    let mut block = GenericArray::clone_from_slice(data);
+    let cipher = TdesEde3::new((&triple_key).into());
+    let mut block = (*data).into();
     cipher.decrypt_block(&mut block);
     let mut out = [0u8; 8];
     out.copy_from_slice(&block);
@@ -624,7 +624,7 @@ pub(crate) fn encrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
     let mut out = vec![0u8; data.len()];
     let encrypted_len = CbcEncryptor::<Des>::new_from_slices(key, &iv)
         .map_err(|_| "failed to initialize DES-CBC encryptor".to_string())?
-        .encrypt_padded_b2b_mut::<NoPadding>(data, &mut out)
+        .encrypt_padded_b2b::<NoPadding>(data, &mut out)
         .map_err(|_| "secure command payload length must be multiple of 8 bytes".to_string())?
         .len();
     out.truncate(encrypted_len);
@@ -639,7 +639,7 @@ pub(crate) fn decrypt_des_cbc_zero_iv(data: &[u8], key: &[u8; 8]) -> Result<Vec<
     let mut out = vec![0u8; data.len()];
     let decrypted_len = CbcDecryptor::<Des>::new_from_slices(key, &iv)
         .map_err(|_| "failed to initialize DES-CBC decryptor".to_string())?
-        .decrypt_padded_b2b_mut::<NoPadding>(data, &mut out)
+        .decrypt_padded_b2b::<NoPadding>(data, &mut out)
         .map_err(|_| "authentication2 response length must be multiple of 8 bytes".to_string())?
         .len();
     out.truncate(decrypted_len);
@@ -688,7 +688,7 @@ fn calculate_mac_v2_aes128(
     b0[1..14].copy_from_slice(&iv[1..14]);
     b0[14..16].copy_from_slice(&(payload.len() as u16).to_be_bytes());
 
-    let mut cmac = <Cmac<Aes128> as Mac>::new_from_slice(mac_key)
+    let mut cmac = <Cmac<Aes128> as KeyInit>::new_from_slice(mac_key)
         .expect("AES-128 CMAC key length is fixed to 16 bytes");
     cmac.update(&b0);
     cmac.update(payload);

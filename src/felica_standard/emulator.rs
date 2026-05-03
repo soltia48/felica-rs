@@ -9,7 +9,6 @@ use super::{
     FelicaStandardResponse, ReadResult, ReadWithoutEncryptionResult, SearchServiceCodeResult,
     ServiceCode, Type3TagPollingResult, frame_with_length_prefix,
 };
-use rand::{RngCore, rngs::OsRng};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -654,8 +653,7 @@ impl EmulatedSystem {
             generate_service_keys_des(&system_key, &area_keys, &service_keys);
         let context = AuthenticationContext::new(&idm, &group_key, &user_key);
         let random_1 = context.decrypt_challenge1a(&challenge_1a);
-        let mut random_2 = [0u8; 8];
-        OsRng.fill_bytes(&mut random_2);
+        let random_2: [u8; 8] = rand::random();
         let challenge_1b = context.encrypt_challenge1b(&random_1);
         let challenge_2a = context.encrypt_challenge2a(&random_2);
 
