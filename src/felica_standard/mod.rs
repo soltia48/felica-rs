@@ -47,7 +47,7 @@ pub use response::FelicaStandardResponse;
 pub use secure::{
     AuthenticatedContext, Authentication2Response, Authentication2V2Response,
     SecureSessionCredentials, SecureSessionCredentialsRef, SecureSessionScheme,
-    generate_service_keys_des,
+    V2_AES128_SERVICE_KEY_INIT, generate_service_key_v2_aes128, generate_service_keys_des,
 };
 pub use type3::Type3TagPollingResult;
 pub use types::{

@@ -15,12 +15,15 @@ use ofb::Ofb;
 const TRANSACTION_NUMBER_SIZE: usize = 2;
 const TRANSACTION_ID_SIZE: usize = 6;
 const DES_SECURE_HEADER_SIZE: usize = TRANSACTION_NUMBER_SIZE + TRANSACTION_ID_SIZE;
-const AES128_V2_IV_MARKER: u8 = 0x01;
-const AES128_V2_AUTH_CONTEXT_SUFFIX: [u8; 2] = [0x01, 0x00];
-const AES128_V2_DERIVE_ENCRYPTION_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
+const V2_AES128_IV_MARKER: u8 = 0x01;
+const V2_AES128_AUTH_CONTEXT_SUFFIX: [u8; 2] = [0x01, 0x00];
+pub const V2_AES128_SERVICE_KEY_INIT: [u8; V2_AES128_BLOCK_SIZE] = [
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+];
+const V2_AES128_DERIVE_ENCRYPTION_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
     0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
 ];
-const AES128_V2_DERIVE_MAC_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
+const V2_AES128_DERIVE_MAC_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
     0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
 ];
 
@@ -462,8 +465,8 @@ impl AuthenticationContextV2Aes128 {
         random_2: &[u8; V2_AES128_BLOCK_SIZE],
     ) -> ([u8; V2_AES128_BLOCK_SIZE], [u8; V2_AES128_BLOCK_SIZE]) {
         let encryption_key =
-            encrypt_aes128_block_internal(&AES128_V2_DERIVE_ENCRYPTION_KEY_INPUT, random_2);
-        let mac_key = encrypt_aes128_block_internal(&AES128_V2_DERIVE_MAC_KEY_INPUT, random_2);
+            encrypt_aes128_block_internal(&V2_AES128_DERIVE_ENCRYPTION_KEY_INPUT, random_2);
+        let mac_key = encrypt_aes128_block_internal(&V2_AES128_DERIVE_MAC_KEY_INPUT, random_2);
         (encryption_key, mac_key)
     }
 }
@@ -475,7 +478,7 @@ fn build_authentication_context_block_v2_aes128(
     let mut block = [0u8; V2_AES128_BLOCK_SIZE];
     block[..2].copy_from_slice(&prefix);
     block[6..14].copy_from_slice(idm);
-    block[14..16].copy_from_slice(&AES128_V2_AUTH_CONTEXT_SUFFIX);
+    block[14..16].copy_from_slice(&V2_AES128_AUTH_CONTEXT_SUFFIX);
     block
 }
 
@@ -662,7 +665,7 @@ fn build_initial_vector_v2_aes128(
     challenge_3c: &[u8; 4],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {
     let mut iv = [0u8; V2_AES128_BLOCK_SIZE];
-    iv[0] = AES128_V2_IV_MARKER;
+    iv[0] = V2_AES128_IV_MARKER;
     iv[1] = frame_length;
     iv[2] = code;
     iv[3..5].copy_from_slice(&counter_bytes);
@@ -839,6 +842,17 @@ pub fn generate_service_keys_des(
     }
     let user_service_key = current_key;
     (group_service_key, user_service_key)
+}
+
+pub fn generate_service_key_v2_aes128(
+    system_key: &[u8; V2_AES128_BLOCK_SIZE],
+    service_keys: &[[u8; V2_AES128_BLOCK_SIZE]],
+) -> [u8; V2_AES128_BLOCK_SIZE] {
+    let mut current_key = *system_key;
+    for key in service_keys {
+        current_key = encrypt_aes128_block_internal(&current_key, key);
+    }
+    current_key
 }
 
 pub(crate) fn generate_registration_package_des(
@@ -1445,5 +1459,44 @@ mod tests {
             encrypted_payload: vec![0xAA; 8],
         };
         assert_eq!(response.scheme(), SecureSessionScheme::Aes128);
+    }
+
+    #[test]
+    fn generate_service_key_aes_reproduces_card_vectors() {
+        // Per-node AES key on the sample card: the node code repeated 8 times.
+        fn code_key(code: u16) -> [u8; V2_AES128_BLOCK_SIZE] {
+            let tag = code.to_be_bytes();
+            let mut key = [0u8; V2_AES128_BLOCK_SIZE];
+            for chunk in key.chunks_exact_mut(2) {
+                chunk.copy_from_slice(&tag);
+            }
+            key
+        }
+
+        let init = V2_AES128_SERVICE_KEY_INIT;
+        // Node 0x1008 carries a weak (all-zero) AES key on this card.
+        let weak_1008 = [0u8; V2_AES128_BLOCK_SIZE];
+
+        // All vectors below were confirmed live via mutual_authentication_v2.
+        let cases: &[(&[[u8; V2_AES128_BLOCK_SIZE]], &str)] = &[
+            (&[weak_1008], "3925042E238282F085BCEE62593C2385"),
+            (
+                &[weak_1008, code_key(0x100C)],
+                "586A2E06EE16AA2C6AE5B6CDFF6A5039",
+            ),
+            (&[code_key(0x100C)], "651049AE89581DDC3F302EA4E4A0F911"),
+            (
+                &[code_key(0x100C), code_key(0x1012)],
+                "5E86F6C0574EBAD952FAD9142E1AA6BB",
+            ),
+            // 3xxx services use (code + 1) repeated.
+            (&[code_key(0x3111)], "94459E3640EDBCE4746D83EECE80C065"),
+        ];
+        for (service_keys, expected) in cases {
+            assert_eq!(
+                generate_service_key_v2_aes128(&init, service_keys).to_vec(),
+                bytes_from_hex(expected),
+            );
+        }
     }
 }
