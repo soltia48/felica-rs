@@ -94,8 +94,8 @@ impl Type3TagPollingResult {
         self.base_timeout(PmmSlot::GET_SYSTEM_STATUS)
     }
 
-    /// Compute the Get Platform Information command timeout using the Other PMm byte.
-    pub fn get_platform_information_timeout_ms(&self) -> u16 {
+    /// Compute the Request Product Information command timeout using the Other PMm byte.
+    pub fn request_product_information_timeout_ms(&self) -> u16 {
         self.base_timeout(PmmSlot::OTHER)
     }
 
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(slot7, result.get_container_issue_information_timeout_ms());
         assert_eq!(slot7, result.get_container_property_timeout_ms());
         assert_eq!(slot7, result.get_container_id_timeout_ms());
-        assert_eq!(slot7, result.get_platform_information_timeout_ms());
+        assert_eq!(slot7, result.request_product_information_timeout_ms());
     }
 
     #[test]

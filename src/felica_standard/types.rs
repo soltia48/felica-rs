@@ -505,6 +505,10 @@ impl SpecificationVersion {
         self.option_versions.get(4).copied()
     }
 
+    pub fn random_id_option_version(&self) -> Option<OptionVersion> {
+        self.option_versions.get(5).copied()
+    }
+
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(4 + self.option_versions.len() * 2);
         bytes.push(self.format_version);
@@ -811,6 +815,7 @@ mod tests {
                 OptionVersion::new(10, 11, 12),
                 OptionVersion::new(13, 14, 15),
                 OptionVersion::new(1, 1, 1),
+                OptionVersion::new(2, 2, 2),
             ],
         };
         assert_eq!(spec.des_option_version(), Some(OptionVersion::new(4, 5, 6)));
@@ -830,11 +835,15 @@ mod tests {
             spec.communication_with_mac_option_version(),
             Some(OptionVersion::new(1, 1, 1))
         );
+        assert_eq!(
+            spec.random_id_option_version(),
+            Some(OptionVersion::new(2, 2, 2))
+        );
         let serialized = spec.to_bytes();
-        assert_eq!(serialized.len(), 14);
+        assert_eq!(serialized.len(), 16);
         assert_eq!(serialized[0], 1);
         assert_eq!(serialized[1..3], [0x23, 0x81]);
-        assert_eq!(serialized[3], 5);
+        assert_eq!(serialized[3], 6);
     }
 
     #[test]

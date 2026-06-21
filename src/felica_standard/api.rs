@@ -560,18 +560,18 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
-    pub fn get_platform_information(&mut self) -> Result<Vec<u8>, FelicaStandardError> {
+    pub fn request_product_information(&mut self) -> Result<Vec<u8>, FelicaStandardError> {
         let idm = self.idm_bytes()?;
-        let timeout_ms = self.polling_result.get_platform_information_timeout_ms();
+        let timeout_ms = self.polling_result.request_product_information_timeout_ms();
 
         let response = self.execute_command(
-            "Get Platform Information",
-            FelicaStandardCommand::GetPlatformInformation { idm },
+            "Request Product Information",
+            FelicaStandardCommand::RequestProductInformation { idm },
             timeout_ms,
         )?;
 
         match response {
-            FelicaStandardResponse::GetPlatformInformation {
+            FelicaStandardResponse::RequestProductInformation {
                 status_flag1,
                 status_flag2,
                 result,
@@ -579,19 +579,19 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             } => {
                 if status_flag1 != 0 {
                     Err(Self::status_error(
-                        "Get Platform Information",
+                        "Request Product Information",
                         status_flag1,
                         status_flag2,
                     ))
                 } else {
                     result.ok_or_else(|| {
                         FelicaStandardError::Protocol(
-                            "Get Platform Information missing result payload".into(),
+                            "Request Product Information missing result payload".into(),
                         )
                     })
                 }
             }
-            _ => Err(unexpected_response("Get Platform Information")),
+            _ => Err(unexpected_response("Request Product Information")),
         }
     }
 

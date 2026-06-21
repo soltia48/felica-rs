@@ -4,14 +4,14 @@ use super::{
     Authentication2V2Response, BLOCK_SIZE, CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerInformation,
     FelicaStandardError, GET_AREA_INFORMATION_RESPONSE_CODE, GET_CONTAINER_ID_RESPONSE_CODE,
     GET_CONTAINER_ISSUE_INFORMATION_RESPONSE_CODE, GET_CONTAINER_PROPERTY_RESPONSE_CODE,
-    GET_NODE_PROPERTY_RESPONSE_CODE, GET_PLATFORM_INFORMATION_RESPONSE_CODE,
-    GET_SYSTEM_STATUS_RESPONSE_CODE, GetAreaInformationResult, GetNodePropertyResult,
-    GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES,
-    MAX_SERVICE_CODES, NodeProperty, OptionVersion, POLLING_RESPONSE_CODE, READ_COMMAND_CODE,
-    READ_V2_COMMAND_CODE, READ_WITHOUT_ENCRYPTION_RESPONSE_CODE, REGISTER_AREA_COMMAND_CODE,
-    REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
+    GET_NODE_PROPERTY_RESPONSE_CODE, GET_SYSTEM_STATUS_RESPONSE_CODE, GetAreaInformationResult,
+    GetNodePropertyResult, GetSystemStatusResult, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
+    MAX_NODE_PROPERTY_CODES, MAX_SERVICE_CODES, NodeProperty, OptionVersion, POLLING_RESPONSE_CODE,
+    READ_COMMAND_CODE, READ_V2_COMMAND_CODE, READ_WITHOUT_ENCRYPTION_RESPONSE_CODE,
+    REGISTER_AREA_COMMAND_CODE, REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
     REQUEST_BLOCK_INFORMATION_EX_RESPONSE_CODE, REQUEST_BLOCK_INFORMATION_RESPONSE_CODE,
-    REQUEST_CODE_LIST_RESPONSE_CODE, REQUEST_RESPONSE_RESPONSE_CODE, REQUEST_SERVICE_RESPONSE_CODE,
+    REQUEST_CODE_LIST_RESPONSE_CODE, REQUEST_PRODUCT_INFORMATION_RESPONSE_CODE,
+    REQUEST_RESPONSE_RESPONSE_CODE, REQUEST_SERVICE_RESPONSE_CODE,
     REQUEST_SERVICE_V2_RESPONSE_CODE, REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE,
     REQUEST_SYSTEM_CODE_RESPONSE_CODE, RESET_MODE_RESPONSE_CODE, ReadResult,
     ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
@@ -117,7 +117,7 @@ pub enum FelicaStandardResponse {
         status_flag2: u8,
         result: GetSystemStatusResult,
     },
-    GetPlatformInformation {
+    RequestProductInformation {
         idm: Idm,
         status_flag1: u8,
         status_flag2: u8,
@@ -230,8 +230,8 @@ impl FelicaStandardResponse {
             GET_NODE_PROPERTY_RESPONSE_CODE => Self::parse_get_node_property(idm, data),
             REQUEST_SERVICE_V2_RESPONSE_CODE => Self::parse_request_service_v2(idm, data),
             GET_SYSTEM_STATUS_RESPONSE_CODE => Self::parse_get_system_status(idm, data),
-            GET_PLATFORM_INFORMATION_RESPONSE_CODE => {
-                Self::parse_get_platform_information(idm, data)
+            REQUEST_PRODUCT_INFORMATION_RESPONSE_CODE => {
+                Self::parse_request_product_information(idm, data)
             }
             REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE => {
                 Self::parse_request_specification_version(idm, data)
@@ -739,12 +739,12 @@ impl FelicaStandardResponse {
         })
     }
 
-    fn parse_get_platform_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short get platform information response")?;
+    fn parse_request_product_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
+        Self::ensure_response_len(data, 12, "short request product information response")?;
         let status_flag1 = data[10];
         let status_flag2 = data[11];
         if status_flag1 != 0 {
-            return Ok(FelicaStandardResponse::GetPlatformInformation {
+            return Ok(FelicaStandardResponse::RequestProductInformation {
                 idm,
                 status_flag1,
                 status_flag2,
@@ -752,14 +752,18 @@ impl FelicaStandardResponse {
             });
         }
 
-        Self::ensure_response_len(data, 13, "short get platform information success response")?;
+        Self::ensure_response_len(
+            data,
+            13,
+            "short request product information success response",
+        )?;
         let data_len = data[12] as usize;
         Self::ensure_response_len(
             data,
             13 + data_len,
-            "short get platform information response payload",
+            "short request product information response payload",
         )?;
-        Ok(FelicaStandardResponse::GetPlatformInformation {
+        Ok(FelicaStandardResponse::RequestProductInformation {
             idm,
             status_flag1,
             status_flag2,
@@ -1452,7 +1456,7 @@ impl FelicaStandardResponse {
                 payload.extend_from_slice(&result.data);
                 Ok(payload)
             }
-            FelicaStandardResponse::GetPlatformInformation {
+            FelicaStandardResponse::RequestProductInformation {
                 idm,
                 status_flag1,
                 status_flag2,
@@ -1461,16 +1465,16 @@ impl FelicaStandardResponse {
                 if *status_flag1 == 0 {
                     let result = result.as_ref().ok_or_else(|| {
                         FelicaStandardError::Protocol(
-                            "get platform information result is missing on success".into(),
+                            "request product information result is missing on success".into(),
                         )
                     })?;
                     if result.len() > u8::MAX as usize {
                         return Err(FelicaStandardError::Protocol(
-                            "get platform information response data length out of range".into(),
+                            "request product information response data length out of range".into(),
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2 + 1 + result.len());
-                    payload.push(GET_PLATFORM_INFORMATION_RESPONSE_CODE);
+                    payload.push(REQUEST_PRODUCT_INFORMATION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -1480,11 +1484,11 @@ impl FelicaStandardResponse {
                 } else {
                     if result.is_some() {
                         return Err(FelicaStandardError::Protocol(
-                            "get platform information result must be omitted on error".into(),
+                            "request product information result must be omitted on error".into(),
                         ));
                     }
                     let mut payload = Vec::with_capacity(1 + IDM_LEN + 2);
-                    payload.push(GET_PLATFORM_INFORMATION_RESPONSE_CODE);
+                    payload.push(REQUEST_PRODUCT_INFORMATION_RESPONSE_CODE);
                     payload.extend_from_slice(idm);
                     payload.push(*status_flag1);
                     payload.push(*status_flag2);
@@ -2254,9 +2258,9 @@ mod tests {
     }
 
     #[test]
-    fn get_platform_information_to_frame_round_trip() {
+    fn request_product_information_to_frame_round_trip() {
         let expected_platform_info = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let response = FelicaStandardResponse::GetPlatformInformation {
+        let response = FelicaStandardResponse::RequestProductInformation {
             idm: sample_idm(),
             status_flag1: 0x00,
             status_flag2: 0x00,
@@ -2266,7 +2270,7 @@ mod tests {
         let frame = response.to_frame().unwrap();
         let parsed = FelicaStandardResponse::from_bytes(&frame).unwrap();
         match parsed {
-            FelicaStandardResponse::GetPlatformInformation {
+            FelicaStandardResponse::RequestProductInformation {
                 idm,
                 status_flag1,
                 status_flag2,
@@ -2857,8 +2861,8 @@ mod tests {
     }
 
     #[test]
-    fn to_payload_rejects_get_platform_information_missing_result_on_success() {
-        let response = FelicaStandardResponse::GetPlatformInformation {
+    fn to_payload_rejects_request_product_information_missing_result_on_success() {
+        let response = FelicaStandardResponse::RequestProductInformation {
             idm: sample_idm(),
             status_flag1: 0x00,
             status_flag2: 0x00,

@@ -4,18 +4,18 @@ use super::{
     CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerProperty, FelicaStandardError,
     GET_AREA_INFORMATION_COMMAND_CODE, GET_CONTAINER_ID_COMMAND_CODE,
     GET_CONTAINER_ISSUE_INFORMATION_COMMAND_CODE, GET_CONTAINER_PROPERTY_COMMAND_CODE,
-    GET_NODE_PROPERTY_COMMAND_CODE, GET_PLATFORM_INFORMATION_COMMAND_CODE,
-    GET_SYSTEM_STATUS_COMMAND_CODE, IDM_LEN, MAX_BLOCK_LIST_LEN, MAX_NODE_CODES,
-    MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES, NodePropertyType,
-    POLLING_COMMAND_CODE, READ_COMMAND_CODE, READ_V2_COMMAND_CODE,
+    GET_NODE_PROPERTY_COMMAND_CODE, GET_SYSTEM_STATUS_COMMAND_CODE, IDM_LEN, MAX_BLOCK_LIST_LEN,
+    MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES,
+    NodePropertyType, POLLING_COMMAND_CODE, READ_COMMAND_CODE, READ_V2_COMMAND_CODE,
     READ_WITHOUT_ENCRYPTION_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
     REQUEST_BLOCK_INFORMATION_COMMAND_CODE, REQUEST_BLOCK_INFORMATION_EX_COMMAND_CODE,
-    REQUEST_CODE_LIST_COMMAND_CODE, REQUEST_RESPONSE_COMMAND_CODE, REQUEST_SERVICE_COMMAND_CODE,
-    REQUEST_SERVICE_V2_COMMAND_CODE, REQUEST_SPECIFICATION_VERSION_COMMAND_CODE,
-    REQUEST_SYSTEM_CODE_COMMAND_CODE, RESET_MODE_COMMAND_CODE, SEARCH_SERVICE_CODE_COMMAND_CODE,
-    SET_PARAMETER_COMMAND_CODE, ServiceCode, SetParameterEncryptionType, SetParameterPacketType,
-    WRITE_COMMAND_CODE, WRITE_V2_COMMAND_CODE, WRITE_WITHOUT_ENCRYPTION_COMMAND_CODE,
+    REQUEST_CODE_LIST_COMMAND_CODE, REQUEST_PRODUCT_INFORMATION_COMMAND_CODE,
+    REQUEST_RESPONSE_COMMAND_CODE, REQUEST_SERVICE_COMMAND_CODE, REQUEST_SERVICE_V2_COMMAND_CODE,
+    REQUEST_SPECIFICATION_VERSION_COMMAND_CODE, REQUEST_SYSTEM_CODE_COMMAND_CODE,
+    RESET_MODE_COMMAND_CODE, SEARCH_SERVICE_CODE_COMMAND_CODE, SET_PARAMETER_COMMAND_CODE,
+    ServiceCode, SetParameterEncryptionType, SetParameterPacketType, WRITE_COMMAND_CODE,
+    WRITE_V2_COMMAND_CODE, WRITE_WITHOUT_ENCRYPTION_COMMAND_CODE,
 };
 
 pub enum FelicaStandardCommand {
@@ -113,7 +113,7 @@ pub enum FelicaStandardCommand {
     GetSystemStatus {
         idm: [u8; IDM_LEN],
     },
-    GetPlatformInformation {
+    RequestProductInformation {
         idm: [u8; IDM_LEN],
     },
     RequestSpecificationVersion {
@@ -464,8 +464,8 @@ impl FelicaStandardCommand {
                 payload.extend_bytes(&[0x00; 2]);
                 CommandEncoding::Plain(payload.finish_frame())
             }
-            FelicaStandardCommand::GetPlatformInformation { idm } => {
-                let mut payload = PayloadWriter::new(GET_PLATFORM_INFORMATION_COMMAND_CODE);
+            FelicaStandardCommand::RequestProductInformation { idm } => {
+                let mut payload = PayloadWriter::new(REQUEST_PRODUCT_INFORMATION_COMMAND_CODE);
                 payload.idm(idm);
                 CommandEncoding::Plain(payload.finish_frame())
             }
@@ -930,14 +930,14 @@ impl FelicaStandardCommand {
                 }
                 Ok(FelicaStandardCommand::GetSystemStatus { idm })
             }
-            GET_PLATFORM_INFORMATION_COMMAND_CODE => {
+            REQUEST_PRODUCT_INFORMATION_COMMAND_CODE => {
                 let (idm, rest) = parse_idm(body)?;
                 if !rest.is_empty() {
                     return Err(FelicaStandardError::Protocol(
-                        "get platform information payload has trailing bytes".into(),
+                        "request product information payload has trailing bytes".into(),
                     ));
                 }
-                Ok(FelicaStandardCommand::GetPlatformInformation { idm })
+                Ok(FelicaStandardCommand::RequestProductInformation { idm })
             }
             REQUEST_SPECIFICATION_VERSION_COMMAND_CODE => {
                 let (idm, rest) = parse_idm(body)?;
@@ -1436,8 +1436,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_payload_rejects_get_platform_information_trailing_bytes() {
-        let mut payload = vec![GET_PLATFORM_INFORMATION_COMMAND_CODE];
+    fn parse_payload_rejects_request_product_information_trailing_bytes() {
+        let mut payload = vec![REQUEST_PRODUCT_INFORMATION_COMMAND_CODE];
         payload.extend_from_slice(&sample_idm());
         payload.push(0x00);
 

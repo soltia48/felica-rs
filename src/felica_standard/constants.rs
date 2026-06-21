@@ -91,8 +91,8 @@ pub const REQUEST_SERVICE_V2_COMMAND_CODE: u8 = 0x32;
 /// Get System Status command code.
 pub const GET_SYSTEM_STATUS_COMMAND_CODE: u8 = 0x38;
 
-/// Get Platform Information command code.
-pub const GET_PLATFORM_INFORMATION_COMMAND_CODE: u8 = 0x3A;
+/// Request Product Information command code.
+pub const REQUEST_PRODUCT_INFORMATION_COMMAND_CODE: u8 = 0x3A;
 
 /// Request Specification Version command code.
 pub const REQUEST_SPECIFICATION_VERSION_COMMAND_CODE: u8 = 0x3C;
@@ -192,8 +192,8 @@ pub const REQUEST_SERVICE_V2_RESPONSE_CODE: u8 = 0x33;
 /// Get System Status response code.
 pub const GET_SYSTEM_STATUS_RESPONSE_CODE: u8 = 0x39;
 
-/// Get Platform Information response code.
-pub const GET_PLATFORM_INFORMATION_RESPONSE_CODE: u8 = 0x3B;
+/// Request Product Information response code.
+pub const REQUEST_PRODUCT_INFORMATION_RESPONSE_CODE: u8 = 0x3B;
 
 /// Request Specification Version response code.
 pub const REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE: u8 = 0x3D;
