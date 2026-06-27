@@ -17,11 +17,7 @@ const TRANSACTION_ID_SIZE: usize = 6;
 const DES_SECURE_HEADER_SIZE: usize = TRANSACTION_NUMBER_SIZE + TRANSACTION_ID_SIZE;
 const V2_AES128_IV_MARKER: u8 = 0x01;
 const V2_AES128_AUTH_CONTEXT_SUFFIX: [u8; 2] = [0x01, 0x00];
-// Fixed initial chaining block for the FeliCa Standard v2 (AES) service-key
-// degeneration. Unlike DES, the degeneration does not start from the system key
-// nor chain area keys: this constant is the chain start and only service keys
-// are folded in.
-const V2_AES128_SERVICE_KEY_INIT: [u8; V2_AES128_BLOCK_SIZE] = [
+const V2_AES128_NODE_KEY_INIT: [u8; V2_AES128_BLOCK_SIZE] = [
     0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
 ];
 const V2_AES128_DERIVE_ENCRYPTION_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
@@ -848,11 +844,11 @@ pub fn generate_service_keys_des(
     (group_service_key, user_service_key)
 }
 
-pub fn generate_service_key_v2_aes128(
-    service_keys: &[[u8; V2_AES128_BLOCK_SIZE]],
+pub fn generate_group_key_v2_aes128(
+    node_keys: &[[u8; V2_AES128_BLOCK_SIZE]],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {
-    let mut current_key = V2_AES128_SERVICE_KEY_INIT;
-    for key in service_keys {
+    let mut current_key = V2_AES128_NODE_KEY_INIT;
+    for key in node_keys {
         current_key = encrypt_aes128_block_internal(&current_key, key);
     }
     current_key
@@ -1496,7 +1492,7 @@ mod tests {
         ];
         for (service_keys, expected) in cases {
             assert_eq!(
-                generate_service_key_v2_aes128(service_keys).to_vec(),
+                generate_group_key_v2_aes128(service_keys).to_vec(),
                 bytes_from_hex(expected),
             );
         }
