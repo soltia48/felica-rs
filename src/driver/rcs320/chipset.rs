@@ -5,11 +5,12 @@
 //! RC-S330 and later devices.
 
 use crate::driver::errors::{DriverError, Result};
+use crate::driver::io::{remaining_until, take_from_buffer, timeout_error};
 use crate::driver::rcs320::frame::{ACK_BYTES, Frame, FrameType, SOF};
 use crate::transport::Transport;
 use log::debug;
 use std::collections::VecDeque;
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 
 /// Maximum data size for RC-S320 frames.
@@ -346,7 +347,7 @@ impl<T: Transport> Chipset<T> {
         let mut out = Vec::with_capacity(len);
 
         while out.len() < len {
-            self.take_from_buffer(&mut out, len);
+            take_from_buffer(&mut self.read_buffer, &mut out, len);
             if out.len() == len {
                 break;
             }
@@ -369,33 +370,13 @@ impl<T: Transport> Chipset<T> {
 
         Ok(out)
     }
-
-    /// Takes bytes from the read buffer.
-    fn take_from_buffer(&mut self, out: &mut Vec<u8>, len: usize) {
-        while out.len() < len {
-            if let Some(byte) = self.read_buffer.pop_front() {
-                out.push(byte);
-            } else {
-                break;
-            }
-        }
-    }
-}
-
-fn remaining_until(deadline: Instant) -> Option<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|d| d.as_nanos() != 0)
-}
-
-fn timeout_error() -> io::Error {
-    io::Error::new(ErrorKind::TimedOut, "timeout while waiting for data")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io;
 
     #[derive(Default)]
     struct DummyTransport {
@@ -448,30 +429,6 @@ mod tests {
             Err(other) => panic!("expected DriverError::Other, got {other}"),
             Ok(_) => panic!("expected DriverError::Other, got Ok"),
         }
-    }
-
-    #[test]
-    fn remaining_until_and_timeout_error_behave_as_expected() {
-        let future = Instant::now() + Duration::from_secs(1);
-        assert!(remaining_until(future).is_some());
-
-        let now = Instant::now();
-        assert!(remaining_until(now).is_none());
-
-        let err = timeout_error();
-        assert_eq!(err.kind(), ErrorKind::TimedOut);
-        assert_eq!(err.to_string(), "timeout while waiting for data");
-    }
-
-    #[test]
-    fn take_from_buffer_consumes_requested_bytes() {
-        let mut chipset = new_chipset(DummyTransport::default());
-        chipset.read_buffer.extend([0x10, 0x20, 0x30]);
-
-        let mut out = Vec::new();
-        chipset.take_from_buffer(&mut out, 2);
-        assert_eq!(out, vec![0x10, 0x20]);
-        assert_eq!(chipset.read_buffer, VecDeque::from(vec![0x30]));
     }
 
     #[test]

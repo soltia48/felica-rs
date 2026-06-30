@@ -14,6 +14,7 @@
 pub(crate) mod common;
 pub mod errors;
 pub(crate) mod framing;
+pub(crate) mod io;
 pub mod port100;
 pub mod port400;
 pub mod rcs320;

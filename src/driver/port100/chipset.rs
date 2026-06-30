@@ -1,11 +1,11 @@
 use crate::driver::errors::{
     ChipsetError, CommunicationFault, DriverError, Result, ensure_status_ok,
 };
+use crate::driver::io::{recover_after_error, remaining_until, take_from_buffer, timeout_error};
 use crate::driver::port100::frame::{self, Frame, FrameType};
 use crate::transport::Transport;
-use log::{debug, warn};
+use log::debug;
 use std::collections::VecDeque;
-use std::io::{self, ErrorKind};
 use std::time::{Duration, Instant};
 
 const IN_SET_PROTOCOL_DEFAULTS: [u8; 38] = [
@@ -26,7 +26,6 @@ impl<T: Transport> Chipset<T> {
     pub const ACK: [u8; 6] = frame::ACK_BYTES;
     const ACK_TIMEOUT: Duration = Duration::from_millis(1_000);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
-    const BUFFER_CLEAR_TIMEOUT: Duration = Duration::from_millis(50);
 
     pub fn new(mut transport: T) -> Result<Self> {
         transport.write(&Self::ACK)?;
@@ -327,7 +326,7 @@ impl<T: Transport> Chipset<T> {
     fn read_exact(&mut self, len: usize, deadline: Instant) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len);
         while out.len() < len {
-            self.take_from_buffer(&mut out, len);
+            take_from_buffer(&mut self.read_buffer, &mut out, len);
             if out.len() == len {
                 break;
             }
@@ -339,35 +338,6 @@ impl<T: Transport> Chipset<T> {
             }
         }
         Ok(out)
-    }
-
-    fn recover_after_error(&mut self, drain_buffer: bool) {
-        if let Err(err) = self.transport.write(&Self::ACK) {
-            warn!("failed to send recovery ACK: {}", err);
-        }
-        if drain_buffer {
-            self.drain_input(Self::BUFFER_CLEAR_TIMEOUT);
-        }
-        self.read_buffer.clear();
-    }
-
-    fn drain_input(&mut self, timeout: Duration) {
-        self.read_buffer.clear();
-        let deadline = Instant::now() + timeout;
-        while let Some(remaining) = remaining_until(deadline) {
-            match self.transport.read(remaining) {
-                Ok(bytes) => {
-                    if bytes.is_empty() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    if err.kind() == ErrorKind::TimedOut {
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     fn read_command_response(&mut self, code: u8) -> Result<Vec<u8>> {
@@ -404,16 +374,6 @@ impl<T: Transport> Chipset<T> {
         data
     }
 
-    fn take_from_buffer(&mut self, out: &mut Vec<u8>, len: usize) {
-        while out.len() < len {
-            if let Some(byte) = self.read_buffer.pop_front() {
-                out.push(byte);
-            } else {
-                break;
-            }
-        }
-    }
-
     fn with_recovery<R>(
         &mut self,
         drain_buffer: bool,
@@ -422,7 +382,12 @@ impl<T: Transport> Chipset<T> {
         match action(self) {
             Ok(value) => Ok(value),
             Err(err) => {
-                self.recover_after_error(drain_buffer);
+                recover_after_error(
+                    &mut self.transport,
+                    &mut self.read_buffer,
+                    &Self::ACK,
+                    drain_buffer,
+                );
                 Err(err)
             }
         }
@@ -464,20 +429,11 @@ fn target_param_index(name: &str) -> Option<u8> {
     }
 }
 
-fn remaining_until(deadline: Instant) -> Option<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|d| d.as_nanos() != 0)
-}
-
-fn timeout_error() -> io::Error {
-    io::Error::new(ErrorKind::TimedOut, "timeout while waiting for data")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::Transport;
+    use std::io::{self, ErrorKind};
 
     #[derive(Default)]
     struct DummyTransport {
@@ -554,35 +510,6 @@ mod tests {
         assert_eq!(initiator_param_index("unknown"), None);
         assert_eq!(target_param_index("rf_off_error"), Some(1));
         assert_eq!(target_param_index("unknown"), None);
-    }
-
-    #[test]
-    fn remaining_until_and_timeout_error_behave_as_expected() {
-        let future = Instant::now() + Duration::from_millis(10);
-        assert!(remaining_until(future).is_some());
-
-        let past = Instant::now()
-            .checked_sub(Duration::from_millis(1))
-            .expect("checked_sub should return Some");
-        assert!(remaining_until(past).is_none());
-
-        let timeout = timeout_error();
-        assert_eq!(timeout.kind(), ErrorKind::TimedOut);
-        assert!(
-            timeout
-                .to_string()
-                .contains("timeout while waiting for data")
-        );
-    }
-
-    #[test]
-    fn take_from_buffer_consumes_only_requested_bytes() {
-        let mut chipset = new_chipset(DummyTransport::default());
-        chipset.read_buffer.extend([1u8, 2, 3, 4, 5]);
-        let mut out = Vec::new();
-        chipset.take_from_buffer(&mut out, 3);
-        assert_eq!(out, vec![1, 2, 3]);
-        assert_eq!(chipset.read_buffer, VecDeque::from(vec![4, 5]));
     }
 
     #[test]

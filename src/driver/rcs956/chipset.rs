@@ -3,11 +3,11 @@
 //! This module provides low-level communication with the RC-S956 chipset.
 
 use crate::driver::errors::{ChipsetError, DriverError, Result};
+use crate::driver::io::{recover_after_error, remaining_until, timeout_error};
 use crate::driver::rcs956::frame::{self, CONTROLLER_TO_HOST, Frame};
 use crate::transport::Transport;
 use log::{debug, warn};
 use std::collections::VecDeque;
-use std::io::{self, ErrorKind};
 use std::time::{Duration, Instant};
 
 /// Maximum host command frame size for RC-S956.
@@ -164,7 +164,6 @@ impl<T: Transport> Chipset<T> {
     const ACK_TIMEOUT: Duration = Duration::from_millis(100);
     #[allow(dead_code)]
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_000);
-    const BUFFER_CLEAR_TIMEOUT: Duration = Duration::from_millis(50);
 
     /// Creates a new chipset handler with the given transport.
     pub fn new(mut transport: T) -> Result<Self> {
@@ -255,7 +254,7 @@ impl<T: Transport> Chipset<T> {
 
         // Check if it starts with SOF
         if frame_bytes.get(0..3) != Some(&frame::SOF) {
-            self.recover_after_error(true);
+            recover_after_error(&mut self.transport, &mut self.read_buffer, &Self::ACK, true);
             return Err(DriverError::Other("invalid frame start sequence".into()));
         }
 
@@ -366,37 +365,6 @@ impl<T: Transport> Chipset<T> {
         Ok(payload[2..].to_vec())
     }
 
-    /// Recovers from an error by sending ACK and optionally draining the buffer.
-    fn recover_after_error(&mut self, drain_buffer: bool) {
-        if let Err(err) = self.transport.write(&Self::ACK) {
-            warn!("failed to send recovery ACK: {}", err);
-        }
-        if drain_buffer {
-            self.drain_input(Self::BUFFER_CLEAR_TIMEOUT);
-        }
-        self.read_buffer.clear();
-    }
-
-    /// Drains input from the transport.
-    fn drain_input(&mut self, timeout: Duration) {
-        self.read_buffer.clear();
-        let deadline = Instant::now() + timeout;
-        while let Some(remaining) = remaining_until(deadline) {
-            match self.transport.read(remaining) {
-                Ok(bytes) => {
-                    if bytes.is_empty() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    if err.kind() == ErrorKind::TimedOut {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
     /// Executes an action with error recovery.
     fn with_recovery<R>(
         &mut self,
@@ -406,7 +374,12 @@ impl<T: Transport> Chipset<T> {
         match action(self) {
             Ok(value) => Ok(value),
             Err(err) => {
-                self.recover_after_error(drain_buffer);
+                recover_after_error(
+                    &mut self.transport,
+                    &mut self.read_buffer,
+                    &Self::ACK,
+                    drain_buffer,
+                );
                 Err(err)
             }
         }
@@ -656,22 +629,11 @@ impl<T: Transport> Chipset<T> {
     }
 }
 
-// Helper functions
-
-fn remaining_until(deadline: Instant) -> Option<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|d| d.as_nanos() != 0)
-}
-
-fn timeout_error() -> io::Error {
-    io::Error::new(ErrorKind::TimedOut, "timeout while waiting for data")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::io::{self, ErrorKind};
 
     #[derive(Default)]
     struct DummyTransport {
@@ -830,15 +792,5 @@ mod tests {
             Err(other) => panic!("expected timeout io error, got {other}"),
             Ok(data) => panic!("expected timeout error, got {data:?}"),
         }
-    }
-
-    #[test]
-    fn remaining_until_and_timeout_error_behave_as_expected() {
-        assert!(remaining_until(Instant::now() + Duration::from_secs(1)).is_some());
-        assert!(remaining_until(Instant::now()).is_none());
-
-        let err = timeout_error();
-        assert_eq!(err.kind(), ErrorKind::TimedOut);
-        assert_eq!(err.to_string(), "timeout while waiting for data");
     }
 }
