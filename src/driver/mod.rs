@@ -11,7 +11,9 @@
 //! All drivers implement the [`crate::felica_standard::FelicaDriver`] trait,
 //! allowing them to be used interchangeably for FeliCa card operations.
 
+pub(crate) mod common;
 pub mod errors;
+pub(crate) mod framing;
 pub mod port100;
 pub mod port400;
 pub mod rcs320;

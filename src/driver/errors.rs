@@ -7,6 +7,11 @@ use std::fmt;
 pub type Result<T> = std::result::Result<T, DriverError>;
 
 /// Errors that can occur during NFC driver operations.
+///
+/// The driver layer sits between the contactless-frontend primitives
+/// ([`CommunicationError`], [`UnsupportedTargetError`]) and the FeliCa protocol
+/// layer (`FelicaStandardError`). Hardware-level rejections reported by the
+/// reader chipset are grouped under [`ChipsetError`].
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
     /// The requested target type is not supported.
@@ -17,13 +22,9 @@ pub enum DriverError {
     #[error(transparent)]
     Communication(#[from] CommunicationError),
 
-    /// The chipset returned an error status.
+    /// The reader chipset rejected a command (status byte or RF fault).
     #[error(transparent)]
-    Status(#[from] StatusError),
-
-    /// A communication fault was detected.
-    #[error(transparent)]
-    Fault(#[from] CommunicationFault),
+    Chipset(#[from] ChipsetError),
 
     /// An I/O error occurred.
     #[error(transparent)]
@@ -41,19 +42,26 @@ impl DriverError {
     }
 }
 
-/// Chipset status error with an error code.
-#[derive(Debug, thiserror::Error, Clone, Copy)]
-#[error("chipset status error {errno:#04x}")]
-pub struct StatusError {
-    /// The error code returned by the chipset.
-    pub errno: u8,
+impl From<CommunicationFault> for DriverError {
+    fn from(fault: CommunicationFault) -> Self {
+        DriverError::Chipset(ChipsetError::Fault(fault))
+    }
 }
 
-impl StatusError {
-    /// Creates a new `StatusError` with the given error number.
-    pub const fn new(errno: u8) -> Self {
-        Self { errno }
-    }
+/// A hardware-level error reported by the reader's chipset.
+///
+/// Both kinds originate from the chipset refusing or failing a command, but
+/// they carry different payloads: a one-byte command status versus a 32-bit RF
+/// communication fault bitmask (see [`CommunicationFault`]).
+#[derive(Debug, thiserror::Error, Clone, Copy)]
+pub enum ChipsetError {
+    /// The chipset returned a non-zero status byte for a command.
+    #[error("chipset status error {0:#04x}")]
+    Status(u8),
+
+    /// The chipset reported an RF communication fault.
+    #[error(transparent)]
+    Fault(CommunicationFault),
 }
 
 /// Communication fault codes from the chipset.
@@ -148,21 +156,24 @@ impl std::error::Error for CommunicationFault {}
 pub(crate) fn ensure_status_ok(status: Option<u8>) -> Result<()> {
     match status {
         Some(0) | None => Ok(()),
-        Some(code) => Err(StatusError::new(code).into()),
+        Some(code) => Err(ChipsetError::Status(code).into()),
     }
 }
 
-/// Converts a communication fault to an appropriate `DriverError`.
-pub(crate) fn convert_fault_to_comm_error(
-    fault: CommunicationFault,
-    treat_rf_off_as_broken: bool,
-) -> DriverError {
-    if treat_rf_off_as_broken && fault.is_rf_off() {
-        DriverError::Communication(CommunicationError::broken_link(fault.to_string()))
-    } else if fault.is_timeout() {
-        DriverError::Communication(CommunicationError::timeout(fault.to_string()))
-    } else {
-        DriverError::Communication(CommunicationError::transmission(fault.to_string()))
+impl CommunicationFault {
+    /// Maps this fault to the most appropriate [`DriverError::Communication`]
+    /// variant.
+    ///
+    /// When `treat_rf_off_as_broken` is set, an RF-off fault is reported as a
+    /// broken link rather than a transmission error.
+    pub fn to_driver_error(self, treat_rf_off_as_broken: bool) -> DriverError {
+        if treat_rf_off_as_broken && self.is_rf_off() {
+            DriverError::Communication(CommunicationError::broken_link(self.to_string()))
+        } else if self.is_timeout() {
+            DriverError::Communication(CommunicationError::timeout(self.to_string()))
+        } else {
+            DriverError::Communication(CommunicationError::transmission(self.to_string()))
+        }
     }
 }
 
@@ -193,29 +204,29 @@ mod tests {
         assert!(ensure_status_ok(Some(0)).is_ok());
 
         match ensure_status_ok(Some(0x7F)) {
-            Err(DriverError::Status(status)) => assert_eq!(status.errno, 0x7F),
+            Err(DriverError::Chipset(ChipsetError::Status(errno))) => assert_eq!(errno, 0x7F),
             Err(other) => panic!("expected status error, got {other}"),
             Ok(_) => panic!("expected status error, got Ok"),
         }
     }
 
     #[test]
-    fn convert_fault_to_comm_error_maps_each_branch() {
-        match convert_fault_to_comm_error(CommunicationFault::new(0x00000080), false) {
+    fn communication_fault_to_driver_error_maps_each_branch() {
+        match CommunicationFault::new(0x00000080).to_driver_error(false) {
             DriverError::Communication(CommunicationError::Timeout(message)) => {
                 assert!(message.contains("RECEIVE_TIMEOUT_ERROR"));
             }
             other => panic!("expected timeout communication error, got {other}"),
         }
 
-        match convert_fault_to_comm_error(CommunicationFault::new(0x00000400), true) {
+        match CommunicationFault::new(0x00000400).to_driver_error(true) {
             DriverError::Communication(CommunicationError::BrokenLink(message)) => {
                 assert!(message.contains("RF_OFF_ERROR"));
             }
             other => panic!("expected broken-link communication error, got {other}"),
         }
 
-        match convert_fault_to_comm_error(CommunicationFault::new(0x00000400), false) {
+        match CommunicationFault::new(0x00000400).to_driver_error(false) {
             DriverError::Communication(CommunicationError::Transmission(message)) => {
                 assert!(message.contains("RF_OFF_ERROR"));
             }

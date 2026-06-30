@@ -1,7 +1,7 @@
 use crate::clf::errors::UnsupportedTargetError;
 
 /// Validates a bitrate string (e.g., "106A", "212F").
-fn validate_brty(part: &str) -> bool {
+fn validate_bitrate(part: &str) -> bool {
     if part.len() < 2 {
         return false;
     }
@@ -10,17 +10,17 @@ fn validate_brty(part: &str) -> bool {
 }
 
 /// Parses a bitrate specification which may contain send/receive rates separated by '/'.
-fn parse_brty(value: &str) -> Result<(String, String), UnsupportedTargetError> {
+fn parse_bitrate(value: &str) -> Result<(String, String), UnsupportedTargetError> {
     let mut parts = value.splitn(2, '/');
     let send = parts
         .next()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| UnsupportedTargetError("missing bitrate".into()))?;
-    if !validate_brty(send) {
+    if !validate_bitrate(send) {
         return Err(UnsupportedTargetError(format!("invalid bitrate: {}", send)));
     }
     let recv = match parts.next() {
-        Some(recv) if !validate_brty(recv) => {
+        Some(recv) if !validate_bitrate(recv) => {
             return Err(UnsupportedTargetError(format!(
                 "invalid receive bitrate: {}",
                 recv
@@ -62,32 +62,32 @@ pub struct TargetData {
 
 #[derive(Debug, Clone)]
 pub struct RemoteTarget {
-    brty_send: String,
-    brty_recv: String,
+    bitrate_send: String,
+    bitrate_recv: String,
     pub data: TargetData,
 }
 
 impl RemoteTarget {
-    pub fn new(brty: impl Into<String>) -> Result<Self, UnsupportedTargetError> {
-        let brty = brty.into();
-        let (brty_send, brty_recv) = parse_brty(&brty)?;
+    pub fn new(bitrate: impl Into<String>) -> Result<Self, UnsupportedTargetError> {
+        let bitrate = bitrate.into();
+        let (bitrate_send, bitrate_recv) = parse_bitrate(&bitrate)?;
         Ok(Self {
-            brty_send,
-            brty_recv,
+            bitrate_send,
+            bitrate_recv,
             data: TargetData::default(),
         })
     }
 
-    pub fn brty(&self) -> &str {
-        &self.brty_send
+    pub fn bitrate(&self) -> &str {
+        &self.bitrate_send
     }
 
-    pub fn brty_send(&self) -> &str {
-        &self.brty_send
+    pub fn bitrate_send(&self) -> &str {
+        &self.bitrate_send
     }
 
-    pub fn brty_recv(&self) -> &str {
-        &self.brty_recv
+    pub fn bitrate_recv(&self) -> &str {
+        &self.bitrate_recv
     }
 
     pub fn fields(&self) -> &TargetData {
@@ -101,47 +101,56 @@ impl RemoteTarget {
 
 #[derive(Debug, Clone)]
 pub struct LocalTarget {
-    brty_send: String,
-    brty_recv: String,
+    bitrate_send: String,
+    bitrate_recv: String,
     pub data: TargetData,
 }
 
 impl LocalTarget {
-    pub fn new(brty: impl Into<String>) -> Result<Self, UnsupportedTargetError> {
-        let brty = brty.into();
-        if !validate_brty(&brty) {
-            return Err(UnsupportedTargetError(format!("invalid bitrate: {}", brty)));
+    pub fn new(bitrate: impl Into<String>) -> Result<Self, UnsupportedTargetError> {
+        let bitrate = bitrate.into();
+        if !validate_bitrate(&bitrate) {
+            return Err(UnsupportedTargetError(format!(
+                "invalid bitrate: {}",
+                bitrate
+            )));
         }
         Ok(Self {
-            brty_send: brty.clone(),
-            brty_recv: brty,
+            bitrate_send: bitrate.clone(),
+            bitrate_recv: bitrate,
             data: TargetData::default(),
         })
     }
 
-    pub fn brty(&self) -> String {
-        if self.brty_send == self.brty_recv {
-            self.brty_send.clone()
+    pub fn bitrate(&self) -> String {
+        if self.bitrate_send == self.bitrate_recv {
+            self.bitrate_send.clone()
         } else {
-            format!("{}/{}", self.brty_send, self.brty_recv)
+            format!("{}/{}", self.bitrate_send, self.bitrate_recv)
         }
     }
 
-    pub fn brty_send(&self) -> &str {
-        &self.brty_send
+    pub fn bitrate_send(&self) -> &str {
+        &self.bitrate_send
     }
 
-    pub fn brty_recv(&self) -> &str {
-        &self.brty_recv
+    pub fn bitrate_recv(&self) -> &str {
+        &self.bitrate_recv
     }
 
-    pub fn set_brty(&mut self, brty: impl Into<String>) -> Result<(), UnsupportedTargetError> {
-        let brty = brty.into();
-        if !validate_brty(&brty) {
-            return Err(UnsupportedTargetError(format!("invalid bitrate: {}", brty)));
+    pub fn set_bitrate(
+        &mut self,
+        bitrate: impl Into<String>,
+    ) -> Result<(), UnsupportedTargetError> {
+        let bitrate = bitrate.into();
+        if !validate_bitrate(&bitrate) {
+            return Err(UnsupportedTargetError(format!(
+                "invalid bitrate: {}",
+                bitrate
+            )));
         }
-        self.brty_send = brty.clone();
-        self.brty_recv = brty;
+        self.bitrate_send = bitrate.clone();
+        self.bitrate_recv = bitrate;
         Ok(())
     }
 
@@ -165,44 +174,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_brty_accepts_numeric_uppercase_suffix_and_rejects_invalid_forms() {
-        assert!(validate_brty("106A"));
-        assert!(validate_brty("424F"));
-        assert!(!validate_brty(""));
-        assert!(!validate_brty("A"));
-        assert!(!validate_brty("106a"));
-        assert!(!validate_brty("10AF")); // non-digit in numeric portion
+    fn validate_bitrate_accepts_numeric_uppercase_suffix_and_rejects_invalid_forms() {
+        assert!(validate_bitrate("106A"));
+        assert!(validate_bitrate("424F"));
+        assert!(!validate_bitrate(""));
+        assert!(!validate_bitrate("A"));
+        assert!(!validate_bitrate("106a"));
+        assert!(!validate_bitrate("10AF")); // non-digit in numeric portion
     }
 
     #[test]
-    fn parse_brty_supports_single_and_split_send_receive_values() {
-        let (send, recv) = parse_brty("106A").expect("single bitrate should parse");
+    fn parse_bitrate_supports_single_and_split_send_receive_values() {
+        let (send, recv) = parse_bitrate("106A").expect("single bitrate should parse");
         assert_eq!(send, "106A");
         assert_eq!(recv, "106A");
 
-        let (send, recv) = parse_brty("212F/424F").expect("split bitrate should parse");
+        let (send, recv) = parse_bitrate("212F/424F").expect("split bitrate should parse");
         assert_eq!(send, "212F");
         assert_eq!(recv, "424F");
     }
 
     #[test]
-    fn parse_brty_rejects_missing_or_invalid_values() {
-        let err = parse_brty("").expect_err("empty bitrate should fail");
+    fn parse_bitrate_rejects_missing_or_invalid_values() {
+        let err = parse_bitrate("").expect_err("empty bitrate should fail");
         assert_eq!(err.0, "missing bitrate");
 
-        let err = parse_brty("abc").expect_err("invalid send bitrate should fail");
+        let err = parse_bitrate("abc").expect_err("invalid send bitrate should fail");
         assert_eq!(err.0, "invalid bitrate: abc");
 
-        let err = parse_brty("106A/42f").expect_err("invalid receive bitrate should fail");
+        let err = parse_bitrate("106A/42f").expect_err("invalid receive bitrate should fail");
         assert_eq!(err.0, "invalid receive bitrate: 42f");
     }
 
     #[test]
     fn remote_target_parses_bitrate_and_exposes_mutable_fields() {
         let mut target = RemoteTarget::new("212F/424F").expect("remote target should be created");
-        assert_eq!(target.brty(), "212F");
-        assert_eq!(target.brty_send(), "212F");
-        assert_eq!(target.brty_recv(), "424F");
+        assert_eq!(target.bitrate(), "212F");
+        assert_eq!(target.bitrate_send(), "212F");
+        assert_eq!(target.bitrate_recv(), "424F");
         assert!(target.fields().sensf_req.is_none());
 
         target.fields_mut().sensf_req = Some(vec![0x00, 0xFF]);
@@ -212,15 +221,17 @@ mod tests {
     #[test]
     fn local_target_validates_and_updates_bitrate() {
         let mut target = LocalTarget::new("106A").expect("local target should be created");
-        assert_eq!(target.brty(), "106A");
-        assert_eq!(target.brty_send(), "106A");
-        assert_eq!(target.brty_recv(), "106A");
+        assert_eq!(target.bitrate(), "106A");
+        assert_eq!(target.bitrate_send(), "106A");
+        assert_eq!(target.bitrate_recv(), "106A");
 
-        target.set_brty("424F").expect("set_brty should succeed");
-        assert_eq!(target.brty(), "424F");
+        target
+            .set_bitrate("424F")
+            .expect("set_bitrate should succeed");
+        assert_eq!(target.bitrate(), "424F");
 
         let err = target
-            .set_brty("42f")
+            .set_bitrate("42f")
             .expect_err("invalid bitrate should fail");
         assert_eq!(err.0, "invalid bitrate: 42f");
     }

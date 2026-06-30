@@ -4,10 +4,11 @@
 
 use crate::clf::errors::CommunicationError;
 use crate::clf::targets::RemoteTarget;
+use crate::driver::common::{DeviceInfo, DeviceMetadata, impl_reader_device};
 use crate::driver::errors::{DriverError, Result};
 use crate::driver::rcs320::chipset::Chipset;
 use crate::driver::rcs320::transport::Rcs320Transport;
-use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
+use crate::felica_standard::Type3TagPollingResult;
 use crate::transport::Transport;
 use log::debug;
 use std::time::Duration;
@@ -23,9 +24,7 @@ mod felica_cmd {
 /// RC-S320 device driver.
 pub struct Device<T: Transport> {
     pub(crate) chipset: Chipset<T>,
-    vendor_name: Option<String>,
-    product_name: Option<String>,
-    chipset_name: String,
+    meta: DeviceMetadata,
 }
 
 /// Initializes an RC-S320 device with the given transport.
@@ -35,7 +34,7 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
 }
 
 /// Opens an RC-S320 device.
-pub fn open_rcs320_device() -> Result<Device<Rcs320Transport>> {
+pub fn open_rcs320() -> Result<Device<Rcs320Transport>> {
     let transport = Rcs320Transport::open().map_err(DriverError::Io)?;
     init(transport)
 }
@@ -44,38 +43,20 @@ impl<T: Transport> Device<T> {
     /// Creates a new device with the given chipset.
     pub fn new(chipset: Chipset<T>) -> Result<Self> {
         let version = chipset.firmware_version();
-        let chipset_name = format!("RCS320v{}.{}", version.0, version.1);
-        let vendor_name = chipset.manufacturer_name().map(|s| s.to_string());
-        let product_name = chipset.product_name().map(|s| s.to_string());
+        let meta = DeviceMetadata {
+            vendor_name: chipset.manufacturer_name().map(|s| s.to_string()),
+            product_name: chipset.product_name().map(|s| s.to_string()),
+            chipset_name: format!("RCS320v{}.{}", version.0, version.1),
+        };
 
-        debug!("chipset is a {}", chipset_name);
+        debug!("chipset is a {}", meta.chipset_name);
 
-        Ok(Self {
-            vendor_name,
-            product_name,
-            chipset,
-            chipset_name,
-        })
+        Ok(Self { chipset, meta })
     }
 
     /// Returns a mutable reference to the chipset.
     pub fn chipset(&mut self) -> &mut Chipset<T> {
         &mut self.chipset
-    }
-
-    /// Returns the vendor name.
-    pub fn vendor_name(&self) -> Option<&str> {
-        self.vendor_name.as_deref()
-    }
-
-    /// Returns the product name.
-    pub fn product_name(&self) -> Option<&str> {
-        self.product_name.as_deref()
-    }
-
-    /// Returns the chipset name.
-    pub fn chipset_name(&self) -> &str {
-        &self.chipset_name
     }
 
     /// Closes the device.
@@ -200,26 +181,13 @@ impl<T: Transport> Device<T> {
     }
 }
 
-impl<T: Transport> FelicaDriver for Device<T> {
-    fn detect_type_f(
-        &mut self,
-        target: &RemoteTarget,
-        system_code: u16,
-        request_code: u8,
-        time_slots: u8,
-    ) -> Result<Type3TagPollingResult> {
-        self.detect_type_f(target, system_code, request_code, time_slots)
-    }
-
-    fn transceive(
-        &mut self,
-        target: &RemoteTarget,
-        data: &[u8],
-        timeout_ms: Option<u16>,
-    ) -> Result<Vec<u8>> {
-        self.transceive(target, data, timeout_ms)
+impl<T: Transport> DeviceInfo for Device<T> {
+    fn metadata(&self) -> &DeviceMetadata {
+        &self.meta
     }
 }
+
+impl_reader_device!(Device);
 
 #[cfg(test)]
 mod tests {

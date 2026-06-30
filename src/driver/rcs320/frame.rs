@@ -15,11 +15,11 @@
 //! - DCS: Data checksum (256 - sum(DATA)) & 0xFF
 //! - POSTAMBLE: 0x00
 
-/// Start of frame sequence.
-pub const SOF: [u8; 3] = [0x00, 0x00, 0xFF];
+use crate::driver::framing::{
+    checksum as data_checksum, checksum_matches, has_sof, length_checksum,
+};
 
-/// ACK frame bytes.
-pub const ACK_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00];
+pub use crate::driver::framing::{ACK_BYTES, SOF};
 
 /// Frame types that can be parsed or built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,24 +155,6 @@ fn parse_data_frame(data: &[u8]) -> Option<FrameType> {
     }
 
     Some(FrameType::Data(payload.to_vec()))
-}
-
-fn length_checksum(len: u8) -> u8 {
-    (256u16.wrapping_sub(len as u16) & 0xFF) as u8
-}
-
-fn data_checksum(bytes: &[u8]) -> u8 {
-    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    (256u16.wrapping_sub(sum % 256) % 256) as u8
-}
-
-fn checksum_matches(bytes: &[u8], checksum: u8) -> bool {
-    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    ((sum + checksum as u16) % 256) == 0
-}
-
-fn has_sof(data: &[u8]) -> bool {
-    data.len() >= 3 && data.get(0..3) == Some(&SOF)
 }
 
 #[cfg(test)]

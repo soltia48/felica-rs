@@ -1,21 +1,18 @@
 use crate::clf::crc;
 use crate::clf::errors::CommunicationError;
 use crate::clf::targets::RemoteTarget;
-use crate::driver::errors::{DriverError, Result, convert_fault_to_comm_error};
+use crate::driver::common::{self, DeviceInfo, DeviceMetadata, impl_reader_device, is_type2_106a};
+use crate::driver::errors::{ChipsetError, DriverError, Result};
 use crate::driver::port100::chipset::Chipset;
-use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
 use hex::encode;
 use log::debug;
 use smallvec::SmallVec;
-use std::io::{self, ErrorKind};
 
 pub struct Device<T: Transport> {
     pub(crate) chipset: Chipset<T>,
-    vendor_name: Option<String>,
-    product_name: Option<String>,
-    chipset_name: String,
+    meta: DeviceMetadata,
 }
 
 pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
@@ -23,51 +20,29 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
     Device::new(chipset)
 }
 
-pub fn open_port100_device() -> Result<Device<UsbTransport>> {
-    const SONY_VID: u16 = 0x054C;
+pub fn open_port100() -> Result<Device<UsbTransport>> {
     const PRODUCT_IDS: [u16; 2] = [0x06C1, 0x06C3];
-
-    let mut last_error: Option<io::Error> = None;
-    for pid in PRODUCT_IDS {
-        match UsbTransport::open(SONY_VID, pid) {
-            Ok(transport) => return init(transport),
-            Err(err) => last_error = Some(err),
-        }
-    }
-
-    Err(DriverError::Io(last_error.unwrap_or_else(|| {
-        io::Error::new(ErrorKind::NotFound, "RC-S380 reader not found")
-    })))
+    common::open_usb_device(
+        common::SONY_VENDOR_ID,
+        &PRODUCT_IDS,
+        "RC-S380 reader not found",
+        init,
+    )
 }
 
 impl<T: Transport> Device<T> {
     pub fn new(chipset: Chipset<T>) -> Result<Self> {
         let version = chipset.firmware_version();
-        let chipset_name = format!("NFC Port-100 v{:x}.{:02x}", version.1, version.0);
-        let vendor_name = chipset.manufacturer_name().map(|s| s.to_string());
-        let product_name = chipset.product_name().map(|s| s.to_string());
-        Ok(Self {
-            vendor_name,
-            product_name,
-            chipset,
-            chipset_name,
-        })
+        let meta = DeviceMetadata {
+            vendor_name: chipset.manufacturer_name().map(|s| s.to_string()),
+            product_name: chipset.product_name().map(|s| s.to_string()),
+            chipset_name: format!("NFC Port-100 v{:x}.{:02x}", version.1, version.0),
+        };
+        Ok(Self { chipset, meta })
     }
 
     pub fn chipset(&mut self) -> &mut Chipset<T> {
         &mut self.chipset
-    }
-
-    pub fn vendor_name(&self) -> Option<&str> {
-        self.vendor_name.as_deref()
-    }
-
-    pub fn product_name(&self) -> Option<&str> {
-        self.product_name.as_deref()
-    }
-
-    pub fn chipset_name(&self) -> &str {
-        &self.chipset_name
     }
 
     pub fn close(&mut self) -> Result<()> {
@@ -94,7 +69,7 @@ impl<T: Transport> Device<T> {
     ) -> Result<Vec<u8>> {
         debug!(
             "Port-100 transceive TX ({}): {}",
-            target.brty(),
+            target.bitrate(),
             encode(data)
         );
         let timeout_ms = timeout_ms.unwrap_or(0);
@@ -102,7 +77,7 @@ impl<T: Transport> Device<T> {
         let response = self.perform_initiator_exchange(data, timeout_ms, &profile)?;
         debug!(
             "Port-100 transceive RX ({}): {}",
-            target.brty(),
+            target.bitrate(),
             encode(&response)
         );
         Ok(response)
@@ -140,7 +115,7 @@ impl<T: Transport> Device<T> {
         target: &RemoteTarget,
     ) -> Result<InitiatorExchangeProfile> {
         self.chipset
-            .set_initiator_rf(target.brty_send(), Some(target.brty_recv()))?;
+            .set_initiator_rf(target.bitrate_send(), Some(target.bitrate_recv()))?;
         self.chipset.apply_initiator_defaults()?;
         let profile = InitiatorExchangeProfile::for_target(target);
         profile.apply_to(&mut self.chipset)?;
@@ -178,26 +153,13 @@ impl<T: Transport> Device<T> {
     }
 }
 
-impl<T: Transport> FelicaDriver for Device<T> {
-    fn detect_type_f(
-        &mut self,
-        target: &RemoteTarget,
-        system_code: u16,
-        request_code: u8,
-        time_slots: u8,
-    ) -> Result<Type3TagPollingResult> {
-        self.detect_type_f(target, system_code, request_code, time_slots)
-    }
-
-    fn transceive(
-        &mut self,
-        target: &RemoteTarget,
-        data: &[u8],
-        timeout_ms: Option<u16>,
-    ) -> Result<Vec<u8>> {
-        self.transceive(target, data, timeout_ms)
+impl<T: Transport> DeviceInfo for Device<T> {
+    fn metadata(&self) -> &DeviceMetadata {
+        &self.meta
     }
 }
+
+impl_reader_device!(Device);
 
 type ProtocolParamList = SmallVec<[(&'static str, u8); 8]>;
 
@@ -208,8 +170,8 @@ struct InitiatorExchangeProfile {
 
 impl InitiatorExchangeProfile {
     fn for_target(target: &RemoteTarget) -> Self {
-        let mut params = initiator_params_for_brty(target.brty_send());
-        let strip_crc_a = is_type2_target(target);
+        let mut params = initiator_params_for_bitrate(target.bitrate_send());
+        let strip_crc_a = is_type2_106a(target);
         if strip_crc_a {
             params.push(("check_crc", 0));
         }
@@ -236,13 +198,13 @@ impl InitiatorExchangeProfile {
     }
 }
 
-fn initiator_params_for_brty(brty: &str) -> ProtocolParamList {
+fn initiator_params_for_bitrate(bitrate: &str) -> ProtocolParamList {
     let mut params = ProtocolParamList::new();
-    if brty.ends_with('A') {
+    if bitrate.ends_with('A') {
         params.push(("add_parity", 1));
         params.push(("check_parity", 1));
     }
-    if brty.ends_with('B') {
+    if bitrate.ends_with('B') {
         params.push(("initial_guard_time", 20));
         params.push(("add_sof", 1));
         params.push(("check_sof", 1));
@@ -252,24 +214,15 @@ fn initiator_params_for_brty(brty: &str) -> ProtocolParamList {
     params
 }
 
-fn is_type2_target(target: &RemoteTarget) -> bool {
-    target.brty() == "106A"
-        && target
-            .data
-            .sel_res
-            .as_ref()
-            .and_then(|bytes| bytes.first())
-            .map(|b| b & 0x60 == 0x00)
-            .unwrap_or(false)
-}
-
 impl<T: Transport> Device<T> {
     fn map_fault<U>(
         result: std::result::Result<U, DriverError>,
         treat_rf_off_as_broken: bool,
     ) -> Result<U> {
         result.map_err(|error| match error {
-            DriverError::Fault(fault) => convert_fault_to_comm_error(fault, treat_rf_off_as_broken),
+            DriverError::Chipset(ChipsetError::Fault(fault)) => {
+                fault.to_driver_error(treat_rf_off_as_broken)
+            }
             other => other,
         })
     }
@@ -297,20 +250,20 @@ mod tests {
         }
     }
 
-    fn make_target(brty: &str, sel_res: Option<Vec<u8>>) -> RemoteTarget {
-        let mut target = RemoteTarget::new(brty).expect("target should be created");
+    fn make_target(bitrate: &str, sel_res: Option<Vec<u8>>) -> RemoteTarget {
+        let mut target = RemoteTarget::new(bitrate).expect("target should be created");
         target.data.sel_res = sel_res;
         target
     }
 
     #[test]
-    fn initiator_params_for_brty_matches_expected_protocol_defaults() {
+    fn initiator_params_for_bitrate_matches_expected_protocol_defaults() {
         assert_eq!(
-            initiator_params_for_brty("106A").as_slice(),
+            initiator_params_for_bitrate("106A").as_slice(),
             &[("add_parity", 1), ("check_parity", 1)]
         );
         assert_eq!(
-            initiator_params_for_brty("106B").as_slice(),
+            initiator_params_for_bitrate("106B").as_slice(),
             &[
                 ("initial_guard_time", 20),
                 ("add_sof", 1),
@@ -319,16 +272,7 @@ mod tests {
                 ("check_eof", 1),
             ]
         );
-        assert!(initiator_params_for_brty("424F").is_empty());
-    }
-
-    #[test]
-    fn is_type2_target_checks_brty_and_sel_res_bits() {
-        assert!(is_type2_target(&make_target("106A", Some(vec![0x00]))));
-        assert!(is_type2_target(&make_target("106A", Some(vec![0x1F]))));
-        assert!(!is_type2_target(&make_target("106A", Some(vec![0x20]))));
-        assert!(!is_type2_target(&make_target("212F", Some(vec![0x00]))));
-        assert!(!is_type2_target(&make_target("106A", None)));
+        assert!(initiator_params_for_bitrate("424F").is_empty());
     }
 
     #[test]
@@ -352,7 +296,9 @@ mod tests {
         assert_eq!(ok.expect("ok should pass through"), 7);
 
         match Device::<DummyTransport>::map_fault::<()>(
-            Err(DriverError::Fault(CommunicationFault::new(0x00000080))),
+            Err(DriverError::Chipset(ChipsetError::Fault(
+                CommunicationFault::new(0x00000080),
+            ))),
             false,
         ) {
             Err(DriverError::Communication(CommunicationError::Timeout(message))) => {
@@ -362,7 +308,9 @@ mod tests {
         }
 
         match Device::<DummyTransport>::map_fault::<()>(
-            Err(DriverError::Fault(CommunicationFault::new(0x00000400))),
+            Err(DriverError::Chipset(ChipsetError::Fault(
+                CommunicationFault::new(0x00000400),
+            ))),
             true,
         ) {
             Err(DriverError::Communication(CommunicationError::BrokenLink(message))) => {
@@ -372,7 +320,9 @@ mod tests {
         }
 
         match Device::<DummyTransport>::map_fault::<()>(
-            Err(DriverError::Fault(CommunicationFault::new(0x00000400))),
+            Err(DriverError::Chipset(ChipsetError::Fault(
+                CommunicationFault::new(0x00000400),
+            ))),
             false,
         ) {
             Err(DriverError::Communication(CommunicationError::Transmission(message))) => {

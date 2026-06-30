@@ -212,10 +212,7 @@ impl<T: Transport> Chipset<T> {
 
     /// Receives data from a FeliCa card.
     pub fn recv_from_card(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let response = match self.packet_read(timeout) {
-            Ok(response) => response,
-            Err(e) => return Err(e),
-        };
+        let response = self.packet_read(timeout)?;
 
         debug!("RC-S320 card response: {:02X?}", response);
 

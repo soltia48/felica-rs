@@ -46,34 +46,38 @@ pub mod prelude;
 pub mod reader;
 pub mod transport;
 
-// Re-export error types at crate root
+// ---- Errors (low-level → high-level) ----
 pub use clf::errors::{CommunicationError, UnsupportedTargetError};
+pub use driver::errors::{ChipsetError, CommunicationFault, DriverError};
+pub use felica_standard::FelicaStandardError;
 
-// Re-export target types at crate root
+// ---- Targets ----
 pub use clf::targets::{LocalTarget, RemoteTarget, TargetData};
 
-// Re-export reader types at crate root
-pub use reader::{Reader, ReaderPreference, open_reader};
-
-// Re-export transport types
+// ---- Transport ----
+pub use transport::Transport;
 pub use transport::usb::UsbTransport;
 
-// Re-export FeliCa Standard types
-pub use felica_standard::{
-    AuthenticatedContext, BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError,
-    MutualAuthenticationResult, SearchServiceCodeResult, ServiceCode,
+// ---- Reader facade ----
+pub use driver::common::{DeviceInfo, DeviceMetadata, ReaderDevice};
+pub use reader::{
+    Port100Device, Port400Device, Rcs320Device, Rcs956Device, Reader, ReaderPreference, open_reader,
 };
 
-// Re-export driver modules and key types
-pub use driver::port100::{self, Chipset, Device, init as init_port100, open_port100_device};
-pub use driver::port400::{
-    self, Device as Port400Device, init as init_port400, open_port400_device,
+// ---- Concrete driver entry points ----
+// `open_X` opens the default USB reader; `init_X` builds a driver from a custom
+// transport. The generic `Device<T>` / `Chipset<T>` types live under their
+// `driver::*` modules for advanced use.
+pub use driver::port100::{init as init_port100, open_port100};
+pub use driver::port400::{init as init_port400, open_port400};
+pub use driver::rcs320::{Rcs320Transport, init as init_rcs320, open_rcs320};
+pub use driver::rcs956::{init as init_rcs956, open_rcs956};
+
+// ---- Remote driver ----
+pub use driver::remote::{RemoteDriver, RemoteRequest, RemoteResponse, RemoteResponseData};
+
+// ---- FeliCa Standard protocol ----
+pub use felica_standard::{
+    AuthenticatedContext, BlockListElement, FelicaDriver, FelicaStandard,
+    MutualAuthenticationResult, SearchServiceCodeResult, ServiceCode,
 };
-pub use driver::rcs320::{
-    self as rcs320, Device as Rcs320Device, Rcs320Transport, init as init_rcs320,
-    open_rcs320_device,
-};
-pub use driver::rcs956::{
-    self as rcs956, Device as Rcs956Device, init as init_rcs956, open_rcs956_device,
-};
-pub use driver::remote::{self, RemoteDriver, RemoteRequest, RemoteResponse, RemoteResponseData};

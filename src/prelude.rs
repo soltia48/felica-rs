@@ -17,13 +17,16 @@
 
 // Error types
 pub use crate::clf::errors::{CommunicationError, UnsupportedTargetError};
-pub use crate::driver::errors::{DriverError, Result as DriverResult};
+pub use crate::driver::errors::{
+    ChipsetError, CommunicationFault, DriverError, Result as DriverResult,
+};
 pub use crate::felica_standard::FelicaStandardError;
 
 // Target types
 pub use crate::clf::targets::{LocalTarget, RemoteTarget, TargetData};
 
 // Reader types
+pub use crate::driver::common::{DeviceInfo, ReaderDevice};
 pub use crate::reader::{Reader, ReaderPreference, open_reader};
 
 // FeliCa Standard types

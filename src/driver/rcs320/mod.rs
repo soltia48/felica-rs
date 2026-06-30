@@ -33,8 +33,8 @@ mod frame;
 mod transport;
 
 pub use chipset::Chipset;
-pub use device::{Device, init, open_rcs320_device};
+pub use device::{Device, init, open_rcs320};
 pub use frame::{Frame, FrameType};
 pub use transport::Rcs320Transport;
 
-pub use crate::driver::errors::{CommunicationFault, DriverError, Result, StatusError};
+pub use crate::driver::errors::{ChipsetError, CommunicationFault, DriverError, Result};

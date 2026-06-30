@@ -12,9 +12,15 @@ impl UnsupportedTargetError {
     }
 }
 
-impl<T: Into<String>> From<T> for UnsupportedTargetError {
-    fn from(value: T) -> Self {
-        Self(value.into())
+impl From<String> for UnsupportedTargetError {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for UnsupportedTargetError {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
     }
 }
 

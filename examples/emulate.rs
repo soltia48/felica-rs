@@ -7,7 +7,7 @@ use log::{debug, info};
 use nfc_rs::felica_standard::{
     EmulatedArea, EmulatedService, EmulatedSystem, FelicaStandardEmulator,
 };
-use nfc_rs::{LocalTarget, ServiceCode, open_port100_device};
+use nfc_rs::{LocalTarget, ServiceCode, open_port100};
 use std::error::Error;
 
 const COMMAND_TIMEOUT_MS: u16 = 1000;
@@ -15,7 +15,7 @@ const COMMAND_TIMEOUT_MS: u16 = 1000;
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
-    let mut device = open_port100_device()?;
+    let mut device = open_port100()?;
 
     let idm_a: [u8; 8] = [0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
     let pmm_a: [u8; 8] = [0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];

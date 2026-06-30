@@ -1,5 +1,6 @@
 use crate::clf::errors::UnsupportedTargetError;
 use crate::clf::targets::RemoteTarget;
+use crate::driver::common::{self, DeviceInfo, DeviceMetadata, impl_reader_device};
 use crate::driver::errors::{DriverError, Result};
 use crate::driver::port400::iso14443::{
     ISO_DEP_S_DESELECT, ISO_DEP_S_IFS, ISO_DEP_S_WTX, IsoDepBlockType, IsoDepConfig, IsoDepIFrame,
@@ -8,17 +9,15 @@ use crate::driver::port400::iso14443::{
 };
 use crate::driver::port400::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
 use crate::felica_standard::{
-    FelicaDriver, FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult,
+    FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult,
 };
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
 use hex::encode;
 use log::{debug, warn};
-use std::io::{self, ErrorKind};
 use std::thread::sleep;
 use std::time::Duration;
 
-const SONY_VID: u16 = 0x054C;
 const PORT400_PIDS: &[u16] = &[0x0DC8, 0x0DC9, 0x0D8F];
 const MAX_THROUGH_PAYLOAD: usize = 290;
 const TYPE_A_CMD_TIMEOUT_MS: u16 = 30;
@@ -35,9 +34,7 @@ const DIAG_POLLING_COUNT_MIN: u8 = 1;
 
 pub struct Device<T: Transport> {
     pcsc: Pcsc<T>,
-    chipset_name: String,
-    vendor_name: Option<String>,
-    product_name: Option<String>,
+    meta: DeviceMetadata,
     iso_dep_session: Option<IsoDepSession>,
     iso_dep_protocol: Option<ThroughProtocol>,
 }
@@ -177,17 +174,13 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
     Device::new(transport)
 }
 
-pub fn open_port400_device() -> Result<Device<UsbTransport>> {
-    let mut last_error: Option<io::Error> = None;
-    for &pid in PORT400_PIDS {
-        match UsbTransport::open(SONY_VID, pid) {
-            Ok(transport) => return Device::new(transport),
-            Err(err) => last_error = Some(err),
-        }
-    }
-    Err(DriverError::Io(last_error.unwrap_or_else(|| {
-        io::Error::new(ErrorKind::NotFound, "NFC Port-400 reader not found")
-    })))
+pub fn open_port400() -> Result<Device<UsbTransport>> {
+    common::open_usb_device(
+        common::SONY_VENDOR_ID,
+        PORT400_PIDS,
+        "NFC Port-400 reader not found",
+        Device::new,
+    )
 }
 
 impl<T: Transport> Device<T> {
@@ -210,24 +203,14 @@ impl<T: Transport> Device<T> {
             .unwrap_or_else(|| "NFC Port-400".to_string());
         Ok(Self {
             pcsc,
-            chipset_name,
-            vendor_name,
-            product_name,
+            meta: DeviceMetadata {
+                vendor_name,
+                product_name,
+                chipset_name,
+            },
             iso_dep_session: None,
             iso_dep_protocol: None,
         })
-    }
-
-    pub fn vendor_name(&self) -> Option<&str> {
-        self.vendor_name.as_deref()
-    }
-
-    pub fn product_name(&self) -> Option<&str> {
-        self.product_name.as_deref()
-    }
-
-    pub fn chipset_name(&self) -> &str {
-        &self.chipset_name
     }
 
     pub fn close(&mut self) -> Result<()> {
@@ -254,10 +237,10 @@ impl<T: Transport> Device<T> {
         request_code: u8,
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
-        let brty = target.brty();
-        if brty != "212F" && brty != "424F" {
+        let bitrate = target.bitrate();
+        if bitrate != "212F" && bitrate != "424F" {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {brty}"),
+                format!("unsupported bitrate {bitrate}"),
             )));
         }
         debug!("polling for NFC-F using Port-400");
@@ -1102,26 +1085,13 @@ impl<'a> IsoDepExchangeState<'a> {
     }
 }
 
-impl<T: Transport> FelicaDriver for Device<T> {
-    fn detect_type_f(
-        &mut self,
-        target: &RemoteTarget,
-        system_code: u16,
-        request_code: u8,
-        time_slots: u8,
-    ) -> Result<Type3TagPollingResult> {
-        self.detect_type_f(target, system_code, request_code, time_slots)
-    }
-
-    fn transceive(
-        &mut self,
-        target: &RemoteTarget,
-        data: &[u8],
-        timeout_ms: Option<u16>,
-    ) -> Result<Vec<u8>> {
-        self.transceive(target, data, timeout_ms)
+impl<T: Transport> DeviceInfo for Device<T> {
+    fn metadata(&self) -> &DeviceMetadata {
+        &self.meta
     }
 }
+
+impl_reader_device!(Device);
 
 fn duration_from_timeout(timeout_ms: Option<u16>) -> Duration {
     timeout_ms

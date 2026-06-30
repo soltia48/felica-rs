@@ -7,20 +7,20 @@ use log::{debug, warn};
 impl<T: Transport> Device<T> {
     pub(crate) fn dep_verify_frame(
         &self,
-        brty: &str,
+        bitrate: &str,
         data: &[u8],
         cmd_set: &[u8],
     ) -> Option<DepFrame> {
-        dep_parse_frame(brty, data, cmd_set)
+        dep_parse_frame(bitrate, data, cmd_set)
     }
 
     pub(crate) fn dep_send_frame(
         &mut self,
-        brty: &str,
+        bitrate: &str,
         payload: Option<&[u8]>,
         timeout: u16,
     ) -> Result<Option<Vec<u8>>> {
-        let tx = payload.map(|data| dep_build_frame(brty, data));
+        let tx = payload.map(|data| dep_build_frame(bitrate, data));
         let response = self.chipset.target_exchange_rf(
             0,
             0xFFFF,
@@ -37,13 +37,13 @@ impl<T: Transport> Device<T> {
         }
         let payload = response.get(7..).unwrap_or(&[]);
         Ok(self
-            .dep_verify_frame(brty, payload, &[0, 4, 6, 8, 10])
+            .dep_verify_frame(bitrate, payload, &[0, 4, 6, 8, 10])
             .map(|frame| frame.payload))
     }
 
     pub(crate) fn dep_handle_psl(
         &mut self,
-        brty: &str,
+        bitrate: &str,
         data: &[u8],
     ) -> Result<Option<(String, Vec<u8>)>> {
         if data.len() < 4 {
@@ -57,50 +57,50 @@ impl<T: Transport> Device<T> {
             ));
         }
         let psl_res = vec![0xD5, 0x05, data[2]];
-        debug!("{} send PSL_RES {}", brty, hex::encode(&psl_res));
-        self.dep_send_frame(brty, Some(&psl_res), 0)?;
-        let new_brty = match dsi {
+        debug!("{} send PSL_RES {}", bitrate, hex::encode(&psl_res));
+        self.dep_send_frame(bitrate, Some(&psl_res), 0)?;
+        let new_bitrate = match dsi {
             0 => "106A",
             1 => "212F",
             2 => "424F",
-            _ => brty,
+            _ => bitrate,
         };
-        self.chipset.set_target_rf(new_brty)?;
-        Ok(Some((new_brty.to_string(), data.to_vec())))
+        self.chipset.set_target_rf(new_bitrate)?;
+        Ok(Some((new_bitrate.to_string(), data.to_vec())))
     }
 
     pub(crate) fn dep_send_simple_response(
         &mut self,
-        brty: &str,
+        bitrate: &str,
         code: u8,
         data: &[u8],
     ) -> Result<()> {
         let payload = dep_simple_response_payload(code, data);
-        debug!("{} send {}", brty, hex::encode(&payload));
-        self.dep_send_frame(brty, Some(&payload), 0)?;
+        debug!("{} send {}", bitrate, hex::encode(&payload));
+        self.dep_send_frame(bitrate, Some(&payload), 0)?;
         Ok(())
     }
 }
 
-fn dep_parse_frame(brty: &str, data: &[u8], cmd_set: &[u8]) -> Option<DepFrame> {
-    let offset = dep_offset(brty);
-    if brty == "106A" && data.first() != Some(&0xF0) {
-        dep_warn(brty, "received frame has invalid start byte");
+fn dep_parse_frame(bitrate: &str, data: &[u8], cmd_set: &[u8]) -> Option<DepFrame> {
+    let offset = dep_offset(bitrate);
+    if bitrate == "106A" && data.first() != Some(&0xF0) {
+        dep_warn(bitrate, "received frame has invalid start byte");
         return None;
     }
     let length = data.get(offset)?;
     if *length as usize != data.len().saturating_sub(offset) {
-        dep_warn(brty, "received frame has incorrect length byte");
+        dep_warn(bitrate, "received frame has incorrect length byte");
         return None;
     }
     if data.get(offset + 1) != Some(&0xD4) {
-        dep_warn(brty, "received frame command byte 1 is not D4h");
+        dep_warn(bitrate, "received frame command byte 1 is not D4h");
         return None;
     }
     let code = data.get(offset + 2).copied()?;
     if !cmd_set.contains(&code) {
         dep_warn(
-            brty,
+            bitrate,
             &format!("received frame command byte 2 not in {:?}", cmd_set),
         );
         return None;
@@ -111,9 +111,9 @@ fn dep_parse_frame(brty: &str, data: &[u8], cmd_set: &[u8]) -> Option<DepFrame> 
     })
 }
 
-fn dep_build_frame(brty: &str, payload: &[u8]) -> Vec<u8> {
+fn dep_build_frame(bitrate: &str, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(payload.len() + 2);
-    if brty == "106A" {
+    if bitrate == "106A" {
         frame.push(0xF0);
     }
     frame.push((payload.len() + 1) as u8);
@@ -121,8 +121,8 @@ fn dep_build_frame(brty: &str, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
-fn dep_offset(brty: &str) -> usize {
-    usize::from(brty == "106A")
+fn dep_offset(bitrate: &str) -> usize {
+    usize::from(bitrate == "106A")
 }
 
 fn dep_simple_response_payload(code: u8, data: &[u8]) -> Vec<u8> {
@@ -133,8 +133,8 @@ fn dep_simple_response_payload(code: u8, data: &[u8]) -> Vec<u8> {
     frame
 }
 
-fn dep_warn(brty: &str, message: &str) {
-    warn!("{brty}: {message}");
+fn dep_warn(bitrate: &str, message: &str) {
+    warn!("{bitrate}: {message}");
 }
 
 pub(crate) struct DepFrame {

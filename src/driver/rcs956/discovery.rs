@@ -4,7 +4,7 @@
 
 use crate::clf::errors::UnsupportedTargetError;
 use crate::clf::targets::RemoteTarget;
-use crate::driver::errors::{DriverError, Result, StatusError};
+use crate::driver::errors::{ChipsetError, DriverError, Result};
 use crate::driver::rcs956::chipset::{IN_LIST_PASSIVE_TARGET_BRTY_RANGE, ciu, err};
 use crate::driver::rcs956::device::Device;
 use crate::felica_standard::Type3TagPollingResult;
@@ -14,14 +14,14 @@ use log::{debug, warn};
 impl<T: Transport> Device<T> {
     /// Detects a Type A target (NFC-A).
     pub fn detect_type_a(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
-        let brty = brty_code(target.brty())?;
-        if !IN_LIST_PASSIVE_TARGET_BRTY_RANGE.contains(&brty) {
+        let bitrate = bitrate_code(target.bitrate())?;
+        if !IN_LIST_PASSIVE_TARGET_BRTY_RANGE.contains(&bitrate) {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {}", target.brty()),
+                format!("unsupported bitrate {}", target.bitrate()),
             )));
         }
 
-        debug!("polling for NFC-A target at {}", target.brty());
+        debug!("polling for NFC-A target at {}", target.bitrate());
 
         // Prepare UID for anticollision if provided
         let mut uid = target.data.sel_req.clone().unwrap_or_default();
@@ -33,14 +33,14 @@ impl<T: Transport> Device<T> {
         }
 
         // Perform InListPassiveTarget
-        let response = self.chipset.in_list_passive_target(1, brty, &uid)?;
+        let response = self.chipset.in_list_passive_target(1, bitrate, &uid)?;
         let Some(data) = response else {
             // Check if we received SENS_RES but no SDD_RES (Type 1 Tag)
-            if let Ok(fifo_data) = self.chipset.read_single_register(ciu::FIFO_DATA) {
-                if fifo_data == 0x26 {
-                    // No SENS_RES, no tag present
-                    return Ok(None);
-                }
+            if let Ok(fifo_data) = self.chipset.read_single_register(ciu::FIFO_DATA)
+                && fifo_data == 0x26
+            {
+                // No SENS_RES, no tag present
+                return Ok(None);
             }
 
             debug!("sens_res but no sdd_res, try as type 1 tag");
@@ -64,7 +64,7 @@ impl<T: Transport> Device<T> {
                 .write_single_register(ciu::RX_MODE, rx_mode & 0x7F)?;
         }
 
-        let mut found = RemoteTarget::new(target.brty())?;
+        let mut found = RemoteTarget::new(target.bitrate())?;
         found.data.sens_res = Some(sens_res);
         found.data.sel_res = Some(sel_res);
         found.data.sdd_res = Some(sdd_res);
@@ -94,7 +94,7 @@ impl<T: Transport> Device<T> {
                 found.data.rid_res = Some(rid_res);
                 Ok(Some(found))
             }
-            Err(DriverError::Status(StatusError { errno, .. })) => {
+            Err(DriverError::Chipset(ChipsetError::Status(errno))) => {
                 debug!("RID command failed with error {:02x}", errno);
                 Ok(None)
             }
@@ -104,7 +104,7 @@ impl<T: Transport> Device<T> {
 
     /// Detects a Type B target (NFC-B).
     pub fn detect_type_b(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
-        let brty = match target.brty() {
+        let bitrate = match target.bitrate() {
             "106B" => 3,
             "212B" => 6,
             "424B" => 7,
@@ -116,13 +116,13 @@ impl<T: Transport> Device<T> {
             }
         };
 
-        if !IN_LIST_PASSIVE_TARGET_BRTY_RANGE.contains(&brty) {
+        if !IN_LIST_PASSIVE_TARGET_BRTY_RANGE.contains(&bitrate) {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {}", target.brty()),
+                format!("unsupported bitrate {}", target.bitrate()),
             )));
         }
 
-        debug!("polling for NFC-B target at {}", target.brty());
+        debug!("polling for NFC-B target at {}", target.bitrate());
 
         let afi = target
             .data
@@ -132,7 +132,7 @@ impl<T: Transport> Device<T> {
             .copied()
             .unwrap_or(0x00);
 
-        let response = self.chipset.in_list_passive_target(1, brty, &[afi])?;
+        let response = self.chipset.in_list_passive_target(1, bitrate, &[afi])?;
         let Some(data) = response else {
             return Ok(None);
         };
@@ -151,7 +151,7 @@ impl<T: Transport> Device<T> {
         let wupb_cmd = [0x05, afi, 0x08];
         match self.chipset.in_communicate_thru(&wupb_cmd, timeout) {
             Ok(sensb_res) => {
-                let mut found = RemoteTarget::new(target.brty())?;
+                let mut found = RemoteTarget::new(target.bitrate())?;
                 found.data.sensb_res = Some(sensb_res);
                 Ok(Some(found))
             }
@@ -170,7 +170,7 @@ impl<T: Transport> Device<T> {
         request_code: u8,
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
-        let brty = match target.brty() {
+        let bitrate = match target.bitrate() {
             "212F" => 1,
             "424F" => 2,
             other => {
@@ -180,13 +180,13 @@ impl<T: Transport> Device<T> {
             }
         };
 
-        if !IN_LIST_PASSIVE_TARGET_BRTY_RANGE.contains(&brty) {
+        if !IN_LIST_PASSIVE_TARGET_BRTY_RANGE.contains(&bitrate) {
             return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {}", target.brty()),
+                format!("unsupported bitrate {}", target.bitrate()),
             )));
         }
 
-        debug!("polling for NFC-F target at {}", target.brty());
+        debug!("polling for NFC-F target at {}", target.bitrate());
 
         // Check if RF field is already on, if not activate it and wait
         let tx_control = self.chipset.read_single_register(ciu::TX_CONTROL)?;
@@ -197,7 +197,9 @@ impl<T: Transport> Device<T> {
 
         // Build SENSF_REQ
         let sensf_req = build_sensf_req(system_code, request_code, time_slots);
-        let response = self.chipset.in_list_passive_target(1, brty, &sensf_req)?;
+        let response = self
+            .chipset
+            .in_list_passive_target(1, bitrate, &sensf_req)?;
 
         let Some(data) = response else {
             return Err(DriverError::Communication(
@@ -239,7 +241,7 @@ impl<T: Transport> Device<T> {
             return Err(DriverError::Other("atr_req must be 16 to 64 bytes".into()));
         }
 
-        let br = match target.brty() {
+        let br = match target.bitrate() {
             "106A" => 0,
             "212F" => 1,
             "424F" => 2,
@@ -278,13 +280,13 @@ impl<T: Transport> Device<T> {
                     }
                 );
 
-                let mut found = RemoteTarget::new(target.brty())?;
+                let mut found = RemoteTarget::new(target.bitrate())?;
                 found.data.atr_res = Some(atr_res);
                 found.data.atr_req = Some(atr_req.clone());
 
                 Ok(Some(found))
             }
-            Err(DriverError::Status(StatusError { errno, .. }))
+            Err(DriverError::Chipset(ChipsetError::Status(errno)))
                 if errno == err::TIMEOUT || errno == err::RF_NOT_ACTIVATED =>
             {
                 Ok(None)
@@ -295,8 +297,8 @@ impl<T: Transport> Device<T> {
 }
 
 /// Converts a bitrate string to the PN53x bitrate code.
-fn brty_code(brty: &str) -> Result<u8> {
-    match brty {
+fn bitrate_code(bitrate: &str) -> Result<u8> {
+    match bitrate {
         "106A" => Ok(0),
         "212F" => Ok(1),
         "424F" => Ok(2),
@@ -322,16 +324,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn brty_code_maps_supported_values() {
-        assert_eq!(brty_code("106A").expect("106A should map"), 0);
-        assert_eq!(brty_code("212F").expect("212F should map"), 1);
-        assert_eq!(brty_code("424F").expect("424F should map"), 2);
-        assert_eq!(brty_code("106B").expect("106B should map"), 3);
+    fn bitrate_code_maps_supported_values() {
+        assert_eq!(bitrate_code("106A").expect("106A should map"), 0);
+        assert_eq!(bitrate_code("212F").expect("212F should map"), 1);
+        assert_eq!(bitrate_code("424F").expect("424F should map"), 2);
+        assert_eq!(bitrate_code("106B").expect("106B should map"), 3);
     }
 
     #[test]
-    fn brty_code_rejects_unsupported_values() {
-        match brty_code("848B") {
+    fn bitrate_code_rejects_unsupported_values() {
+        match bitrate_code("848B") {
             Err(DriverError::UnsupportedTarget(err)) => {
                 assert_eq!(err.0, "unsupported bitrate 848B");
             }

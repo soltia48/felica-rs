@@ -1,4 +1,6 @@
-use crate::driver::errors::{CommunicationFault, DriverError, Result, ensure_status_ok};
+use crate::driver::errors::{
+    ChipsetError, CommunicationFault, DriverError, Result, ensure_status_ok,
+};
 use crate::driver::port100::frame::{self, Frame, FrameType};
 use crate::transport::Transport;
 use log::{debug, warn};
@@ -39,7 +41,7 @@ impl<T: Transport> Chipset<T> {
         };
         match chipset.set_command_type(1) {
             Ok(()) => {}
-            Err(DriverError::Status(_)) => {
+            Err(DriverError::Chipset(ChipsetError::Status(_))) => {
                 chipset.set_command_type(0)?;
             }
             Err(err) => return Err(err),
@@ -145,9 +147,13 @@ impl<T: Transport> Chipset<T> {
         self.configure_protocol(0x42, data, params, target_param_index, "target key")
     }
 
-    pub fn set_initiator_rf(&mut self, brty_send: &str, brty_recv: Option<&str>) -> Result<()> {
-        fn settings(brty: &str) -> Option<(u8, u8, u8, u8)> {
-            match brty {
+    pub fn set_initiator_rf(
+        &mut self,
+        bitrate_send: &str,
+        bitrate_recv: Option<&str>,
+    ) -> Result<()> {
+        fn settings(bitrate: &str) -> Option<(u8, u8, u8, u8)> {
+            match bitrate {
                 "212F" => Some((1, 1, 15, 1)),
                 "424F" => Some((1, 2, 15, 2)),
                 "106A" => Some((2, 3, 15, 3)),
@@ -160,9 +166,9 @@ impl<T: Transport> Chipset<T> {
             }
         }
 
-        let recv = brty_recv.unwrap_or(brty_send);
-        let send_cfg = settings(brty_send)
-            .ok_or_else(|| DriverError::Other(format!("unsupported bitrate {}", brty_send)))?;
+        let recv = bitrate_recv.unwrap_or(bitrate_send);
+        let send_cfg = settings(bitrate_send)
+            .ok_or_else(|| DriverError::Other(format!("unsupported bitrate {}", bitrate_send)))?;
         let recv_cfg = settings(recv)
             .ok_or_else(|| DriverError::Other(format!("unsupported bitrate {}", recv)))?;
 
@@ -183,7 +189,7 @@ impl<T: Transport> Chipset<T> {
         if rsp.len() >= 4 && rsp[0..4] != [0, 0, 0, 0] {
             let fault = CommunicationFault::from_status(&rsp[0..4])
                 .unwrap_or_else(|| CommunicationFault::new(0));
-            return Err(DriverError::Fault(fault));
+            return Err(DriverError::Chipset(ChipsetError::Fault(fault)));
         }
         Ok(rsp.get(5..).map(|d| d.to_vec()).unwrap_or_default())
     }
@@ -243,7 +249,7 @@ impl<T: Transport> Chipset<T> {
             && rsp[3..7] != [0, 0, 0, 0]
             && let Some(fault) = CommunicationFault::from_status(&rsp[3..7])
         {
-            return Err(DriverError::Fault(fault));
+            return Err(DriverError::Chipset(ChipsetError::Fault(fault)));
         }
         Ok(rsp)
     }
@@ -348,10 +354,7 @@ impl<T: Transport> Chipset<T> {
     fn drain_input(&mut self, timeout: Duration) {
         self.read_buffer.clear();
         let deadline = Instant::now() + timeout;
-        loop {
-            let Some(remaining) = remaining_until(deadline) else {
-                break;
-            };
+        while let Some(remaining) = remaining_until(deadline) {
             match self.transport.read(remaining) {
                 Ok(bytes) => {
                     if bytes.is_empty() {

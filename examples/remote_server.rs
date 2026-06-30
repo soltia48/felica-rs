@@ -18,12 +18,12 @@
 //!
 //! ## DetectTypeF (Polling)
 //! ```json
-//! {"type": "detect_type_f", "brty": "212F", "system_code": 65535, "request_code": 0, "time_slots": 0}
+//! {"type": "detect_type_f", "bitrate": "212F", "system_code": 65535, "request_code": 0, "time_slots": 0}
 //! ```
 //!
 //! ## Transceive (Raw command)
 //! ```json
-//! {"type": "transceive", "brty": "212F", "data": "0A02...", "timeout_ms": 1000}
+//! {"type": "transceive", "bitrate": "212F", "data": "0A02...", "timeout_ms": 1000}
 //! ```
 
 use hex::{decode as hex_decode, encode as hex_encode};
@@ -55,10 +55,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!();
     println!("Protocol:");
     println!(
-        r#"  DetectTypeF: {{"type": "detect_type_f", "brty": "212F", "system_code": 65535, "request_code": 0, "time_slots": 0}}"#
+        r#"  DetectTypeF: {{"type": "detect_type_f", "bitrate": "212F", "system_code": 65535, "request_code": 0, "time_slots": 0}}"#
     );
     println!(
-        r#"  Transceive:  {{"type": "transceive", "brty": "212F", "data": "HEX...", "timeout_ms": 1000}}"#
+        r#"  Transceive:  {{"type": "transceive", "bitrate": "212F", "data": "HEX...", "timeout_ms": 1000}}"#
     );
 
     for stream in listener.incoming() {
@@ -115,16 +115,16 @@ fn handle_client(stream: TcpStream, reader: Arc<Mutex<Reader>>) -> Result<(), Bo
 fn process_request(reader: &mut Reader, request: RemoteRequest) -> RemoteResponse {
     match request {
         RemoteRequest::DetectTypeF {
-            brty,
+            bitrate,
             system_code,
             request_code,
             time_slots,
         } => {
-            let target = match RemoteTarget::new(&brty) {
+            let target = match RemoteTarget::new(&bitrate) {
                 Ok(t) => t,
                 Err(e) => {
                     return RemoteResponse::Error {
-                        message: format!("Invalid brty: {}", e),
+                        message: format!("Invalid bitrate: {}", e),
                     };
                 }
             };
@@ -154,15 +154,15 @@ fn process_request(reader: &mut Reader, request: RemoteRequest) -> RemoteRespons
         }
 
         RemoteRequest::Transceive {
-            brty,
+            bitrate,
             data,
             timeout_ms,
         } => {
-            let target = match RemoteTarget::new(&brty) {
+            let target = match RemoteTarget::new(&bitrate) {
                 Ok(t) => t,
                 Err(e) => {
                     return RemoteResponse::Error {
-                        message: format!("Invalid brty: {}", e),
+                        message: format!("Invalid bitrate: {}", e),
                     };
                 }
             };

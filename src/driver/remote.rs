@@ -17,7 +17,7 @@ pub enum RemoteRequest {
     /// Poll for a Type 3 (FeliCa) tag.
     DetectTypeF {
         /// Bit rate (e.g., "212F" or "424F")
-        brty: String,
+        bitrate: String,
         /// System code to poll for
         system_code: u16,
         /// Request code
@@ -28,7 +28,7 @@ pub enum RemoteRequest {
     /// Send raw data and receive response.
     Transceive {
         /// Bit rate
-        brty: String,
+        bitrate: String,
         /// Raw data as hex string
         data: String,
         /// Timeout in milliseconds
@@ -119,7 +119,7 @@ impl FelicaDriver for RemoteDriver {
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
         let request = RemoteRequest::DetectTypeF {
-            brty: target.brty().to_string(),
+            bitrate: target.bitrate().to_string(),
             system_code,
             request_code,
             time_slots,
@@ -149,7 +149,7 @@ impl FelicaDriver for RemoteDriver {
         timeout_ms: Option<u16>,
     ) -> Result<Vec<u8>> {
         let request = RemoteRequest::Transceive {
-            brty: target.brty().to_string(),
+            bitrate: target.bitrate().to_string(),
             data: hex::encode(data).to_uppercase(),
             timeout_ms,
         };
@@ -213,18 +213,18 @@ mod tests {
     #[test]
     fn remote_request_serialization_includes_tagged_type_and_fields() {
         let request = RemoteRequest::DetectTypeF {
-            brty: "212F".to_string(),
+            bitrate: "212F".to_string(),
             system_code: 0xFE00,
             request_code: 0x01,
             time_slots: 0x0F,
         };
         let json: Value = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(json["type"], "detect_type_f");
-        assert_eq!(json["brty"], "212F");
+        assert_eq!(json["bitrate"], "212F");
         assert_eq!(json["system_code"], 0xFE00);
 
         let request = RemoteRequest::Transceive {
-            brty: "424F".to_string(),
+            bitrate: "424F".to_string(),
             data: "AABB".to_string(),
             timeout_ms: Some(500),
         };
@@ -307,7 +307,7 @@ mod tests {
         let json: Value =
             serde_json::from_str(raw_request.trim()).expect("request should be valid JSON");
         assert_eq!(json["type"], "detect_type_f");
-        assert_eq!(json["brty"], "212F");
+        assert_eq!(json["bitrate"], "212F");
         assert_eq!(json["system_code"], 0xFE00);
         assert_eq!(json["request_code"], 0x01);
         assert_eq!(json["time_slots"], 0x02);
@@ -333,7 +333,7 @@ mod tests {
         let json: Value =
             serde_json::from_str(raw_request.trim()).expect("request should be valid JSON");
         assert_eq!(json["type"], "transceive");
-        assert_eq!(json["brty"], "424F");
+        assert_eq!(json["bitrate"], "424F");
         assert_eq!(json["data"], "0ABB");
         assert_eq!(json["timeout_ms"], 250);
 

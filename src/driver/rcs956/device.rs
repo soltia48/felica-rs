@@ -5,21 +5,18 @@
 use crate::clf::crc;
 use crate::clf::errors::CommunicationError;
 use crate::clf::targets::RemoteTarget;
+use crate::driver::common::{self, DeviceInfo, DeviceMetadata, impl_reader_device, is_type2_106a};
 use crate::driver::errors::{DriverError, Result};
 use crate::driver::rcs956::chipset::Chipset;
-use crate::felica_standard::{FelicaDriver, Type3TagPollingResult};
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
 use hex::encode;
 use log::debug;
-use std::io::{self, ErrorKind};
 
 /// RC-S956 device driver.
 pub struct Device<T: Transport> {
     pub(crate) chipset: Chipset<T>,
-    vendor_name: Option<String>,
-    product_name: Option<String>,
-    chipset_name: String,
+    meta: DeviceMetadata,
 }
 
 /// Initializes an RC-S956 device with the given transport.
@@ -29,23 +26,16 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
 }
 
 /// Opens an RC-S956 device (RC-S330/RC-S360/RC-S370).
-pub fn open_rcs956_device() -> Result<Device<UsbTransport>> {
-    const SONY_VID: u16 = 0x054C;
+pub fn open_rcs956() -> Result<Device<UsbTransport>> {
     // RC-S330: 0x02E1, RC-S360/RC-S370: 0x02E1, 0x0193
-    // Note: 0x01BB is RC-S320, which uses a different protocol
+    // Note: 0x01BB is RC-S320, which uses a different protocol.
     const PRODUCT_IDS: [u16; 2] = [0x02E1, 0x0193];
-
-    let mut last_error: Option<io::Error> = None;
-    for pid in PRODUCT_IDS {
-        match UsbTransport::open(SONY_VID, pid) {
-            Ok(transport) => return init(transport),
-            Err(err) => last_error = Some(err),
-        }
-    }
-
-    Err(DriverError::Io(last_error.unwrap_or_else(|| {
-        io::Error::new(ErrorKind::NotFound, "RC-S956 reader not found")
-    })))
+    common::open_usb_device(
+        common::SONY_VENDOR_ID,
+        &PRODUCT_IDS,
+        "RC-S956 reader not found",
+        init,
+    )
 }
 
 impl<T: Transport> Device<T> {
@@ -58,11 +48,13 @@ impl<T: Transport> Device<T> {
         chipset.initialize()?;
 
         let version = chipset.firmware_version();
-        let chipset_name = format!("RCS956v{:x}.{:x}", version.1, version.2);
-        let vendor_name = chipset.manufacturer_name().map(|s| s.to_string());
-        let product_name = chipset.product_name().map(|s| s.to_string());
+        let meta = DeviceMetadata {
+            vendor_name: chipset.manufacturer_name().map(|s| s.to_string()),
+            product_name: chipset.product_name().map(|s| s.to_string()),
+            chipset_name: format!("RCS956v{:x}.{:x}", version.1, version.2),
+        };
 
-        debug!("chipset is a {}", chipset_name);
+        debug!("chipset is a {}", meta.chipset_name);
 
         // Mute (turn off RF field)
         chipset.rf_field_off()?;
@@ -87,32 +79,12 @@ impl<T: Transport> Device<T> {
         // RF settings in RAM-07 are used for initial target state
         chipset.write_single_register(0x0328, 0x59)?;
 
-        Ok(Self {
-            vendor_name,
-            product_name,
-            chipset,
-            chipset_name,
-        })
+        Ok(Self { chipset, meta })
     }
 
     /// Returns a mutable reference to the chipset.
     pub fn chipset(&mut self) -> &mut Chipset<T> {
         &mut self.chipset
-    }
-
-    /// Returns the vendor name.
-    pub fn vendor_name(&self) -> Option<&str> {
-        self.vendor_name.as_deref()
-    }
-
-    /// Returns the product name.
-    pub fn product_name(&self) -> Option<&str> {
-        self.product_name.as_deref()
-    }
-
-    /// Returns the chipset name.
-    pub fn chipset_name(&self) -> &str {
-        &self.chipset_name
     }
 
     /// Closes the device.
@@ -146,7 +118,7 @@ impl<T: Transport> Device<T> {
     ) -> Result<Vec<u8>> {
         debug!(
             "RC-S956 transceive TX ({}): {}",
-            target.brty(),
+            target.bitrate(),
             encode(data)
         );
         let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(1000) as u64 + 100);
@@ -163,7 +135,7 @@ impl<T: Transport> Device<T> {
         };
         debug!(
             "RC-S956 transceive RX ({}): {}",
-            target.brty(),
+            target.bitrate(),
             encode(&response)
         );
         Ok(response)
@@ -204,46 +176,32 @@ impl<T: Transport> Device<T> {
     }
 }
 
-impl<T: Transport> FelicaDriver for Device<T> {
-    fn detect_type_f(
-        &mut self,
-        target: &RemoteTarget,
-        system_code: u16,
-        request_code: u8,
-        time_slots: u8,
-    ) -> Result<Type3TagPollingResult> {
-        self.detect_type_f(target, system_code, request_code, time_slots)
-    }
-
-    fn transceive(
-        &mut self,
-        target: &RemoteTarget,
-        data: &[u8],
-        timeout_ms: Option<u16>,
-    ) -> Result<Vec<u8>> {
-        self.transceive(target, data, timeout_ms)
+impl<T: Transport> DeviceInfo for Device<T> {
+    fn metadata(&self) -> &DeviceMetadata {
+        &self.meta
     }
 }
 
+impl_reader_device!(Device);
+
 /// Checks if the target is a Type 2 Tag.
+///
+/// Unlike the shared [`is_type2_106a`] helper, the RC-S956 additionally
+/// requires the target to not be a Type 1 Tag (no RID response).
 fn is_type2_target(target: &RemoteTarget) -> bool {
-    target.brty() == "106A"
-        && target
-            .data
-            .sel_res
-            .as_ref()
-            .and_then(|bytes| bytes.first())
-            .map(|b| b & 0x60 == 0x00)
-            .unwrap_or(false)
-        && target.data.rid_res.is_none()
+    is_type2_106a(target) && target.data.rid_res.is_none()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_target(brty: &str, sel_res: Option<Vec<u8>>, rid_res: Option<Vec<u8>>) -> RemoteTarget {
-        let mut target = RemoteTarget::new(brty).expect("target should be created");
+    fn make_target(
+        bitrate: &str,
+        sel_res: Option<Vec<u8>>,
+        rid_res: Option<Vec<u8>>,
+    ) -> RemoteTarget {
+        let mut target = RemoteTarget::new(bitrate).expect("target should be created");
         target.data.sel_res = sel_res;
         target.data.rid_res = rid_res;
         target
@@ -257,8 +215,8 @@ mod tests {
         let type4_like = make_target("106A", Some(vec![0x20]), None);
         assert!(!is_type2_target(&type4_like));
 
-        let wrong_brty = make_target("212F", Some(vec![0x00]), None);
-        assert!(!is_type2_target(&wrong_brty));
+        let wrong_bitrate = make_target("212F", Some(vec![0x00]), None);
+        assert!(!is_type2_target(&wrong_bitrate));
 
         let no_sel = make_target("106A", None, None);
         assert!(!is_type2_target(&no_sel));

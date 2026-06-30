@@ -57,10 +57,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn print_help() {
     println!("Commands:");
-    println!("  poll [system_code] [brty]    - Poll for NFC-F target and show IDm/PMm");
+    println!("  poll [system_code] [bitrate]    - Poll for NFC-F target and show IDm/PMm");
     println!("                                 system_code: hex (default: FFFF)");
-    println!("                                 brty: 212F or 424F (default: 212F)");
-    println!("  system_code [sc] [brty]      - Request system codes from card");
+    println!("                                 bitrate: 212F or 424F (default: 212F)");
+    println!("  system_code [sc] [bitrate]      - Request system codes from card");
     println!("  request_service <codes...>   - Request service (hex codes)");
     println!("  read <service> <block>       - Read block without encryption");
     println!("  search <index>               - Search service code by index");
@@ -86,10 +86,11 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
         }
         "poll" | "p" => {
             let system_code = parts.get(1).unwrap_or(&"FFFF");
-            let brty = parts.get(2).unwrap_or(&"212F");
+            let bitrate = parts.get(2).unwrap_or(&"212F");
             let system_code = parse_u16_hex(system_code)?;
 
-            let (felica, polling) = FelicaStandard::polling(driver, brty, system_code, 0x00, 0x00)?;
+            let (felica, polling) =
+                FelicaStandard::polling(driver, bitrate, system_code, 0x00, 0x00)?;
 
             println!("Found NFC-F target:");
             println!("  IDm: {}", hex_encode(felica.idm()).to_uppercase());
@@ -100,10 +101,11 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
         }
         "system_code" | "sc" | "systemcode" => {
             let system_code = parts.get(1).unwrap_or(&"FFFF");
-            let brty = parts.get(2).unwrap_or(&"212F");
+            let bitrate = parts.get(2).unwrap_or(&"212F");
             let system_code = parse_u16_hex(system_code)?;
 
-            let (mut felica, _) = FelicaStandard::polling(driver, brty, system_code, 0x00, 0x00)?;
+            let (mut felica, _) =
+                FelicaStandard::polling(driver, bitrate, system_code, 0x00, 0x00)?;
             let codes = felica.request_system_code()?;
 
             println!("System codes:");

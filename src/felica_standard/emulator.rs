@@ -71,6 +71,12 @@ pub struct FelicaStandardEmulator {
     active_system: Option<u16>,
 }
 
+impl Default for FelicaStandardEmulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FelicaStandardEmulator {
     pub fn new() -> Self {
         Self {
@@ -183,12 +189,12 @@ impl FelicaStandardEmulator {
         if request_system_code == 0xFFFF {
             return self.systems.first().map(|system| system.system_code);
         }
-        if let Some(active) = self.active_system {
-            if self.systems.iter().any(|system| {
+        if let Some(active) = self.active_system
+            && self.systems.iter().any(|system| {
                 system.system_code == active && matches_system_code(request_system_code, active)
-            }) {
-                return Some(active);
-            }
+            })
+        {
+            return Some(active);
         }
         self.systems
             .iter()
@@ -448,10 +454,10 @@ impl FelicaStandardEmulator {
     }
 
     fn resolve_active_system_code(&self) -> Option<u16> {
-        if let Some(code) = self.active_system {
-            if self.systems.iter().any(|system| system.system_code == code) {
-                return Some(code);
-            }
+        if let Some(code) = self.active_system
+            && self.systems.iter().any(|system| system.system_code == code)
+        {
+            return Some(code);
         }
         self.systems.first().map(|system| system.system_code)
     }
@@ -873,10 +879,8 @@ impl EmulatedSystem {
             &transaction_key,
             &response_payload,
         )?;
-        if is_register_command(command_code) {
-            if response_payload.first() == Some(&0x00) {
-                self.mode = SystemMode::Mode3;
-            }
+        if is_register_command(command_code) && response_payload.first() == Some(&0x00) {
+            self.mode = SystemMode::Mode3;
         }
         if let Some(session) = self.secure_session.as_mut() {
             session.transaction_number = response_transaction_number;
@@ -1127,10 +1131,10 @@ impl EmulatedArea {
             return Some(self);
         }
         for child in &self.children {
-            if let AreaChild::Area(area) = child {
-                if let Some(found) = area.find_area(area_code) {
-                    return Some(found);
-                }
+            if let AreaChild::Area(area) = child
+                && let Some(found) = area.find_area(area_code)
+            {
+                return Some(found);
             }
         }
         None
@@ -1289,10 +1293,10 @@ fn list_error_index(index: usize) -> u8 {
 }
 
 fn service_allows_write(service_code: ServiceCode) -> bool {
-    match service_code.attributes() {
-        0b001010 | 0b001011 | 0b001110 | 0b001111 | 0b010110 | 0b010111 => false,
-        _ => true,
-    }
+    !matches!(
+        service_code.attributes(),
+        0b001010 | 0b001011 | 0b001110 | 0b001111 | 0b010110 | 0b010111
+    )
 }
 
 fn validate_area_range(area_code: u16, end_service_code: u16) -> Result<(), EmulatorConfigError> {

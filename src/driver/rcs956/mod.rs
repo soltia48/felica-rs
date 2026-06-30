@@ -28,7 +28,7 @@ mod discovery;
 mod frame;
 
 pub use chipset::Chipset;
-pub use device::{Device, init, open_rcs956_device};
+pub use device::{Device, init, open_rcs956};
 pub use frame::{Frame, FrameType};
 
-pub use crate::driver::errors::{CommunicationFault, DriverError, Result, StatusError};
+pub use crate::driver::errors::{ChipsetError, CommunicationFault, DriverError, Result};

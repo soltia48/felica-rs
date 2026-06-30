@@ -2,7 +2,7 @@
 //!
 //! This module provides low-level communication with the RC-S956 chipset.
 
-use crate::driver::errors::{DriverError, Result, StatusError};
+use crate::driver::errors::{ChipsetError, DriverError, Result};
 use crate::driver::rcs956::frame::{self, CONTROLLER_TO_HOST, Frame};
 use crate::transport::Transport;
 use log::{debug, warn};
@@ -352,7 +352,7 @@ impl<T: Transport> Chipset<T> {
 
         // Check for error frame
         if payload.first() == Some(&0x7F) {
-            return Err(StatusError::new(err::ERROR_FRAME).into());
+            return Err(ChipsetError::Status(err::ERROR_FRAME).into());
         }
 
         // Verify response identifier and command code
@@ -381,10 +381,7 @@ impl<T: Transport> Chipset<T> {
     fn drain_input(&mut self, timeout: Duration) {
         self.read_buffer.clear();
         let deadline = Instant::now() + timeout;
-        loop {
-            let Some(remaining) = remaining_until(deadline) else {
-                break;
-            };
+        while let Some(remaining) = remaining_until(deadline) {
             match self.transport.read(remaining) {
                 Ok(bytes) => {
                     if bytes.is_empty() {
@@ -474,7 +471,7 @@ impl<T: Transport> Chipset<T> {
         }
         let status = self.command(cmd::WRITE_REGISTER, &data, Duration::from_millis(250))?;
         if status.iter().any(|&b| b != 0) {
-            return Err(StatusError::new(err::REGISTER_WRITE_FAILED).into());
+            return Err(ChipsetError::Status(err::REGISTER_WRITE_FAILED).into());
         }
         Ok(())
     }
@@ -499,12 +496,12 @@ impl<T: Transport> Chipset<T> {
     pub fn in_list_passive_target(
         &mut self,
         max_tg: u8,
-        brty: u8,
+        bitrate: u8,
         initiator_data: &[u8],
     ) -> Result<Option<Vec<u8>>> {
         let mut data = Vec::with_capacity(initiator_data.len() + 2);
         data.push(max_tg);
-        data.push(brty);
+        data.push(bitrate);
         data.extend_from_slice(initiator_data);
 
         let response = self.command(cmd::IN_LIST_PASSIVE_TARGET, &data, Duration::from_secs(1))?;
@@ -526,12 +523,12 @@ impl<T: Transport> Chipset<T> {
 
         let response = self.command(cmd::IN_DATA_EXCHANGE, &cmd_data, timeout)?;
         if response.is_empty() {
-            return Err(StatusError::new(err::NO_DATA).into());
+            return Err(ChipsetError::Status(err::NO_DATA).into());
         }
 
         let status = response[0];
         if status & 0x3F != 0 {
-            return Err(StatusError::new(status & 0x3F).into());
+            return Err(ChipsetError::Status(status & 0x3F).into());
         }
 
         let more = (status & 0x40) != 0;
@@ -543,7 +540,7 @@ impl<T: Transport> Chipset<T> {
         let response = self.command(cmd::IN_COMMUNICATE_THRU, data, timeout)?;
         if response.is_empty() || response[0] != 0 {
             let errno = response.first().copied().unwrap_or(err::NO_DATA);
-            return Err(StatusError::new(errno).into());
+            return Err(ChipsetError::Status(errno).into());
         }
         Ok(response[1..].to_vec())
     }
@@ -573,7 +570,7 @@ impl<T: Transport> Chipset<T> {
         let response = self.command(cmd::IN_JUMP_FOR_DEP, &data, Duration::from_secs(3))?;
         if response.is_empty() || response[0] != 0 {
             let errno = response.first().copied().unwrap_or(err::NO_DATA);
-            return Err(StatusError::new(errno).into());
+            return Err(ChipsetError::Status(errno).into());
         }
         Ok(response[2..].to_vec())
     }
@@ -608,7 +605,7 @@ impl<T: Transport> Chipset<T> {
         let response = self.command(cmd::TG_SET_GENERAL_BYTES, gb, Duration::from_millis(100))?;
         if response.first() != Some(&0) {
             let errno = response.first().copied().unwrap_or(err::NO_DATA);
-            return Err(StatusError::new(errno).into());
+            return Err(ChipsetError::Status(errno).into());
         }
         Ok(())
     }
@@ -627,7 +624,7 @@ impl<T: Transport> Chipset<T> {
         let response = self.command(cmd::TG_RESPONSE_TO_INITIATOR, data, Duration::from_secs(1))?;
         if response.first() != Some(&0) {
             let errno = response.first().copied().unwrap_or(err::NO_DATA);
-            return Err(StatusError::new(errno).into());
+            return Err(ChipsetError::Status(errno).into());
         }
         Ok(())
     }
@@ -741,7 +738,9 @@ mod tests {
         );
 
         match Chipset::<DummyTransport>::extract_response_payload(Frame::build(&[0x7F]), 0x02) {
-            Err(DriverError::Status(status)) => assert_eq!(status.errno, err::ERROR_FRAME),
+            Err(DriverError::Chipset(ChipsetError::Status(errno))) => {
+                assert_eq!(errno, err::ERROR_FRAME)
+            }
             Err(other) => panic!("expected status error, got {other}"),
             Ok(payload) => panic!("expected status error, got payload {payload:?}"),
         }

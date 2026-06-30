@@ -21,14 +21,11 @@
 //! - DCS: Data checksum (256 - sum(DATA)) & 0xFF
 //! - POSTAMBLE: 0x00
 
-/// Start of frame sequence.
-pub const SOF: [u8; 3] = [0x00, 0x00, 0xFF];
+use crate::driver::framing::{
+    checksum as data_checksum, checksum_matches, has_sof, length_checksum as length_checksum_normal,
+};
 
-/// ACK frame bytes.
-pub const ACK_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00];
-
-/// Error frame bytes.
-pub const ERROR_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00];
+pub use crate::driver::framing::{ACK_BYTES, ERROR_BYTES, SOF};
 
 /// Extended frame length marker.
 const EXTENDED_LENGTH_MARKER: [u8; 2] = [0xFF, 0xFF];
@@ -98,7 +95,7 @@ impl Frame {
             frame.extend_from_slice(&SOF);
             frame.extend_from_slice(&EXTENDED_LENGTH_MARKER);
             frame.extend_from_slice(&len_bytes);
-            frame.push(length_checksum_extended(&len_bytes));
+            frame.push(data_checksum(&len_bytes));
             frame.extend_from_slice(payload);
             frame.push(data_checksum(payload));
             frame.push(0x00); // Postamble
@@ -188,35 +185,11 @@ fn parse_data_frame(layout: DataFrameLayout<'_>, data: &[u8]) -> Option<FrameTyp
     Some(FrameType::Data(payload.to_vec()))
 }
 
-fn length_checksum_normal(len: u8) -> u8 {
-    (256u16.wrapping_sub(len as u16) & 0xFF) as u8
-}
-
-fn length_checksum_extended(len_bytes: &[u8; 2]) -> u8 {
-    let sum: u16 = len_bytes.iter().map(|b| *b as u16).sum();
-    (256u16.wrapping_sub(sum % 256) % 256) as u8
-}
-
-fn data_checksum(bytes: &[u8]) -> u8 {
-    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    (256u16.wrapping_sub(sum % 256) % 256) as u8
-}
-
-fn checksum_matches(bytes: &[u8], checksum: u8) -> bool {
-    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    ((sum + checksum as u16) % 256) == 0
-}
-
-fn has_sof(data: &[u8]) -> bool {
-    data.len() >= 3 && data.get(0..3) == Some(&SOF)
-}
-
 struct DataFrameLayout<'a> {
     length: usize,
     length_bytes: &'a [u8],
     lcs: u8,
     data_start: usize,
-    extended: bool,
 }
 
 impl<'a> DataFrameLayout<'a> {
@@ -237,7 +210,6 @@ impl<'a> DataFrameLayout<'a> {
                 length_bytes,
                 lcs: *data.get(7)?,
                 data_start: 8,
-                extended: true,
             })
         } else {
             let length = *data.get(3)? as usize;
@@ -246,18 +218,12 @@ impl<'a> DataFrameLayout<'a> {
                 length_bytes: &data[3..4],
                 lcs: *data.get(4)?,
                 data_start: 5,
-                extended: false,
             })
         }
     }
 
     fn verify_length_checksum(&self) -> bool {
-        if self.extended {
-            let sum: u16 = self.length_bytes.iter().map(|b| *b as u16).sum();
-            ((sum + self.lcs as u16) % 256) == 0
-        } else {
-            ((self.length_bytes[0] as u16 + self.lcs as u16) % 256) == 0
-        }
+        checksum_matches(self.length_bytes, self.lcs)
     }
 
     fn payload_range(&self) -> Option<std::ops::Range<usize>> {

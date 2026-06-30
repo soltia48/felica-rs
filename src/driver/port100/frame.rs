@@ -1,8 +1,8 @@
+use crate::driver::framing::{self, checksum, checksum_matches};
 use std::convert::TryInto;
 
-pub const PREAMBLE: [u8; 3] = [0x00, 0x00, 0xFF];
-pub const ACK_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00];
-pub const ERROR_BYTES: [u8; 6] = [0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00];
+pub use crate::driver::framing::{ACK_BYTES, ERROR_BYTES, SOF as PREAMBLE};
+
 const EXTENDED_LENGTH_MARKER: [u8; 2] = [0xFF, 0xFF];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,7 +10,6 @@ pub enum FrameType {
     Ack,
     Error,
     Data(Vec<u8>),
-    Raw,
 }
 
 #[derive(Debug, Clone)]
@@ -100,18 +99,8 @@ fn parse_data_frame(layout: DataFrameLayout<'_>, data: &[u8]) -> Option<FrameTyp
     Some(FrameType::Data(payload.to_vec()))
 }
 
-fn checksum(bytes: &[u8]) -> u8 {
-    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    ((256 - (sum % 256)) % 256) as u8
-}
-
-fn checksum_matches(bytes: &[u8], checksum: u8) -> bool {
-    let sum: u16 = bytes.iter().map(|b| *b as u16).sum();
-    (sum + checksum as u16).is_multiple_of(256)
-}
-
 fn has_preamble(data: &[u8]) -> bool {
-    data.len() >= 5 && data.get(0..3) == Some(&PREAMBLE)
+    data.len() >= 5 && framing::has_sof(data)
 }
 
 struct DataFrameLayout<'a> {
