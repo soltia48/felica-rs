@@ -1,0 +1,593 @@
+//! One emulated FeliCa system: its identity, keys, mode state, and the command
+//! handling that reads/writes the [`super::structure`] tree, runs DES mutual
+//! authentication, and processes secure-messaging frames.
+
+use super::SharedBlocks;
+use super::encode_response_frame;
+use super::structure::{
+    DirectoryEntry, EmulatedArea, EmulatedService, EmulatorConfigError, ROOT_AREA_CODE,
+    ROOT_END_SERVICE_CODE,
+};
+use crate::felica_standard::command::is_register_command;
+use crate::felica_standard::secure::{
+    AuthenticationContext, build_authentication2_payload, build_secure_response_frame_des,
+    check_packet_mac_des, decrypt_des_cbc_zero_iv, encrypt_authentication2_payload,
+    generate_service_keys_des,
+};
+use crate::felica_standard::{
+    Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
+    FelicaStandardResponse, ReadResult, ServiceCode,
+};
+use std::collections::BTreeMap;
+
+const STATUS_UNSUPPORTED_SF1: u8 = 0xFF;
+const STATUS_UNSUPPORTED_SF2: u8 = 0xC2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemMode {
+    Mode0,
+    Mode1,
+    Mode2,
+    Mode3,
+}
+
+impl SystemMode {
+    fn code(self) -> u8 {
+        match self {
+            SystemMode::Mode0 => 0x00,
+            SystemMode::Mode1 => 0x01,
+            SystemMode::Mode2 => 0x02,
+            SystemMode::Mode3 => 0x03,
+        }
+    }
+}
+
+pub struct EmulatedSystem {
+    pub(super) system_code: u16,
+    pub(super) idm: [u8; 8],
+    pub(super) pmm: [u8; 8],
+    root_area: EmulatedArea,
+    mode: SystemMode,
+    system_key_version: u16,
+    system_key: [u8; 8],
+    idi: [u8; 8],
+    pmi: [u8; 8],
+    pending_auth: Option<PendingAuthentication>,
+    secure_session: Option<SecureSession>,
+}
+
+impl EmulatedSystem {
+    pub fn new(system_code: u16, idm: [u8; 8], pmm: [u8; 8]) -> Result<Self, EmulatorConfigError> {
+        let root_area = EmulatedArea::new(ROOT_AREA_CODE, ROOT_END_SERVICE_CODE)?;
+        Ok(Self {
+            system_code,
+            idm,
+            pmm,
+            root_area,
+            mode: SystemMode::Mode0,
+            system_key_version: 0x0000,
+            system_key: [0x00; 8],
+            idi: [0x00; 8],
+            pmi: [0x00; 8],
+            pending_auth: None,
+            secure_session: None,
+        })
+    }
+
+    pub fn system_code(&self) -> u16 {
+        self.system_code
+    }
+
+    pub fn system_key_version(&self) -> u16 {
+        self.system_key_version
+    }
+
+    pub fn system_key(&self) -> &[u8; 8] {
+        &self.system_key
+    }
+
+    pub fn idm(&self) -> &[u8; 8] {
+        &self.idm
+    }
+
+    pub fn pmm(&self) -> &[u8; 8] {
+        &self.pmm
+    }
+
+    pub fn root_area(&self) -> &EmulatedArea {
+        &self.root_area
+    }
+
+    pub fn root_area_mut(&mut self) -> &mut EmulatedArea {
+        &mut self.root_area
+    }
+
+    pub fn set_system_key_version(&mut self, version: u16) -> &mut Self {
+        self.system_key_version = version;
+        self
+    }
+
+    pub fn set_system_key(&mut self, system_key: [u8; 8]) -> &mut Self {
+        self.system_key = system_key;
+        self
+    }
+
+    pub fn set_idi_pmi(&mut self, idi: [u8; 8], pmi: [u8; 8]) -> &mut Self {
+        self.idi = idi;
+        self.pmi = pmi;
+        self
+    }
+
+    pub fn set_issue_information(
+        &mut self,
+        issue_id: [u8; 8],
+        issue_parameter: [u8; 8],
+    ) -> &mut Self {
+        self.set_idi_pmi(issue_id, issue_parameter)
+    }
+
+    pub fn add_service(
+        &mut self,
+        service: EmulatedService,
+    ) -> Result<&mut Self, EmulatorConfigError> {
+        self.root_area.add_service(service)?;
+        self.sync_overlapping_services();
+        Ok(self)
+    }
+
+    pub fn add_area(&mut self, area: EmulatedArea) -> Result<&mut Self, EmulatorConfigError> {
+        self.root_area.add_area(area)?;
+        self.sync_overlapping_services();
+        Ok(self)
+    }
+
+    pub fn directory(&self) -> Vec<DirectoryEntry> {
+        let mut entries = Vec::new();
+        self.root_area.append_directory_entries(&mut entries);
+        entries
+    }
+
+    pub(super) fn mode_code(&self) -> u8 {
+        self.mode.code()
+    }
+
+    pub(super) fn find_service(&self, service_code: ServiceCode) -> Option<&EmulatedService> {
+        self.root_area.find_service(service_code)
+    }
+
+    fn find_area(&self, area_code: u16) -> Option<&EmulatedArea> {
+        self.root_area.find_area(area_code)
+    }
+
+    pub(super) fn node_key_version(&self, node_code: ServiceCode) -> u16 {
+        if node_code.raw() == 0xFFFF {
+            return self.system_key_version;
+        }
+        if let Some(service) = self.find_service(node_code) {
+            if service.service_code().requires_key() {
+                return service.key_version();
+            }
+            return 0xFFFF;
+        }
+        if let Some(area) = self.find_area(node_code.raw()) {
+            return area.key_version();
+        }
+        0xFFFF
+    }
+
+    pub(super) fn handle_authentication1(
+        &mut self,
+        idm: [u8; 8],
+        areas: &[u16],
+        services: &[u16],
+        challenge_1a: [u8; 8],
+    ) -> Option<Vec<u8>> {
+        let system_key = self.system_key;
+        let mut area_keys = Vec::new();
+        let mut service_keys = Vec::new();
+        for area_code in areas {
+            let area = self.find_area(*area_code)?;
+            area_keys.push(*area.key());
+        }
+        let mut service_codes = Vec::new();
+        for area_code in areas {
+            let area = self.find_area(*area_code)?;
+            area.append_service_codes(&mut service_codes);
+        }
+        for &raw in services {
+            let code = ServiceCode::new(raw);
+            let service = self.find_service(code)?;
+            if code.requires_key() {
+                service_keys.push(*service.key());
+            }
+            service_codes.push(code);
+        }
+
+        let (group_key, user_key) =
+            generate_service_keys_des(&system_key, &area_keys, &service_keys);
+        let context = AuthenticationContext::new(&idm, &group_key, &user_key);
+        let random_1 = context.decrypt_challenge1a(&challenge_1a);
+        let random_2: [u8; 8] = rand::random();
+        let challenge_1b = context.encrypt_challenge1b(&random_1);
+        let challenge_2a = context.encrypt_challenge2a(&random_2);
+
+        self.pending_auth = Some(PendingAuthentication {
+            context,
+            random_1,
+            random_2,
+            service_codes,
+        });
+        self.secure_session = None;
+        self.mode = SystemMode::Mode1;
+
+        encode_response_frame(FelicaStandardResponse::Authentication1 {
+            idm,
+            challenge_1b,
+            challenge_2a,
+        })
+    }
+
+    pub(super) fn handle_authentication2(
+        &mut self,
+        _idm: [u8; 8],
+        challenge_2b: [u8; 8],
+    ) -> Option<Vec<u8>> {
+        let pending = self.pending_auth.take()?;
+        let expected = pending.context.encrypt_challenge2b(&pending.random_2);
+        if expected != challenge_2b {
+            return None;
+        }
+
+        let mut transaction_id = [0u8; 6];
+        transaction_id.copy_from_slice(&pending.random_1[2..8]);
+        let transaction_number = 0u16;
+        let payload = build_authentication2_payload(
+            transaction_number,
+            &transaction_id,
+            &self.idi,
+            &self.pmi,
+        );
+        let encrypted_payload = encrypt_authentication2_payload(&payload, &pending.random_2)?;
+
+        self.secure_session = Some(SecureSession {
+            transaction_number,
+            transaction_id,
+            transaction_key: pending.random_2,
+            service_codes: pending.service_codes,
+        });
+        self.mode = SystemMode::Mode2;
+
+        encode_response_frame(FelicaStandardResponse::Authentication2(
+            Authentication2Response { encrypted_payload },
+        ))
+    }
+
+    pub(super) fn validate_block(
+        &self,
+        service_codes: &[ServiceCode],
+        index: usize,
+        block: &BlockListElement,
+        access: AccessType,
+    ) -> Result<(ServiceCode, usize), (u8, u8)> {
+        if block.access_mode != 0 {
+            return Err((list_error_index(index), 0xA7));
+        }
+
+        let service_index = block.service_code_list_index as usize;
+        let Some(service_code) = service_codes.get(service_index).copied() else {
+            return Err((list_error_index(index), 0xA3));
+        };
+        let Some(service) = self.find_service(service_code) else {
+            return Err((list_error_index(index), 0xA5));
+        };
+        if service_code.requires_key() {
+            return Err((list_error_index(index), 0xA5));
+        }
+        if matches!(access, AccessType::Write) && !service_allows_write(service_code) {
+            return Err((list_error_index(index), 0xA5));
+        }
+
+        let block_number = block.block_number_or_key_version as usize;
+        let block_count = service.blocks.borrow().len();
+        if block_number >= block_count {
+            return Err((list_error_index(index), 0xA8));
+        }
+
+        Ok((service_code, block_number))
+    }
+
+    fn validate_secure_block(
+        &self,
+        service_codes: &[ServiceCode],
+        index: usize,
+        block: &BlockListElement,
+        access: AccessType,
+    ) -> Result<(ServiceCode, usize), (u8, u8)> {
+        if block.access_mode != 0 {
+            return Err((list_error_index(index), 0xA7));
+        }
+
+        let service_index = block.service_code_list_index as usize;
+        let Some(service_code) = service_codes.get(service_index).copied() else {
+            return Err((list_error_index(index), 0xA3));
+        };
+        let Some(service) = self.find_service(service_code) else {
+            return Err((list_error_index(index), 0xA5));
+        };
+        if matches!(access, AccessType::Write) && !service_allows_write(service_code) {
+            return Err((list_error_index(index), 0xA5));
+        }
+
+        let block_number = block.block_number_or_key_version as usize;
+        let block_count = service.blocks.borrow().len();
+        if block_number >= block_count {
+            return Err((list_error_index(index), 0xA8));
+        }
+
+        Ok((service_code, block_number))
+    }
+
+    pub(super) fn block_count_for_node(&self, node_code: u16) -> u16 {
+        let service_code = ServiceCode::new(node_code);
+        if let Some(service) = self.find_service(service_code) {
+            let block_count = service.blocks.borrow().len();
+            return block_count.min(u16::MAX as usize) as u16;
+        }
+        if let Some(area) = self.find_area(node_code) {
+            return area.total_block_count().min(u16::MAX as usize) as u16;
+        }
+        0
+    }
+
+    pub(super) fn reset_mode(&mut self) {
+        self.mode = SystemMode::Mode0;
+        self.pending_auth = None;
+        self.secure_session = None;
+    }
+
+    fn sync_overlapping_services(&mut self) {
+        let mut registry = BTreeMap::new();
+        self.root_area.sync_overlapping_services(&mut registry);
+    }
+
+    pub(super) fn handle_secure_frame(
+        &mut self,
+        command_code: u8,
+        encrypted_payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        let (transaction_key, transaction_id, service_codes, last_transaction_number) = {
+            let session = self.secure_session.as_ref()?;
+            (
+                session.transaction_key,
+                session.transaction_id,
+                session.service_codes.clone(),
+                session.transaction_number,
+            )
+        };
+        let decrypted = decrypt_des_cbc_zero_iv(encrypted_payload, &transaction_key).ok()?;
+        if !check_packet_mac_des(&decrypted, command_code) {
+            return None;
+        }
+        if decrypted.len() < DES_BLOCK_SIZE {
+            return None;
+        }
+        let (payload, _mac) = decrypted.split_at(decrypted.len() - DES_BLOCK_SIZE);
+        if payload.len() < 8 {
+            return None;
+        }
+        let transaction_number = u16::from_le_bytes([payload[0], payload[1]]);
+        let mut payload_transaction_id = [0u8; 6];
+        payload_transaction_id.copy_from_slice(&payload[2..8]);
+        if payload_transaction_id != transaction_id {
+            return None;
+        }
+        if transaction_number <= last_transaction_number {
+            return None;
+        }
+        let response_transaction_number = transaction_number.checked_add(1)?;
+
+        let command_payload = payload[8..].to_vec();
+        let command =
+            FelicaStandardCommand::parse_secure_payload(command_code, &command_payload).ok()?;
+
+        let response = match command {
+            FelicaStandardCommand::Read { block_list } => {
+                self.handle_secure_read(&service_codes, &block_list)
+            }
+            FelicaStandardCommand::Write { block_list, data } => {
+                self.handle_secure_write(&service_codes, &block_list, &data)
+            }
+            FelicaStandardCommand::RegisterIssueId { .. } => {
+                FelicaStandardResponse::RegisterIssueId {
+                    status_flag1: STATUS_UNSUPPORTED_SF1,
+                    status_flag2: STATUS_UNSUPPORTED_SF2,
+                    result: None,
+                }
+            }
+            FelicaStandardCommand::RegisterArea { .. } => FelicaStandardResponse::RegisterArea {
+                status_flag1: STATUS_UNSUPPORTED_SF1,
+                status_flag2: STATUS_UNSUPPORTED_SF2,
+            },
+            FelicaStandardCommand::RegisterService { .. } => {
+                FelicaStandardResponse::RegisterService {
+                    status_flag1: STATUS_UNSUPPORTED_SF1,
+                    status_flag2: STATUS_UNSUPPORTED_SF2,
+                    result: None,
+                }
+            }
+            FelicaStandardCommand::ChangeSystemBlock => FelicaStandardResponse::ChangeSystemBlock {
+                status_flag1: STATUS_UNSUPPORTED_SF1,
+                status_flag2: STATUS_UNSUPPORTED_SF2,
+            },
+            _ => return None,
+        };
+        let response_payload = response.to_secure_payload().ok()?;
+
+        let response_code = command_code.wrapping_add(1);
+        let frame = build_secure_response_frame_des(
+            response_code,
+            response_transaction_number,
+            &transaction_id,
+            &transaction_key,
+            &response_payload,
+        )?;
+        if is_register_command(command_code) && response_payload.first() == Some(&0x00) {
+            self.mode = SystemMode::Mode3;
+        }
+        if let Some(session) = self.secure_session.as_mut() {
+            session.transaction_number = response_transaction_number;
+        }
+        Some(frame)
+    }
+
+    fn handle_secure_read(
+        &self,
+        service_codes: &[ServiceCode],
+        block_list: &[BlockListElement],
+    ) -> FelicaStandardResponse {
+        let mut blocks = Vec::with_capacity(block_list.len());
+        for (index, block) in block_list.iter().enumerate() {
+            let (service_code, block_number) =
+                match self.validate_secure_block(service_codes, index, block, AccessType::Read) {
+                    Ok(value) => value,
+                    Err((sf1, sf2)) => {
+                        return FelicaStandardResponse::Read {
+                            status_flag1: sf1,
+                            status_flag2: sf2,
+                            result: None,
+                        };
+                    }
+                };
+            let service = self.find_service(service_code).unwrap();
+            let block_data = {
+                let shared = service.blocks.borrow();
+                shared[block_number]
+            };
+            blocks.push(block_data);
+        }
+        FelicaStandardResponse::Read {
+            status_flag1: 0x00,
+            status_flag2: 0x00,
+            result: Some(ReadResult { blocks }),
+        }
+    }
+
+    fn handle_secure_write(
+        &mut self,
+        service_codes: &[ServiceCode],
+        block_list: &[BlockListElement],
+        data: &[u8],
+    ) -> FelicaStandardResponse {
+        let expected_len = block_list.len().saturating_mul(BLOCK_SIZE);
+        if data.len() < expected_len {
+            return FelicaStandardResponse::Write {
+                status_flag1: 0xFF,
+                status_flag2: 0xAC,
+            };
+        }
+        let mut updates = Vec::with_capacity(block_list.len());
+        for (index, block) in block_list.iter().enumerate() {
+            let (service_code, block_number) =
+                match self.validate_secure_block(service_codes, index, block, AccessType::Write) {
+                    Ok(value) => value,
+                    Err((sf1, sf2)) => {
+                        return FelicaStandardResponse::Write {
+                            status_flag1: sf1,
+                            status_flag2: sf2,
+                        };
+                    }
+                };
+            let offset = index * BLOCK_SIZE;
+            let mut block_data = [0u8; BLOCK_SIZE];
+            block_data.copy_from_slice(&data[offset..offset + BLOCK_SIZE]);
+            updates.push((service_code, block_number, block_data));
+        }
+
+        let mut shared_blocks: BTreeMap<u16, SharedBlocks> = BTreeMap::new();
+        for (service_code, block_number, block_data) in updates {
+            let service_number = service_code.number();
+            let shared = if let Some(shared) = shared_blocks.get(&service_number) {
+                shared.clone()
+            } else {
+                let Some(service) = self.find_service(service_code) else {
+                    return FelicaStandardResponse::Write {
+                        status_flag1: 0xFF,
+                        status_flag2: 0xA6,
+                    };
+                };
+                let shared = service.blocks.clone();
+                shared_blocks.insert(service_number, shared.clone());
+                shared
+            };
+            let mut blocks = shared.borrow_mut();
+            if let Some(slot) = blocks.get_mut(block_number) {
+                *slot = block_data;
+            }
+        }
+
+        FelicaStandardResponse::Write {
+            status_flag1: 0x00,
+            status_flag2: 0x00,
+        }
+    }
+}
+
+struct PendingAuthentication {
+    context: AuthenticationContext,
+    random_1: [u8; 8],
+    random_2: [u8; 8],
+    service_codes: Vec<ServiceCode>,
+}
+
+struct SecureSession {
+    transaction_number: u16,
+    transaction_id: [u8; 6],
+    transaction_key: [u8; 8],
+    service_codes: Vec<ServiceCode>,
+}
+
+pub(super) enum AccessType {
+    Read,
+    Write,
+}
+
+fn list_error_index(index: usize) -> u8 {
+    let value = index.saturating_add(1);
+    if value > u8::MAX as usize {
+        u8::MAX
+    } else {
+        value as u8
+    }
+}
+
+fn service_allows_write(service_code: ServiceCode) -> bool {
+    !matches!(
+        service_code.attributes(),
+        0b001010 | 0b001011 | 0b001110 | 0b001111 | 0b010110 | 0b010111
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_mode_codes_and_list_error_index() {
+        assert_eq!(SystemMode::Mode0.code(), 0x00);
+        assert_eq!(SystemMode::Mode1.code(), 0x01);
+        assert_eq!(SystemMode::Mode2.code(), 0x02);
+        assert_eq!(SystemMode::Mode3.code(), 0x03);
+
+        assert_eq!(list_error_index(0), 1);
+        assert_eq!(list_error_index(200), 201);
+        assert_eq!(list_error_index(usize::MAX), u8::MAX);
+    }
+
+    #[test]
+    fn service_write_permission_rules() {
+        let read_only = ServiceCode::new((0x0100 << 6) | 0b001011);
+        let writable = ServiceCode::new((0x0100 << 6) | 0b001001);
+        assert!(!service_allows_write(read_only));
+        assert!(service_allows_write(writable));
+    }
+}
