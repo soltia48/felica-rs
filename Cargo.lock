@@ -293,6 +293,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "felica-rs"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "cmac",
+ "des",
+ "encoding_rs",
+ "env_logger",
+ "hex",
+ "log",
+ "ofb",
+ "rand",
+ "rusb",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -401,27 +422,6 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
-
-[[package]]
-name = "nfc-rs"
-version = "0.1.0"
-dependencies = [
- "aes",
- "cbc",
- "cmac",
- "des",
- "encoding_rs",
- "env_logger",
- "hex",
- "log",
- "ofb",
- "rand",
- "rusb",
- "serde",
- "serde_json",
- "smallvec",
- "thiserror",
-]
 
 [[package]]
 name = "ofb"

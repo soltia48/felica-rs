@@ -11,9 +11,9 @@
 //!
 //! Default address is 127.0.0.1:7878
 
+use felica_rs::RemoteDriver;
+use felica_rs::felica_standard::{BlockListElement, FelicaStandard, ServiceCode};
 use hex::encode as hex_encode;
-use nfc_rs::RemoteDriver;
-use nfc_rs::felica_standard::{BlockListElement, FelicaStandard, ServiceCode};
 use std::error::Error;
 use std::io::{Write, stdin, stdout};
 
@@ -172,7 +172,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
             let result = felica.search_service_code(service_index)?;
 
             match result {
-                Some(nfc_rs::SearchServiceCodeResult::Service(code)) => {
+                Some(felica_rs::SearchServiceCodeResult::Service(code)) => {
                     println!("Index {}: Service 0x{:04X}", service_index, code.raw());
                     println!("  Number: {}", code.number());
                     println!("  Attributes: 0x{:02X}", code.attributes());
@@ -180,7 +180,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                         println!("  Description: {}", desc);
                     }
                 }
-                Some(nfc_rs::SearchServiceCodeResult::Area {
+                Some(felica_rs::SearchServiceCodeResult::Area {
                     area_code,
                     end_service_code,
                 }) => {
@@ -224,7 +224,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                     FelicaStandard::polling(driver, "212F", system_code, 0x00, 0x00)?;
 
                 match felica.search_service_code(index) {
-                    Ok(Some(nfc_rs::SearchServiceCodeResult::Service(code))) => {
+                    Ok(Some(felica_rs::SearchServiceCodeResult::Service(code))) => {
                         println!(
                             "  [{:02X}] Service 0x{:04X} (attr: 0x{:02X})",
                             index,
@@ -254,7 +254,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                             }
                         }
                     }
-                    Ok(Some(nfc_rs::SearchServiceCodeResult::Area {
+                    Ok(Some(felica_rs::SearchServiceCodeResult::Area {
                         area_code,
                         end_service_code,
                     })) => {

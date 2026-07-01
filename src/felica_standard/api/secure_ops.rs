@@ -151,6 +151,24 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             .ok_or(FelicaStandardError::AuthenticationRequired)
     }
 
+    /// Encrypt an arbitrary command (`command_code` + `command_payload`) under the
+    /// active secure session, transceive it, and return the decrypted response
+    /// payload.
+    ///
+    /// This is the low-level primitive behind the typed secure commands (`read`,
+    /// `write`, ...). It is exposed for callers that need to drive arbitrary
+    /// secure commands over a relayed [`FelicaDriver`] — for example a remote
+    /// crypto oracle that holds the keys while a separate client owns the reader.
+    /// Requires a prior [`mutual_authentication`](Self::mutual_authentication).
+    pub fn secure_transceive(
+        &mut self,
+        command_code: u8,
+        command_payload: &[u8],
+        timeout_ms: u16,
+    ) -> Result<Vec<u8>, FelicaStandardError> {
+        self.encrypted_command_exchange(command_code, command_payload, timeout_ms)
+    }
+
     pub(super) fn encrypted_command_exchange(
         &mut self,
         command_code: u8,

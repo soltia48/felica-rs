@@ -13,7 +13,7 @@
 //! ## Example
 //!
 //! ```no_run
-//! use nfc_rs::prelude::*;
+//! use felica_rs::prelude::*;
 //!
 //! fn read_card(reader: &mut Reader) -> Result<(), FelicaStandardError> {
 //!     // Poll for a FeliCa card with any system code

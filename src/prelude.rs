@@ -1,10 +1,10 @@
 //! Convenience re-exports for common types and traits.
 //!
 //! This module provides a convenient way to import commonly used types
-//! from the nfc-rs library with a single `use` statement:
+//! from the felica-rs library with a single `use` statement:
 //!
 //! ```
-//! use nfc_rs::prelude::*;
+//! use felica_rs::prelude::*;
 //! ```
 //!
 //! ## Included Types

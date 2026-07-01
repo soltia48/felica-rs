@@ -26,9 +26,9 @@
 //! {"type": "transceive", "bitrate": "212F", "data": "0A02...", "timeout_ms": 1000}
 //! ```
 
+use felica_rs::{Reader, ReaderPreference, RemoteTarget, open_reader};
+use felica_rs::{RemoteRequest, RemoteResponse, RemoteResponseData};
 use hex::{decode as hex_decode, encode as hex_encode};
-use nfc_rs::{Reader, ReaderPreference, RemoteTarget, open_reader};
-use nfc_rs::{RemoteRequest, RemoteResponse, RemoteResponseData};
 use std::error::Error;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};

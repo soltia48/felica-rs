@@ -19,12 +19,12 @@
 //! cargo run --example dump -- --keys keys.jsonl --remote 127.0.0.1:7878
 //! ```
 
-use hex::encode;
-use nfc_rs::felica_standard::{
+use felica_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, SearchServiceCodeResult,
     ServiceCode, generate_service_keys_des,
 };
-use nfc_rs::{Reader, ReaderPreference, RemoteDriver, open_reader};
+use felica_rs::{Reader, ReaderPreference, RemoteDriver, open_reader};
+use hex::encode;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;

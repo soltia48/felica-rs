@@ -3,11 +3,11 @@
 //! Usage:
 //!   cargo run --example emulate
 
-use log::{debug, info};
-use nfc_rs::felica_standard::{
+use felica_rs::felica_standard::{
     EmulatedArea, EmulatedService, EmulatedSystem, FelicaStandardEmulator,
 };
-use nfc_rs::{LocalTarget, ServiceCode, open_port100};
+use felica_rs::{LocalTarget, ServiceCode, open_port100};
+use log::{debug, info};
 use std::error::Error;
 
 const COMMAND_TIMEOUT_MS: u16 = 1000;

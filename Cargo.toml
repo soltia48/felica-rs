@@ -1,5 +1,5 @@
 [package]
-name = "nfc-rs"
+name = "felica-rs"
 version = "0.1.0"
 edition = "2024"
 

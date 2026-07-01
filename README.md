@@ -1,4 +1,4 @@
-# nfc-rs
+# felica-rs
 
 A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380), Port-400 (RC-S300), RC-S320, and RC-S330/RC-S360/RC-S370 PaSoRi readers.
 
@@ -23,7 +23,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-nfc-rs = { git = "https://github.com/soltia48/nfc-rs.git" }
+felica-rs = { git = "https://github.com/soltia48/felica-rs.git" }
 ```
 
 ## Quick Start

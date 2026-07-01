@@ -1,4 +1,4 @@
-//! # nfc-rs
+//! # felica-rs
 //!
 //! A Rust library for interacting with NFC (Near Field Communication) devices,
 //! with support for Sony's NFC Port-100 (RC-S380), Port-400, RC-S320, and
@@ -16,7 +16,7 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use nfc_rs::prelude::*;
+//! use felica_rs::prelude::*;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Open the first available reader

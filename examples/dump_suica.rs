@@ -21,12 +21,12 @@
 //! ```
 
 use encoding_rs::SHIFT_JIS;
-use hex::encode;
-use nfc_rs::felica_standard::{
+use felica_rs::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, ServiceCode,
     generate_service_keys_des,
 };
-use nfc_rs::{ReaderPreference, RemoteDriver, open_reader};
+use felica_rs::{ReaderPreference, RemoteDriver, open_reader};
+use hex::encode;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
