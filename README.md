@@ -29,7 +29,7 @@ felica-rs = { git = "https://github.com/soltia48/felica-rs.git" }
 ## Quick Start
 
 ```rust
-use nfc_rs::prelude::*;
+use felica_rs::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open the first available reader
@@ -119,7 +119,7 @@ Available commands:
 ### Reader Selection
 
 ```rust
-use nfc_rs::{open_reader, ReaderPreference};
+use felica_rs::{open_reader, ReaderPreference};
 
 // Auto-detect reader
 let reader = open_reader(ReaderPreference::Auto)?;
@@ -134,7 +134,7 @@ let reader = open_reader(ReaderPreference::ForceRcs956)?;
 ### FeliCa Standard Operations
 
 ```rust
-use nfc_rs::felica_standard::{FelicaStandard, ServiceCode, BlockListElement};
+use felica_rs::felica_standard::{FelicaStandard, ServiceCode, BlockListElement};
 
 // Poll for a card
 let (mut felica, polling) = FelicaStandard::polling(
