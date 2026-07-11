@@ -44,9 +44,11 @@ impl Rcs320Transport {
 
         let device = handle.device();
         let descriptor = device.device_descriptor().map_err(rusb_to_io_error)?;
-        let config = device
-            .active_config_descriptor()
-            .map_err(rusb_to_io_error)?;
+        // Read the configuration descriptor by index rather than
+        // active_config_descriptor(): on macOS a freshly opened device with no
+        // bound driver is left in the Address state (no active configuration
+        // yet), so active_config_descriptor() spuriously fails with NotFound.
+        let config = device.config_descriptor(0).map_err(rusb_to_io_error)?;
 
         let mut interface_number = None;
         let mut interrupt_ep_in = None;
@@ -77,6 +79,25 @@ impl Rcs320Transport {
             && let Err(err) = device_handle.detach_kernel_driver(interface)
         {
             debug!("failed to detach kernel driver: {:?}", err);
+        }
+        // Some platforms (notably macOS) leave a freshly opened device in the
+        // Address state rather than auto-selecting the sole configuration, which
+        // makes claim_interface fail with NotFound until we set it explicitly.
+        //
+        // Only set it when the device is not already in the desired
+        // configuration, since re-issuing SET_CONFIGURATION on an already
+        // configured device acts as a lightweight device reset.
+        let needs_configuration = match device_handle.active_configuration() {
+            Ok(active) => active != config.number(),
+            Err(err) => {
+                debug!("failed to read active configuration: {:?}", err);
+                true
+            }
+        };
+        if needs_configuration
+            && let Err(err) = device_handle.set_active_configuration(config.number())
+        {
+            debug!("failed to set active configuration: {:?}", err);
         }
         device_handle
             .claim_interface(interface)
