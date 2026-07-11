@@ -23,9 +23,11 @@ impl UsbTransport {
 
         let device = handle.device();
         let descriptor = device.device_descriptor().map_err(rusb_to_io_error)?;
-        let config = device
-            .active_config_descriptor()
-            .map_err(rusb_to_io_error)?;
+        // Read the configuration descriptor by index rather than
+        // active_config_descriptor(): on macOS a freshly opened device with no
+        // bound driver is left in the Address state (no active configuration
+        // yet), so active_config_descriptor() spuriously fails with NotFound.
+        let config = device.config_descriptor(0).map_err(rusb_to_io_error)?;
 
         let mut interface_number = None;
         let mut in_ep = None;
@@ -70,6 +72,12 @@ impl UsbTransport {
             && let Err(err) = device_handle.detach_kernel_driver(interface)
         {
             debug!("failed to detach kernel driver: {:?}", err);
+        }
+        // Some platforms (notably macOS) leave a freshly opened device in the
+        // Address state rather than auto-selecting the sole configuration, which
+        // makes claim_interface fail with NotFound until we set it explicitly.
+        if let Err(err) = device_handle.set_active_configuration(config.number()) {
+            debug!("failed to set active configuration: {:?}", err);
         }
         device_handle
             .claim_interface(interface)
