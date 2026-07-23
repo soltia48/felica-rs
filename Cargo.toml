@@ -1,0 +1,36 @@
+[package]
+name = "felica-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes = "0.9"
+cbc = "0.2"
+cmac = "0.8"
+des = "0.9"
+env_logger = "0.11"
+hex = "0.4"
+log = "0.4"
+ofb = "0.7"
+rand = "0.10"
+rusb = { version = "0.9", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+smallvec = "1.15"
+subtle = "2"
+thiserror = "2.0"
+
+[features]
+# `usb` pulls in the `rusb`-backed USB transport, the concrete PaSoRi drivers
+# (Port-100/400, RC-S320/S956) and the high-level `reader` facade. It is on by
+# default for backward compatibility. Turn it off (`default-features = false`)
+# to build only the hardware-independent parts — the `felica_standard` protocol
+# (crypto, mutual authentication, card emulator, `FelicaDriver` trait) and the
+# TCP `driver::remote` — with no `rusb`/`libusb` dependency. That is how a server
+# that drives authentication over a relay (rather than a local reader) consumes
+# this crate.
+default = ["usb"]
+usb = ["dep:rusb"]
+
+[dev-dependencies]
+encoding_rs = "0.8"
