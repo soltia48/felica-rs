@@ -53,6 +53,10 @@ Scan and dump all readable information from a FeliCa card:
 cargo run --example dump
 ```
 
+The tool waits until a card is placed on the reader, polling at both 212F and
+424F (424F preferred, 212F fallback), and the output includes the FeliCa data
+rate (`212F` or `424F`) the card was read at.
+
 By default this prints a human-friendly, colorized tree showing:
 - Reader information
 - System codes (with friendly names for well-known ones)
@@ -81,12 +85,12 @@ The server accepts JSON-formatted commands:
 
 **DetectTypeF (Polling):**
 ```json
-{"type": "detect_type_f", "brty": "212F", "system_code": 65535, "request_code": 0, "time_slots": 0}
+{"type": "detect_type_f", "bitrate": "212F", "system_code": 65535, "request_code": 0, "time_slots": 0}
 ```
 
 **Transceive (Raw command):**
 ```json
-{"type": "transceive", "brty": "212F", "data": "0A02...", "timeout_ms": 1000}
+{"type": "transceive", "bitrate": "212F", "data": "0A02...", "timeout_ms": 1000}
 ```
 
 ### Remote Client
@@ -99,8 +103,8 @@ cargo run --example remote_client -- [address:port]
 ```
 
 Available commands:
-- `poll [system_code] [brty]` - Poll for NFC-F target
-- `system_code [sc] [brty]` - Request system codes from card
+- `poll [system_code] [bitrate]` - Poll for NFC-F target (bitrate optional; defaults to both 212F and 424F, 424F preferred)
+- `system_code [sc] [bitrate]` - Request system codes from card (bitrate optional; defaults to both)
 - `request_service <codes...>` - Request service key versions
 - `read <service> <block>` - Read block without encryption
 - `search <index>` - Search service code by index
@@ -144,14 +148,20 @@ let reader = open_reader(ReaderPreference::ForceRcs956)?;
 ```rust
 use felica_rs::felica_standard::{FelicaStandard, ServiceCode, BlockListElement};
 
-// Poll for a card
-let (mut felica, polling) = FelicaStandard::polling(
+// Poll for a card. When both FeliCa bitrates are requested, 424F is tried
+// first and 212F is used as a fallback for cards that do not support 424F.
+let (mut felica, polling) = FelicaStandard::polling_multi(
     reader.driver_mut(),
-    "212F",      // Bit rate
-    0xFFFF,      // System code (wildcard)
-    0x00,        // Request code
-    0x00,        // Time slots
+    &["212F", "424F"], // Bit rates to try (424F preferred)
+    0xFFFF,            // System code (wildcard)
+    0x00,              // Request code
+    0x00,              // Time slots
 )?;
+
+// To poll at a single bitrate, use FelicaStandard::polling(driver, "212F", ...).
+
+// Bitrate the card was activated at ("212F" or "424F")
+let data_rate = felica.bitrate();
 
 // Get IDm and PMm
 let idm = felica.idm();
