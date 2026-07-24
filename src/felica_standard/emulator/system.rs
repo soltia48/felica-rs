@@ -227,9 +227,11 @@ impl EmulatedSystem {
                 area_keys.push(system_key);
                 continue;
             }
+            // An area node only takes part in the key derivation; it does not
+            // widen data access. The session may touch exactly the services named
+            // in the service code list.
             let area = self.find_area(area_code)?;
             area_keys.push(*area.key());
-            area.append_service_codes(&mut service_codes);
         }
         for &raw in services {
             let code = ServiceCode::new(raw);

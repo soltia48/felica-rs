@@ -162,15 +162,6 @@ impl EmulatedArea {
         }
     }
 
-    pub(super) fn append_service_codes(&self, codes: &mut Vec<ServiceCode>) {
-        for child in &self.children {
-            match child {
-                AreaChild::Area(area) => area.append_service_codes(codes),
-                AreaChild::Service(service) => codes.push(service.service_code),
-            }
-        }
-    }
-
     pub(super) fn find_service(&self, service_code: ServiceCode) -> Option<&EmulatedService> {
         for child in &self.children {
             match child {

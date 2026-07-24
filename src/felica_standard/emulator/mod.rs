@@ -480,6 +480,119 @@ fn polling_optional(system_code: u16, request_code: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clf::targets::RemoteTarget;
+    use crate::driver::errors::{DriverError, Result as DriverResult};
+    use crate::felica_standard::secure::generate_service_keys_des;
+    use crate::felica_standard::{BlockListElement, EmulatedArea, FelicaDriver, FelicaStandard};
+
+    /// Drives a `FelicaStandard` client straight against an emulated card.
+    struct EmulatorDriver<'a> {
+        emulator: &'a mut FelicaStandardEmulator,
+        idm: [u8; 8],
+        pmm: [u8; 8],
+    }
+
+    impl FelicaDriver for EmulatorDriver<'_> {
+        fn detect_type_f(
+            &mut self,
+            _target: &RemoteTarget,
+            _system_code: u16,
+            _request_code: u8,
+            _time_slots: u8,
+        ) -> DriverResult<Type3TagPollingResult> {
+            Ok(Type3TagPollingResult {
+                idm: self.idm.to_vec(),
+                pmm: self.pmm.to_vec(),
+                optional: Vec::new(),
+            })
+        }
+
+        fn transceive(
+            &mut self,
+            _target: &RemoteTarget,
+            data: &[u8],
+            _timeout_ms: Option<u16>,
+        ) -> DriverResult<Vec<u8>> {
+            self.emulator
+                .handle_frame(data)
+                .ok_or_else(|| DriverError::other("card rejected frame"))
+        }
+    }
+
+    /// Authenticating an area must not widen data access: a secure session can
+    /// touch only the services named in the service code list, never the other
+    /// services that happen to live under the authenticated area.
+    #[test]
+    fn authenticating_an_area_does_not_grant_access_to_its_other_services() {
+        const IDM: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        const PMM: [u8; 8] = [1, 0, 0, 0, 0, 0, 0, 0];
+        const SYSTEM_KEY: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        const AREA_KEY: [u8; 8] = [0x21, 0x43, 0x65, 0x87, 0xA9, 0xCB, 0xED, 0x0F];
+        const AUTHENTICATED_KEY: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        const OTHER_KEY: [u8; 8] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18];
+        // Two "random read/write with key" services sharing one area.
+        const AUTHENTICATED_SERVICE: u16 = 0x0048;
+        const OTHER_SERVICE: u16 = 0x0088;
+        const AUTHENTICATED_BLOCK: [u8; BLOCK_SIZE] = [0xAA; BLOCK_SIZE];
+        const OTHER_BLOCK: [u8; BLOCK_SIZE] = [0xBB; BLOCK_SIZE];
+
+        let mut system = EmulatedSystem::new(0x0003, IDM, PMM).expect("system");
+        system.set_system_key(SYSTEM_KEY);
+        let mut area = EmulatedArea::new(0x0040, 0x00FF).expect("area");
+        area.set_key(AREA_KEY);
+        let mut authenticated = EmulatedService::with_blocks(
+            ServiceCode::new(AUTHENTICATED_SERVICE),
+            0x0000,
+            vec![AUTHENTICATED_BLOCK],
+        );
+        authenticated.set_key(AUTHENTICATED_KEY);
+        area.add_service(authenticated)
+            .expect("authenticated service");
+        let mut other = EmulatedService::with_blocks(
+            ServiceCode::new(OTHER_SERVICE),
+            0x0000,
+            vec![OTHER_BLOCK],
+        );
+        other.set_key(OTHER_KEY);
+        area.add_service(other).expect("other service");
+        system.add_area(area).expect("area fits");
+
+        let mut emulator = FelicaStandardEmulator::new();
+        emulator.add_system(system);
+
+        let mut driver = EmulatorDriver {
+            emulator: &mut emulator,
+            idm: IDM,
+            pmm: PMM,
+        };
+        let (mut felica, _polling) =
+            FelicaStandard::polling(&mut driver, "212F", 0x0003, 0x00, 0x00).expect("polling");
+
+        // Authenticate the area, but name only one of its two services.
+        let (group_key, user_key) =
+            generate_service_keys_des(&SYSTEM_KEY, &[AREA_KEY], &[AUTHENTICATED_KEY]);
+        felica
+            .mutual_authentication(
+                &[0x0040],
+                &[ServiceCode::new(AUTHENTICATED_SERVICE)],
+                &group_key,
+                &user_key,
+            )
+            .expect("mutual authentication should succeed");
+
+        // Index 0 is the one authenticated service.
+        let blocks = felica
+            .read(&[BlockListElement::new(0, 0, 0)])
+            .expect("reading the authenticated service should succeed");
+        assert_eq!(blocks[0], AUTHENTICATED_BLOCK);
+
+        // The other service in the same area was never named, so there is no
+        // second entry in the service code list to address it with.
+        assert!(
+            felica.read(&[BlockListElement::new(0, 1, 0)]).is_err(),
+            "an unnamed service under the authenticated area must not be reachable"
+        );
+    }
 
     #[test]
     fn system_code_matching_and_polling_optional() {
