@@ -1,5 +1,8 @@
 use super::BLOCK_SIZE;
+use super::redact::Redacted;
 use super::secure::encrypt_des_block;
+use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The three kinds of service §3.4 defines, each with its own block access rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -733,7 +736,11 @@ pub struct MutualAuthenticationResult {
     pub issue_parameter: [u8; 8],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Not `Copy`: see [`SecureSessionCredentials`] — an implicit copy would escape
+/// [`Drop`] and never be cleared.
+///
+/// [`SecureSessionCredentials`]: super::SecureSessionCredentials
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ChangeKeyParameters {
     pub parent_key: [u8; 8],
     pub new_key: [u8; 8],
@@ -792,6 +799,19 @@ impl RequestServiceV2KeyVersion {
         } else {
             Some(value)
         }
+    }
+}
+
+// The three keys are secret; the version identifies which key is being installed
+// and is sent to the card in the clear.
+impl fmt::Debug for ChangeKeyParameters {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChangeKeyParameters")
+            .field("parent_key", &Redacted(self.parent_key.len()))
+            .field("new_key", &Redacted(self.new_key.len()))
+            .field("old_key", &Redacted(self.old_key.len()))
+            .field("new_key_version", &self.new_key_version)
+            .finish()
     }
 }
 
@@ -1143,5 +1163,17 @@ mod tests {
 
         let payload_b = ChangeKeyParameters::new([1; 8], [2; 8], [3; 8], 0x1235).payload();
         assert_ne!(payload_a, payload_b);
+    }
+
+    /// The three keys in a key-change request must not print.
+    #[test]
+    fn change_key_parameters_debug_redacts_the_keys() {
+        let params = ChangeKeyParameters::new([0xDE; 8], [0xAD; 8], [0xBE; 8], 0x1234);
+        let text = format!("{params:?}");
+        assert_eq!(text.matches("<8 bytes redacted>").count(), 3);
+        assert!(!text.contains("222"), "leaked a key byte: {text}");
+        assert!(!text.contains("173"), "leaked a key byte: {text}");
+        // The key version is sent to the card in the clear.
+        assert!(text.contains("new_key_version: 4660"), "unexpected: {text}");
     }
 }

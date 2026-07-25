@@ -481,11 +481,18 @@ impl<T: Transport> Chipset<T> {
         // Response format: [NbTg][Tg][...target data...]
         // nfcpy returns data[2:] which skips both NbTg and Tg
         if response.is_empty() || response[0] == 0 {
-            Ok(None)
-        } else {
-            // Skip NbTg (response[0]) and Tg (response[1])
-            Ok(Some(response[2..].to_vec()))
+            return Ok(None);
         }
+        // A response claiming a target must carry both NbTg and Tg. The reader is
+        // the one supplying this, so a short frame has to be reported rather than
+        // indexed past the end.
+        if response.len() < 2 {
+            return Err(DriverError::Other(
+                "InListPassiveTarget response reports a target but is too short".into(),
+            ));
+        }
+        // Skip NbTg (response[0]) and Tg (response[1])
+        Ok(Some(response[2..].to_vec()))
     }
 
     /// Performs InDataExchange command.
@@ -544,6 +551,13 @@ impl<T: Transport> Chipset<T> {
         if response.is_empty() || response[0] != 0 {
             let errno = response.first().copied().unwrap_or(err::NO_DATA);
             return Err(ChipsetError::Status(errno).into());
+        }
+        // A success response carries the status byte and Tg ahead of ATR_RES, so
+        // anything shorter than two bytes is malformed and must not be sliced.
+        if response.len() < 2 {
+            return Err(DriverError::Other(
+                "InJumpForDEP response is too short to contain ATR_RES".into(),
+            ));
         }
         Ok(response[2..].to_vec())
     }
@@ -792,5 +806,44 @@ mod tests {
             Err(other) => panic!("expected timeout io error, got {other}"),
             Ok(data) => panic!("expected timeout error, got {data:?}"),
         }
+    }
+
+    /// The reader supplies these frames, so a response that claims a result but
+    /// is too short to hold one has to be reported rather than sliced past the
+    /// end. Both of these used to panic with "range start index 2 out of range
+    /// for slice of length 1".
+    #[test]
+    fn short_device_responses_are_reported_instead_of_panicking() {
+        use crate::driver::framing::ACK_BYTES;
+
+        // InListPassiveTarget: NbTg = 1 with no Tg byte behind it.
+        let frame = Frame::build(&[CONTROLLER_TO_HOST, cmd::IN_LIST_PASSIVE_TARGET + 1, 0x01]);
+        let mut chipset = new_chipset(DummyTransport::with_reads(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(frame.as_bytes().to_vec()),
+        ]));
+        assert_driver_error_contains(
+            chipset.in_list_passive_target(1, 1, &[]),
+            "reports a target but is too short",
+        );
+
+        // NbTg = 0 still means "no target", which is not an error.
+        let frame = Frame::build(&[CONTROLLER_TO_HOST, cmd::IN_LIST_PASSIVE_TARGET + 1, 0x00]);
+        let mut chipset = new_chipset(DummyTransport::with_reads(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(frame.as_bytes().to_vec()),
+        ]));
+        assert_eq!(chipset.in_list_passive_target(1, 1, &[]).unwrap(), None);
+
+        // InJumpForDEP: status 0 with no Tg byte behind it.
+        let frame = Frame::build(&[CONTROLLER_TO_HOST, cmd::IN_JUMP_FOR_DEP + 1, 0x00]);
+        let mut chipset = new_chipset(DummyTransport::with_reads(vec![
+            Ok(ACK_BYTES.to_vec()),
+            Ok(frame.as_bytes().to_vec()),
+        ]));
+        assert_driver_error_contains(
+            chipset.in_jump_for_dep(true, 1, &[], &[0u8; 10], &[]),
+            "too short to contain ATR_RES",
+        );
     }
 }

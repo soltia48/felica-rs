@@ -13,6 +13,7 @@ use super::{DES_SECURE_HEADER_SIZE, TRANSACTION_ID_SIZE, TRANSACTION_NUMBER_SIZE
 use crate::felica_standard::{
     DES_BLOCK_SIZE, DES_MAC_SIZE, FelicaStandardError, frame_with_length_prefix,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authentication2Response {
@@ -280,6 +281,9 @@ pub(crate) fn generate_registration_package_des(
     encrypt_des_cbc_zero_iv(&package_with_mac, package_key).map_err(FelicaStandardError::Protocol)
 }
 
+/// `l`, `alpha` and `beta` are derived from the service keys, so they are as
+/// sensitive as the keys themselves.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct AuthenticationContext {
     l: [u8; 8],
     alpha: [u8; 8],

@@ -11,6 +11,7 @@ use crate::felica_standard::{BLOCK_SIZE, ServiceCode, ServiceKind};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub(super) const ROOT_AREA_CODE: u16 = 0x0000;
 pub(super) const ROOT_END_SERVICE_CODE: u16 = 0xFFFE;
@@ -80,11 +81,18 @@ pub enum EmulatorConfigError {
     },
 }
 
+/// Clears its area key on drop; the children clear their own keys through their
+/// own `Drop` impls.
+#[derive(ZeroizeOnDrop)]
 pub struct EmulatedArea {
+    #[zeroize(skip)]
     area_code: u16,
+    #[zeroize(skip)]
     key_version: u16,
     key: [u8; 8],
+    #[zeroize(skip)]
     end_service_code: u16,
+    #[zeroize(skip)]
     children: Vec<AreaChild>,
 }
 
@@ -150,6 +158,8 @@ impl EmulatedArea {
     }
 
     pub fn set_key(&mut self, key: [u8; 8]) -> &mut Self {
+        // Overwrite rather than replace, so the previous key does not survive.
+        self.key.zeroize();
         self.key = key;
         self
     }
@@ -361,11 +371,17 @@ impl Default for LimitPurseProperty {
     }
 }
 
+/// Clears its service key on drop.
+#[derive(ZeroizeOnDrop)]
 pub struct EmulatedService {
+    #[zeroize(skip)]
     service_code: ServiceCode,
+    #[zeroize(skip)]
     key_version: u16,
     key: [u8; 8],
+    #[zeroize(skip)]
     limit_purse: Option<LimitPurseProperty>,
+    #[zeroize(skip)]
     pub(super) blocks: SharedBlocks,
 }
 
@@ -441,6 +457,8 @@ impl EmulatedService {
     }
 
     pub fn set_key(&mut self, key: [u8; 8]) -> &mut Self {
+        // Overwrite rather than replace, so the previous key does not survive.
+        self.key.zeroize();
         self.key = key;
         self
     }

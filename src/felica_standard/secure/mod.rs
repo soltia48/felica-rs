@@ -18,6 +18,7 @@ mod primitives;
 #[cfg(test)]
 mod test_util;
 
+use crate::felica_standard::redact::Redacted;
 use crate::felica_standard::{
     BLOCK_SIZE, DES_BLOCK_SIZE, DES_MAC_SIZE, FelicaStandardError, MAX_PACKET_LEN,
     V2_AES128_MAC_SIZE,
@@ -25,6 +26,8 @@ use crate::felica_standard::{
 use aes_v2::{decrypt_secure_response_v2_aes128, encrypt_secure_request_v2_aes128};
 use des::{calculate_command_mac_des, decrypt_secure_response_des};
 use primitives::{encrypt_des_cbc_zero_iv, pad_to_des_block_size};
+use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Re-export each scheme's public and crate-internal surface so the rest of the
 // crate keeps referring to it through the `secure::` path.
@@ -105,7 +108,10 @@ pub enum SecureSessionScheme {
     Aes128,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Not `Copy`: an implicit bitwise copy is invisible to [`Drop`], so the keys
+/// could be duplicated without any of the duplicates ever being cleared. Every
+/// copy has to be an explicit `clone()` that zeroizes when it goes out of scope.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum SecureSessionCredentials {
     Des([u8; 8]),
     Aes128 {
@@ -116,7 +122,7 @@ pub enum SecureSessionCredentials {
 }
 
 impl SecureSessionCredentials {
-    pub fn scheme(self) -> SecureSessionScheme {
+    pub fn scheme(&self) -> SecureSessionScheme {
         match self {
             Self::Des(_) => SecureSessionScheme::Des,
             Self::Aes128 { .. } => SecureSessionScheme::Aes128,
@@ -124,7 +130,63 @@ impl SecureSessionCredentials {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// The session keys must not reach a log; `challenge_3c` is carried in the clear
+// in the Authentication1 v2 response, so it stays visible for debugging.
+impl fmt::Debug for SecureSessionCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Des(key) => f
+                .debug_tuple("SecureSessionCredentials::Des")
+                .field(&Redacted(key.len()))
+                .finish(),
+            Self::Aes128 {
+                encryption_key,
+                mac_key,
+                challenge_3c,
+            } => f
+                .debug_struct("SecureSessionCredentials::Aes128")
+                .field("encryption_key", &Redacted(encryption_key.len()))
+                .field("mac_key", &Redacted(mac_key.len()))
+                .field("challenge_3c", challenge_3c)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for SecureSessionCredentialsRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Des(key) => f
+                .debug_tuple("SecureSessionCredentialsRef::Des")
+                .field(&Redacted(key.len()))
+                .finish(),
+            Self::Aes128 {
+                encryption_key,
+                mac_key,
+                challenge_3c,
+            } => f
+                .debug_struct("SecureSessionCredentialsRef::Aes128")
+                .field("encryption_key", &Redacted(encryption_key.len()))
+                .field("mac_key", &Redacted(mac_key.len()))
+                .field("challenge_3c", challenge_3c)
+                .finish(),
+        }
+    }
+}
+
+// The transaction number and ID are known to both parties and useful to see; the
+// credentials are not, and they are what `SecureSessionCredentials` redacts.
+impl fmt::Debug for AuthenticatedContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthenticatedContext")
+            .field("transaction_number", &self.transaction_number)
+            .field("transaction_id", &self.transaction_id)
+            .field("credentials", &self.credentials)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SecureSessionCredentialsRef<'a> {
     Des(&'a [u8; 8]),
     Aes128 {
@@ -134,7 +196,7 @@ pub enum SecureSessionCredentialsRef<'a> {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct AuthenticatedContext {
     transaction_number: u16,
     transaction_id: [u8; 6],
@@ -218,6 +280,7 @@ pub(crate) struct DecryptedSecureResponse {
     pub(crate) payload: Vec<u8>,
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct SecureCommandContext {
     transaction_number: u16,
     transaction_id: [u8; 6],
@@ -229,7 +292,7 @@ impl SecureCommandContext {
         let transaction_number = context.increment_transaction_number()?;
         let mut transaction_id = [0u8; 6];
         transaction_id.copy_from_slice(context.transaction_id());
-        let credentials = context.credentials;
+        let credentials = context.credentials.clone();
         Ok(Self {
             transaction_number,
             transaction_id,
@@ -261,14 +324,14 @@ impl SecureCommandContext {
         command_code: u8,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, FelicaStandardError> {
-        match self.credentials {
+        match &self.credentials {
             SecureSessionCredentials::Des(key) => {
                 let padded_payload = pad_to_des_block_size(payload);
                 let mac = calculate_command_mac_des(command_code, &padded_payload)
                     .map_err(FelicaStandardError::Protocol)?;
                 let mut command_data = padded_payload;
                 command_data.extend_from_slice(&mac);
-                encrypt_des_cbc_zero_iv(&command_data, &key).map_err(FelicaStandardError::Protocol)
+                encrypt_des_cbc_zero_iv(&command_data, key).map_err(FelicaStandardError::Protocol)
             }
             SecureSessionCredentials::Aes128 {
                 encryption_key,
@@ -278,9 +341,9 @@ impl SecureCommandContext {
                 command_code,
                 self.transaction_counter_bytes(),
                 &self.transaction_id,
-                &challenge_3c,
-                &encryption_key,
-                &mac_key,
+                challenge_3c,
+                encryption_key,
+                mac_key,
                 &payload,
             )
             .map_err(FelicaStandardError::Protocol),
@@ -292,9 +355,9 @@ impl SecureCommandContext {
         response_code: u8,
         data: &[u8],
     ) -> Result<DecryptedSecureResponse, FelicaStandardError> {
-        match self.credentials {
+        match &self.credentials {
             SecureSessionCredentials::Des(key) => {
-                decrypt_secure_response_des(response_code, &self.transaction_id, &key, data)
+                decrypt_secure_response_des(response_code, &self.transaction_id, key, data)
             }
             SecureSessionCredentials::Aes128 {
                 encryption_key,
@@ -303,9 +366,9 @@ impl SecureCommandContext {
             } => decrypt_secure_response_v2_aes128(
                 response_code,
                 &self.transaction_id,
-                &challenge_3c,
-                &encryption_key,
-                &mac_key,
+                challenge_3c,
+                encryption_key,
+                mac_key,
                 data,
             )
             .map_err(FelicaStandardError::Protocol),
@@ -415,5 +478,135 @@ mod tests {
         );
         assert!(context.ensure_scheme(SecureSessionScheme::Aes128).is_ok());
         assert!(context.ensure_scheme(SecureSessionScheme::Des).is_err());
+    }
+
+    /// Key material must never reach a log or a panic message, so the types that
+    /// carry it redact their secret fields rather than deriving `Debug`.
+    #[test]
+    fn debug_output_never_contains_key_material() {
+        let des_key = [0xDEu8, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF];
+        let encryption_key = [0xA1u8; 16];
+        let mac_key = [0xB2u8; 16];
+        let challenge_3c = [0x01, 0x02, 0x03, 0x04];
+
+        // `{:?}` on a byte array renders decimals, so 0xDE would appear as 222.
+        let des = SecureSessionCredentials::Des(des_key);
+        let text = format!("{des:?}");
+        assert!(!text.contains("222"), "DES key byte leaked: {text}");
+        assert!(!text.contains("190"), "DES key byte leaked: {text}");
+        assert_eq!(text, "SecureSessionCredentials::Des(<8 bytes redacted>)");
+
+        let aes = SecureSessionCredentials::Aes128 {
+            encryption_key,
+            mac_key,
+            challenge_3c,
+        };
+        let text = format!("{aes:?}");
+        assert!(!text.contains("161"), "AES key byte leaked: {text}");
+        assert_eq!(text.matches("<16 bytes redacted>").count(), 2);
+        // challenge_3c travels in the clear in the Authentication1 v2 response, so
+        // it stays visible for debugging.
+        assert!(text.contains("challenge_3c"), "unexpected: {text}");
+
+        let context = AuthenticatedContext::new(7, [1, 2, 3, 4, 5, 6], des);
+        let text = format!("{context:?}");
+        assert!(text.contains("transaction_number: 7"), "unexpected: {text}");
+        assert!(text.contains("<8 bytes redacted>"), "unexpected: {text}");
+        assert!(!text.contains("222"), "session key leaked: {text}");
+
+        let text = format!("{:?}", context.credentials());
+        assert!(text.contains("<8 bytes redacted>"), "unexpected: {text}");
+        assert!(!text.contains("222"), "session key leaked via ref: {text}");
+    }
+
+    /// Key material must not outlive the type that holds it. `Zeroize` is what
+    /// clears it, and `ZeroizeOnDrop` is what guarantees the clear actually runs
+    /// when the value goes out of scope.
+    #[test]
+    fn credentials_are_cleared_when_zeroized() {
+        let mut des = SecureSessionCredentials::Des([0xAB; 8]);
+        des.zeroize();
+        assert_eq!(des, SecureSessionCredentials::Des([0x00; 8]));
+
+        let mut aes = SecureSessionCredentials::Aes128 {
+            encryption_key: [0xCD; 16],
+            mac_key: [0xEF; 16],
+            challenge_3c: [0x01, 0x02, 0x03, 0x04],
+        };
+        aes.zeroize();
+        assert_eq!(
+            aes,
+            SecureSessionCredentials::Aes128 {
+                encryption_key: [0x00; 16],
+                mac_key: [0x00; 16],
+                challenge_3c: [0x00; 4],
+            }
+        );
+
+        let mut context =
+            AuthenticatedContext::new(9, [1, 2, 3, 4, 5, 6], SecureSessionCredentials::Des([7; 8]));
+        context.zeroize();
+        assert_eq!(context.transaction_number(), 0);
+        assert_eq!(
+            context.credentials(),
+            SecureSessionCredentialsRef::Des(&[0; 8])
+        );
+    }
+
+    /// `Copy` would let the compiler duplicate key material without `Drop` ever
+    /// seeing the duplicate, so these types must not be `Copy`. A static assertion
+    /// is the only way to keep a future `#[derive(Copy)]` from slipping back in.
+    #[test]
+    fn key_bearing_types_are_not_copy() {
+        fn assert_not_copy<T: Clone>() {}
+        // `ZeroizeOnDrop` is only implementable for a non-`Copy` type, since `Copy`
+        // and `Drop` are mutually exclusive; requiring the bound below therefore
+        // pins the property.
+        fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+        assert_not_copy::<SecureSessionCredentials>();
+        assert_zeroize_on_drop::<SecureSessionCredentials>();
+        assert_zeroize_on_drop::<AuthenticatedContext>();
+        assert_zeroize_on_drop::<crate::felica_standard::NodeKey>();
+        assert_zeroize_on_drop::<crate::felica_standard::DerivedAuthKeys>();
+        assert_zeroize_on_drop::<crate::felica_standard::ChangeKeyParameters>();
+        assert_zeroize_on_drop::<crate::felica_standard::EmulatedSystem>();
+        assert_zeroize_on_drop::<crate::felica_standard::EmulatedArea>();
+        assert_zeroize_on_drop::<crate::felica_standard::EmulatedService>();
+    }
+
+    /// `ZeroizeOnDrop` is only useful if the clear is observable after the value
+    /// dies. Reading the bytes back through a raw pointer is the only way to check
+    /// that from inside the language: the storage is deliberately kept alive in a
+    /// `MaybeUninit` so the read stays in-bounds after the value is dropped.
+    #[test]
+    fn dropping_a_session_context_overwrites_the_key_in_place() {
+        use std::mem::MaybeUninit;
+
+        const KEY: [u8; 8] = [0x5A; 8];
+
+        let mut slot: MaybeUninit<AuthenticatedContext> = MaybeUninit::new(
+            AuthenticatedContext::new(1, [1, 2, 3, 4, 5, 6], SecureSessionCredentials::Des(KEY)),
+        );
+        let base = slot.as_ptr().cast::<u8>();
+        let size = size_of::<AuthenticatedContext>();
+
+        // SAFETY: `slot` is initialised, and the read stays within its allocation.
+        let before = unsafe { std::slice::from_raw_parts(base, size) }.to_vec();
+        assert!(
+            before.windows(KEY.len()).any(|window| window == KEY),
+            "the key should be present while the context is alive"
+        );
+
+        // SAFETY: `slot` is initialised and is not read as a value afterwards.
+        unsafe { slot.assume_init_drop() };
+
+        // SAFETY: the backing storage is still owned by `slot`, so this reads
+        // memory this test allocated; the value it held is gone by design.
+        let after = unsafe { std::slice::from_raw_parts(base, size) };
+        assert!(
+            !after.windows(KEY.len()).any(|window| window == KEY),
+            "dropping the context must have overwritten the key, found {after:02X?}"
+        );
     }
 }

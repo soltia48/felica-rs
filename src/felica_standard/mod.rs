@@ -32,6 +32,7 @@ mod constants;
 mod emulator;
 mod error;
 mod keys;
+mod redact;
 mod response;
 mod secure;
 mod type3;

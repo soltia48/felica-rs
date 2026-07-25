@@ -487,7 +487,7 @@ impl<T: Transport> Device<T> {
             None => return Ok(Tt4Step::Continue),
         };
 
-        if !self.is_valid_tt4_command(rats_cmd, rats_res, frame) {
+        if !is_valid_tt4_command(rats_cmd, rats_res, frame) {
             debug!("skip TT4_CMD {} (DID)", hex::encode(frame));
             return Ok(Tt4Step::Continue);
         }
@@ -506,45 +506,6 @@ impl<T: Transport> Device<T> {
         local.data.rats_res = Some(rats_res.to_vec());
         session.clear();
         Ok(Tt4Step::Found(local))
-    }
-
-    fn is_valid_tt4_command(&self, rats_cmd: &[u8], rats_res: &[u8], cmd: &[u8]) -> bool {
-        if rats_cmd.len() < 2 || cmd.is_empty() {
-            return false;
-        }
-        let did = rats_cmd[1] & 0x0F;
-        let mut params = rats_res[2..].to_vec();
-        let ta = if rats_res[1] & 0x10 != 0 && !params.is_empty() {
-            Some(params.remove(0))
-        } else {
-            None
-        };
-        let tb = if rats_res[1] & 0x20 != 0 && !params.is_empty() {
-            Some(params.remove(0))
-        } else {
-            None
-        };
-        let tc = if rats_res[1] & 0x40 != 0 && !params.is_empty() {
-            Some(params.remove(0))
-        } else {
-            None
-        };
-        if let Some(value) = ta {
-            debug!("TA(1) = {:08b}", value);
-        }
-        if let Some(value) = tb {
-            debug!("TB(1) = {:08b}", value);
-        }
-        if let Some(value) = tc {
-            debug!("TC(1) = {:08b}", value);
-        }
-        if !params.is_empty() {
-            debug!("T({}) = {}", params.len(), hex::encode(params));
-        }
-        let did_supported = tc.map(|value| value & 0x02 != 0).unwrap_or(true);
-        let cmd_with_did = cmd.first().map(|value| value & 0x08 != 0).unwrap_or(false);
-        (cmd_with_did && did_supported && cmd.get(1).copied() == Some(did))
-            || (did == 0 && !cmd_with_did)
     }
 
     fn build_local_nfca_target(&self, nfca_params: &[u8]) -> Result<LocalTarget> {
@@ -1207,6 +1168,50 @@ fn expect_exact_field<'a>(
     Ok(value)
 }
 
+fn is_valid_tt4_command(rats_cmd: &[u8], rats_res: &[u8], cmd: &[u8]) -> bool {
+    // RATS_RES is TL, T0 and then the optional TA(1)/TB(1)/TC(1) interface
+    // bytes, so both the length byte and T0 must be present before T0's
+    // presence bits can be read or the interface bytes sliced off. RATS_RES
+    // comes from the caller's `LocalTarget`, and a short one is a rejected
+    // configuration rather than a reason to abort the listen loop.
+    if rats_cmd.len() < 2 || rats_res.len() < 2 || cmd.is_empty() {
+        return false;
+    }
+    let did = rats_cmd[1] & 0x0F;
+    let mut params = rats_res[2..].to_vec();
+    let ta = if rats_res[1] & 0x10 != 0 && !params.is_empty() {
+        Some(params.remove(0))
+    } else {
+        None
+    };
+    let tb = if rats_res[1] & 0x20 != 0 && !params.is_empty() {
+        Some(params.remove(0))
+    } else {
+        None
+    };
+    let tc = if rats_res[1] & 0x40 != 0 && !params.is_empty() {
+        Some(params.remove(0))
+    } else {
+        None
+    };
+    if let Some(value) = ta {
+        debug!("TA(1) = {:08b}", value);
+    }
+    if let Some(value) = tb {
+        debug!("TB(1) = {:08b}", value);
+    }
+    if let Some(value) = tc {
+        debug!("TC(1) = {:08b}", value);
+    }
+    if !params.is_empty() {
+        debug!("T({}) = {}", params.len(), hex::encode(params));
+    }
+    let did_supported = tc.map(|value| value & 0x02 != 0).unwrap_or(true);
+    let cmd_with_did = cmd.first().map(|value| value & 0x08 != 0).unwrap_or(false);
+    (cmd_with_did && did_supported && cmd.get(1).copied() == Some(did))
+        || (did == 0 && !cmd_with_did)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,5 +1357,29 @@ mod tests {
             Err(other) => panic!("expected DriverError::Other, got {other}"),
             Ok(_) => panic!("expected error for invalid sdd_res"),
         }
+    }
+
+    /// RATS_RES comes from the caller's `LocalTarget`, and `is_valid_tt4_command`
+    /// reads T0's presence bits out of it. A RATS_RES shorter than TL + T0 used to
+    /// panic on `rats_res[2..]` instead of being rejected.
+    #[test]
+    fn is_valid_tt4_command_rejects_a_short_rats_res() {
+        // TL=0x05, T0=0x78 (TA/TB/TC present), then the three interface bytes.
+        let rats_res = [0x05u8, 0x78, 0x80, 0x70, 0x02];
+        let rats_cmd = [0xE0u8, 0x00];
+        // DID 0 with a command that carries no DID is the accepted combination.
+        assert!(is_valid_tt4_command(&rats_cmd, &rats_res, &[0x02]));
+
+        for short in [&[][..], &[0x05][..]] {
+            assert!(
+                !is_valid_tt4_command(&rats_cmd, short, &[0x02]),
+                "a {}-byte RATS_RES must be rejected, not panic",
+                short.len()
+            );
+        }
+
+        // The existing guards on the other two arguments still hold.
+        assert!(!is_valid_tt4_command(&[0xE0], &rats_res, &[0x02]));
+        assert!(!is_valid_tt4_command(&rats_cmd, &rats_res, &[]));
     }
 }

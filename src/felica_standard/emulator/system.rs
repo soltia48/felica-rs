@@ -20,6 +20,7 @@ use crate::felica_standard::{
     FelicaStandardResponse, ReadResult, ServiceAttribute, ServiceCode, ServiceKind,
 };
 use std::collections::BTreeMap;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const STATUS_UNSUPPORTED_SF1: u8 = 0xFF;
 const STATUS_UNSUPPORTED_SF2: u8 = 0xC2;
@@ -112,16 +113,31 @@ impl CommunicationPerformance {
     }
 }
 
+/// The system key and any live authentication state are cleared when the emulated
+/// card goes away; every other field is protocol data the card sends in the clear.
+#[derive(ZeroizeOnDrop)]
 pub struct EmulatedSystem {
+    #[zeroize(skip)]
     pub(super) system_code: u16,
+    #[zeroize(skip)]
     pub(super) idm: [u8; 8],
+    #[zeroize(skip)]
     pub(super) pmm: [u8; 8],
+    /// Clears its own area and service keys through its own `Drop`.
+    #[zeroize(skip)]
     root_area: EmulatedArea,
+    #[zeroize(skip)]
     mode: SystemMode,
+    #[zeroize(skip)]
     system_key_version: u16,
     system_key: [u8; 8],
+    /// Issue ID and issue parameter: card identity the card hands back after a
+    /// successful authentication, not key material.
+    #[zeroize(skip)]
     idi: [u8; 8],
+    #[zeroize(skip)]
     pmi: [u8; 8],
+    #[zeroize(skip)]
     communication_performance: CommunicationPerformance,
     pending_auth: Option<PendingAuthentication>,
     secure_session: Option<SecureSession>,
@@ -180,6 +196,9 @@ impl EmulatedSystem {
     }
 
     pub fn set_system_key(&mut self, system_key: [u8; 8]) -> &mut Self {
+        // Overwrite rather than replace, so the key this system was holding does
+        // not survive in the old bytes.
+        self.system_key.zeroize();
         self.system_key = system_key;
         self
     }
@@ -388,7 +407,18 @@ impl EmulatedSystem {
 
         let mut transaction_id = [0u8; 6];
         transaction_id.copy_from_slice(&pending.random_1[2..8]);
-        let transaction_number = 0u16;
+        // A repeat re-establishes the *same* session: Authentication1 fixed
+        // random_2, so the transaction key and ID are unchanged. The replay
+        // counter must therefore carry over rather than restart, because
+        // restarting it would make every secure command frame already seen in
+        // this session acceptable a second time — a captured Write could be
+        // re-applied by replaying Authentication2 ahead of it.
+        let transaction_number = self
+            .secure_session
+            .as_ref()
+            .filter(|session| session.transaction_id == transaction_id)
+            .map(|session| session.transaction_number)
+            .unwrap_or(0);
         let payload = build_authentication2_payload(
             transaction_number,
             &transaction_id,
@@ -814,17 +844,26 @@ struct ValidatedBlock {
     limit_purse: Option<LimitPurseProperty>,
 }
 
+/// `random_2` becomes the session key, and `random_1` seeds the transaction ID.
+#[derive(Zeroize, ZeroizeOnDrop)]
 struct PendingAuthentication {
     context: AuthenticationContext,
     random_1: [u8; 8],
     random_2: [u8; 8],
+    /// Service codes travel to the card in the clear and are not secret.
+    #[zeroize(skip)]
     service_codes: Vec<ServiceCode>,
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 struct SecureSession {
+    #[zeroize(skip)]
     transaction_number: u16,
+    #[zeroize(skip)]
     transaction_id: [u8; 6],
     transaction_key: [u8; 8],
+    /// Service codes travel to the card in the clear and are not secret.
+    #[zeroize(skip)]
     service_codes: Vec<ServiceCode>,
 }
 

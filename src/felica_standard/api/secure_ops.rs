@@ -1,5 +1,6 @@
 use super::*;
 use crate::felica_standard::keys::{DerivedAuthKeys, ResolvedNodeKeys};
+use zeroize::Zeroize;
 
 /// Challenges returned by a v2 (AES-128) Authentication1 exchange:
 /// `(challenge_1b, challenge_2a, challenge_3c)`.
@@ -81,11 +82,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             ));
         }
         let idm = self.idm_bytes()?;
-        let random_1: [u8; 8] = rand::random();
+        let mut random_1: [u8; 8] = rand::random();
 
         let context = AuthenticationContext::new(&idm, group_service_key, user_service_key);
 
-        let challenge_1a = context.encrypt_challenge1a(&random_1);
+        let mut challenge_1a = context.encrypt_challenge1a(&random_1);
         let (challenge_1b, challenge_2a) = self.authentication1(areas, services, &challenge_1a)?;
         if !context.verify_challenge1b(&random_1, &challenge_1b) {
             return Err(FelicaStandardError::AuthenticationFailed(
@@ -93,10 +94,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             ));
         }
 
-        let random_2 = context.decrypt_challenge2a(&challenge_2a);
-        let challenge_2b = context.encrypt_challenge2b(&random_2);
+        let mut random_2 = context.decrypt_challenge2a(&challenge_2a);
+        let mut challenge_2b = context.encrypt_challenge2b(&random_2);
         let auth2_response = self.authentication2(&challenge_2b)?;
-        let payload = auth2_response.decrypt_payload(&random_2)?;
+        let mut payload = auth2_response.decrypt_payload(&random_2)?;
         if payload.len() < 24 {
             return Err(FelicaStandardError::Protocol(
                 "Authentication2 response payload too short".into(),
@@ -123,6 +124,15 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             SecureSessionCredentials::Des(random_2),
         );
         self.authenticated_context = Some(context);
+
+        // `random_2` now lives in the session context, which clears it on drop.
+        // `random_1` and the challenges derived from it are ours, and the payload
+        // holds the decrypted Authentication2 response.
+        random_1.zeroize();
+        random_2.zeroize();
+        challenge_1a.zeroize();
+        challenge_2b.zeroize();
+        payload.zeroize();
 
         Ok(MutualAuthenticationResult {
             issue_id,
@@ -548,10 +558,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
 
         let idm = self.idm_bytes()?;
-        let random_1: [u8; 16] = rand::random();
+        let mut random_1: [u8; 16] = rand::random();
 
         let context = AuthenticationContextV2Aes128::new(&idm, group_key, individual_key);
-        let challenge_1a = context.encrypt_challenge1a(&random_1);
+        let mut challenge_1a = context.encrypt_challenge1a(&random_1);
         let (challenge_1b, challenge_2a, challenge_3c) =
             self.authentication1_v2(operation_parameter, nodes, &challenge_1a)?;
         if !context.verify_challenge1b(&random_1, &challenge_1b, &challenge_3c) {
@@ -560,15 +570,15 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             ));
         }
 
-        let random_2 = context.decrypt_challenge2a(&challenge_2a, &challenge_3c);
-        let challenge_2b = context.encrypt_challenge2b(&random_2);
+        let mut random_2 = context.decrypt_challenge2a(&challenge_2a, &challenge_3c);
+        let mut challenge_2b = context.encrypt_challenge2b(&random_2);
         let auth2_response = self.authentication2_v2(&challenge_2b)?;
 
         let mut transaction_id = [0u8; 6];
         transaction_id.copy_from_slice(&random_1[2..8]);
-        let (encryption_key, mac_key) = context.derive_secure_session_keys(&random_2);
+        let (mut encryption_key, mut mac_key) = context.derive_secure_session_keys(&random_2);
 
-        let (transaction_number, payload) = auth2_response.decrypt_payload(
+        let (transaction_number, mut payload) = auth2_response.decrypt_payload(
             &transaction_id,
             &challenge_3c,
             &encryption_key,
@@ -596,6 +606,16 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         );
         self.authenticated_context = Some(authenticated);
 
+        // The derived session keys now live in the session context, which clears
+        // them on drop; these are the copies this exchange made.
+        random_1.zeroize();
+        random_2.zeroize();
+        challenge_1a.zeroize();
+        challenge_2b.zeroize();
+        encryption_key.zeroize();
+        mac_key.zeroize();
+        payload.zeroize();
+
         Ok(MutualAuthenticationResult {
             issue_id,
             issue_parameter,
@@ -622,20 +642,20 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let derived = keys
             .derive_auth_keys(area_path, services, individual_key)
             .map_err(|err| FelicaStandardError::InvalidParameter(err.to_string()))?;
-        match derived {
+        // Borrow rather than destructure: `DerivedAuthKeys` zeroizes on drop, so
+        // moving its keys out would leave copies that are never cleared.
+        match &derived {
             DerivedAuthKeys::Des {
                 areas,
                 services,
                 group_service_key,
                 user_service_key,
-            } => {
-                self.mutual_authentication(&areas, &services, &group_service_key, &user_service_key)
-            }
+            } => self.mutual_authentication(areas, services, group_service_key, user_service_key),
             DerivedAuthKeys::Aes128 {
                 nodes,
                 group_key,
                 individual_key,
-            } => self.mutual_authentication_v2(0x00, &nodes, &group_key, &individual_key),
+            } => self.mutual_authentication_v2(0x00, nodes, group_key, individual_key),
         }
     }
 

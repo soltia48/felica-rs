@@ -15,6 +15,7 @@ use des::cipher::{
 };
 use des::{Des, TdesEde3};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 /// Constant-time equality for secret-derived byte strings (MAC tags, challenge
 /// responses). Unequal lengths compare `false`; equal-length inputs are compared
@@ -114,6 +115,10 @@ pub(super) fn encrypt_3des_block(data: &[u8; 8], key1: &[u8; 8], key2: &[u8; 8])
     triple_key[8..16].copy_from_slice(key2);
     triple_key[16..24].copy_from_slice(key1);
     let cipher = TdesEde3::new((&triple_key).into());
+    // The K1|K2|K1 buffer exists nowhere else, so clear it as soon as the cipher
+    // has taken the key. The cipher's own expanded schedule is cleared by the
+    // `des` crate, which is built with its `zeroize` feature.
+    triple_key.zeroize();
     let mut block = (*data).into();
     cipher.encrypt_block(&mut block);
     let mut out = [0u8; 8];
@@ -127,6 +132,10 @@ pub(super) fn decrypt_3des_block(data: &[u8; 8], key1: &[u8; 8], key2: &[u8; 8])
     triple_key[8..16].copy_from_slice(key2);
     triple_key[16..24].copy_from_slice(key1);
     let cipher = TdesEde3::new((&triple_key).into());
+    // The K1|K2|K1 buffer exists nowhere else, so clear it as soon as the cipher
+    // has taken the key. The cipher's own expanded schedule is cleared by the
+    // `des` crate, which is built with its `zeroize` feature.
+    triple_key.zeroize();
     let mut block = (*data).into();
     cipher.decrypt_block(&mut block);
     let mut out = [0u8; 8];

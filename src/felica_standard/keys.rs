@@ -20,13 +20,16 @@
 //! [`FelicaStandard::mutual_authentication_v2`]: super::FelicaStandard::mutual_authentication_v2
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::Deserialize;
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use super::redact::Redacted;
 use super::secure::{generate_group_key_v2_aes128, generate_service_keys_des};
 use super::types::ServiceCode;
 
@@ -37,7 +40,11 @@ const DES_KEY_LEN: usize = 8;
 const AES_KEY_LEN: usize = 16;
 
 /// Key material for a single node, tagged by secure-messaging scheme.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Not `Copy`: see [`SecureSessionCredentials`] — an implicit copy would escape
+/// [`Drop`] and never be cleared.
+///
+/// [`SecureSessionCredentials`]: super::SecureSessionCredentials
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum NodeKey {
     /// DES/3DES key (8 bytes).
     Des([u8; DES_KEY_LEN]),
@@ -51,6 +58,19 @@ impl NodeKey {
             NodeKey::Des(_) => Algorithm::Des,
             NodeKey::Aes128(_) => Algorithm::Aes128,
         }
+    }
+}
+
+impl fmt::Debug for NodeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The scheme and key length are the useful part; the bytes are the secret.
+        // `KeyStore` and `ResolvedNodeKeys` derive `Debug` over `NodeKey`, so
+        // redacting here covers a whole key store too.
+        let (label, len) = match self {
+            NodeKey::Des(key) => ("NodeKey::Des", key.len()),
+            NodeKey::Aes128(key) => ("NodeKey::Aes128", key.len()),
+        };
+        f.debug_tuple(label).field(&Redacted(len)).finish()
     }
 }
 
@@ -106,7 +126,7 @@ pub struct KeyStoreLoad {
 }
 
 /// One JSONL record. `version` is retained for format compatibility but unused.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct JsonlKeyRecord {
     system_code: String,
     node: String,
@@ -200,12 +220,14 @@ impl KeyStore {
         let idm_scoped = self.by_system.get(&system_code)?;
         let idm_hex = hex::encode_upper(idm);
 
+        // Each resolved key is its own zeroizing copy, cleared when the
+        // `ResolvedNodeKeys` it belongs to is dropped.
         let mut merged = NodeKeys::new();
         if let Some(shared) = idm_scoped.get("") {
-            merged.extend(shared.iter().map(|(code, key)| (*code, *key)));
+            merged.extend(shared.iter().map(|(code, key)| (*code, key.clone())));
         }
         if let Some(card) = idm_scoped.get(&idm_hex) {
-            merged.extend(card.iter().map(|(code, key)| (*code, *key)));
+            merged.extend(card.iter().map(|(code, key)| (*code, key.clone())));
         }
 
         if merged.is_empty() {
@@ -377,15 +399,17 @@ impl ResolvedNodeKeys {
 ///
 /// Bundling the node list keeps the key-chain order and the codes sent to the
 /// card in lockstep — both come from a single derivation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum DerivedAuthKeys {
     /// DES/3DES keys for [`FelicaStandard::mutual_authentication`].
     ///
     /// [`FelicaStandard::mutual_authentication`]: super::FelicaStandard::mutual_authentication
     Des {
         /// Area codes to pass as `areas` (`area_path` verbatim; always non-empty).
+        #[zeroize(skip)]
         areas: Vec<u16>,
         /// Services to pass as `services` (always non-empty for DES).
+        #[zeroize(skip)]
         services: Vec<ServiceCode>,
         group_service_key: [u8; DES_KEY_LEN],
         user_service_key: [u8; DES_KEY_LEN],
@@ -395,10 +419,42 @@ pub enum DerivedAuthKeys {
     /// [`FelicaStandard::mutual_authentication_v2`]: super::FelicaStandard::mutual_authentication_v2
     Aes128 {
         /// Node codes to pass as `nodes`.
+        #[zeroize(skip)]
         nodes: Vec<u16>,
         group_key: [u8; AES_KEY_LEN],
         individual_key: [u8; AES_KEY_LEN],
     },
+}
+
+// The node codes travel to the card in the clear and are what a caller needs to
+// see; the derived keys are the secret.
+impl fmt::Debug for DerivedAuthKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DerivedAuthKeys::Des {
+                areas,
+                services,
+                group_service_key,
+                user_service_key,
+            } => f
+                .debug_struct("DerivedAuthKeys::Des")
+                .field("areas", areas)
+                .field("services", services)
+                .field("group_service_key", &Redacted(group_service_key.len()))
+                .field("user_service_key", &Redacted(user_service_key.len()))
+                .finish(),
+            DerivedAuthKeys::Aes128 {
+                nodes,
+                group_key,
+                individual_key,
+            } => f
+                .debug_struct("DerivedAuthKeys::Aes128")
+                .field("nodes", nodes)
+                .field("group_key", &Redacted(group_key.len()))
+                .field("individual_key", &Redacted(individual_key.len()))
+                .finish(),
+        }
+    }
 }
 
 fn warn(line: usize, message: String) -> KeyRecordWarning {
@@ -423,17 +479,22 @@ fn parse_record(line: &str) -> Result<(u16, String, u16, NodeKey), String> {
 }
 
 fn parse_node_key(algo: &str, value: &str) -> Result<NodeKey, String> {
-    let bytes = hex::decode(value).map_err(|err| format!("invalid key '{value}': {err}"))?;
+    // The decoded key lands on the heap, which is reused far more eagerly than the
+    // stack, so the buffer is cleared once the key has been copied out of it.
+    let mut bytes = hex::decode(value).map_err(|err| format!("invalid key '{value}': {err}"))?;
+    let result = parse_node_key_bytes(algo, &bytes);
+    bytes.zeroize();
+    result
+}
 
+fn parse_node_key_bytes(algo: &str, bytes: &[u8]) -> Result<NodeKey, String> {
     if algo.eq_ignore_ascii_case("DES") {
         let key: [u8; DES_KEY_LEN] = bytes
-            .as_slice()
             .try_into()
             .map_err(|_| format!("DES key must be {DES_KEY_LEN} bytes, got {}", bytes.len()))?;
         Ok(NodeKey::Des(key))
     } else if algo.eq_ignore_ascii_case("AES") {
         let key: [u8; AES_KEY_LEN] = bytes
-            .as_slice()
             .try_into()
             .map_err(|_| format!("AES key must be {AES_KEY_LEN} bytes, got {}", bytes.len()))?;
         Ok(NodeKey::Aes128(key))
@@ -581,17 +642,17 @@ mod tests {
         let (group, user) =
             generate_service_keys_des(&system_key, &[root_key, area_key], &[service_key]);
 
-        match derived {
+        match &derived {
             DerivedAuthKeys::Des {
                 areas,
                 services,
                 group_service_key,
                 user_service_key,
             } => {
-                assert_eq!(areas, vec![0x0000, 0x1020]);
-                assert_eq!(services, vec![ServiceCode::new(0x1022)]);
-                assert_eq!(group_service_key, group);
-                assert_eq!(user_service_key, user);
+                assert_eq!(areas, &vec![0x0000, 0x1020]);
+                assert_eq!(services, &vec![ServiceCode::new(0x1022)]);
+                assert_eq!(group_service_key, &group);
+                assert_eq!(user_service_key, &user);
             }
             other => panic!("expected DES keys, got {other:?}"),
         }
@@ -616,15 +677,15 @@ mod tests {
         let derived = resolved
             .derive_auth_keys(&[0x100A], &[ServiceCode::new(0x100C)], None)
             .unwrap();
-        match derived {
+        match &derived {
             DerivedAuthKeys::Aes128 {
                 nodes,
                 group_key,
                 individual_key,
             } => {
-                assert_eq!(nodes, vec![0x100A, 0x100C]);
-                assert_eq!(group_key, expected_group);
-                assert_eq!(individual_key, [0u8; 16]);
+                assert_eq!(nodes, &vec![0x100A, 0x100C]);
+                assert_eq!(group_key, &expected_group);
+                assert_eq!(individual_key, &[0u8; 16]);
             }
             other => panic!("expected AES keys, got {other:?}"),
         }
@@ -705,5 +766,41 @@ mod tests {
             empty.derive_auth_keys(&[], &[], None),
             Err(KeyError::EmptyChain)
         ));
+    }
+
+    /// A key store or a derivation result must not print key bytes.
+    #[test]
+    fn debug_output_never_contains_key_material() {
+        let store = KeyStore::from_jsonl_str(
+            r#"{"system_code":"0003","node":"FFFF","algo":"DES","version":"0000","idm":null,"key":"DEADBEEFDEADBEEF"}
+{"system_code":"0003","node":"1000","algo":"AES","version":"0000","idm":null,"key":"A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1"}"#,
+        )
+        .store;
+
+        let text = format!("{store:?}");
+        assert!(!text.to_lowercase().contains("deadbeef"), "leaked: {text}");
+        assert!(!text.contains("161"), "leaked a key byte: {text}");
+        assert!(text.contains("<8 bytes redacted>"), "unexpected: {text}");
+        assert!(text.contains("<16 bytes redacted>"), "unexpected: {text}");
+        // The node codes are not secret and stay visible.
+        assert!(
+            text.contains("65535") || text.contains("4096"),
+            "unexpected: {text}"
+        );
+
+        let resolved = store.resolve(0x0003, &[0x01; 8]).expect("resolved");
+        let text = format!("{:?}", resolved.get(0xFFFF).expect("system key"));
+        assert_eq!(text, "NodeKey::Des(<8 bytes redacted>)");
+
+        let derived = DerivedAuthKeys::Des {
+            areas: vec![0x1000],
+            services: vec![ServiceCode::new(0x1008)],
+            group_service_key: [0xDE; 8],
+            user_service_key: [0xAD; 8],
+        };
+        let text = format!("{derived:?}");
+        assert!(!text.contains("222"), "leaked a key byte: {text}");
+        assert_eq!(text.matches("<8 bytes redacted>").count(), 2);
+        assert!(text.contains("4096"), "node codes stay visible: {text}");
     }
 }

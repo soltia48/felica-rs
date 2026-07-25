@@ -17,6 +17,7 @@ use aes::Aes128;
 use cmac::{Cmac, Mac};
 use des::cipher::{KeyInit, KeyIvInit, StreamCipher};
 use ofb::Ofb;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const V2_AES128_IV_MARKER: u8 = 0x01;
 const V2_AES128_AUTH_CONTEXT_SUFFIX: [u8; 2] = [0x01, 0x00];
@@ -60,6 +61,9 @@ impl Authentication2V2Response {
     }
 }
 
+/// `alpha` and `beta` are derived from the node keys, so they are as sensitive as
+/// the keys themselves.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct AuthenticationContextV2Aes128 {
     alpha: [u8; V2_AES128_BLOCK_SIZE],
     beta: [u8; V2_AES128_BLOCK_SIZE],

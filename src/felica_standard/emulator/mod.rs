@@ -1166,4 +1166,104 @@ mod tests {
             "after power loss the card answers Polling again"
         );
     }
+
+    /// Table 4-1 lets Authentication2 run again in Mode2, but a repeat must not
+    /// rewind the secure-messaging replay counter: it re-establishes the same
+    /// session (Authentication1 fixed random_2), so a command frame already seen
+    /// in this session has to stay rejected. Otherwise a captured Write could be
+    /// re-applied by replaying Authentication2 ahead of it.
+    #[test]
+    fn replaying_authentication2_does_not_reopen_the_replay_window() {
+        use crate::felica_standard::secure::{
+            AuthenticationContext, SecureCommandContext, SecureSessionCredentials,
+            generate_service_keys_des,
+        };
+        use crate::felica_standard::{
+            AuthenticatedContext, WRITE_COMMAND_CODE, frame_with_length_prefix,
+        };
+
+        const IDM: [u8; 8] = [0x11; 8];
+        const SYSTEM_KEY: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        const AREA_KEY: [u8; 8] = [0x20; 8];
+        const SERVICE_KEY: [u8; 8] = [0x30; 8];
+
+        let mut system = EmulatedSystem::new(0x1234, IDM, [0x22; 8]).expect("system");
+        system.set_system_key(SYSTEM_KEY);
+        let mut area = EmulatedArea::new(0x1000, 0x1FFF).expect("area");
+        area.set_key(AREA_KEY);
+        let mut service = EmulatedService::new(ServiceCode::new(0x1008), 1);
+        service.set_key(SERVICE_KEY);
+        area.add_service(service).expect("service");
+        system.add_area(area).expect("area fits");
+        let mut emulator = FelicaStandardEmulator::new();
+        emulator.add_system(system);
+
+        // Complete a mutual authentication by hand so the session key is known.
+        let (group_key, user_key) =
+            generate_service_keys_des(&SYSTEM_KEY, &[AREA_KEY], &[SERVICE_KEY]);
+        let context = AuthenticationContext::new(&IDM, &group_key, &user_key);
+        let random_1 = [0xA5u8; 8];
+        let frame = emulator
+            .handle_command(FelicaStandardCommand::Authentication1 {
+                idm: IDM,
+                areas: vec![0x1000],
+                services: vec![0x1008],
+                challenge_1a: context.encrypt_challenge1a(&random_1),
+            })
+            .expect("Authentication1 succeeds");
+        let mut challenge_2a = [0u8; 8];
+        challenge_2a.copy_from_slice(&frame[18..26]);
+        let random_2 = context.decrypt_challenge2a(&challenge_2a);
+        let challenge_2b = context.encrypt_challenge2b(&random_2);
+        emulator
+            .handle_command(FelicaStandardCommand::Authentication2 {
+                idm: IDM,
+                challenge_2b,
+            })
+            .expect("Authentication2 succeeds");
+
+        // Build one legitimate encrypted Write and keep the frame.
+        let mut transaction_id = [0u8; 6];
+        transaction_id.copy_from_slice(&random_1[2..8]);
+        let mut client =
+            AuthenticatedContext::new(0, transaction_id, SecureSessionCredentials::Des(random_2));
+        let captured_write = {
+            let command = SecureCommandContext::capture(&mut client).expect("capture");
+            let mut plain = vec![0x01u8];
+            plain.extend(BlockListElement::new(0, 0, 0).pack());
+            plain.extend([0xEE; BLOCK_SIZE]);
+            let payload = command.build_secure_payload(&plain);
+            let encrypted = command
+                .encrypt_command(WRITE_COMMAND_CODE, payload)
+                .expect("encrypt");
+            let mut framed = vec![WRITE_COMMAND_CODE];
+            framed.extend(encrypted);
+            frame_with_length_prefix(&framed).expect("frame fits")
+        };
+
+        assert!(
+            emulator.handle_frame(&captured_write).is_some(),
+            "the original Write is accepted"
+        );
+        assert!(
+            emulator.handle_frame(&captured_write).is_none(),
+            "an immediate replay is rejected by the transaction counter"
+        );
+
+        // Replaying Authentication2 is answered (table 4-1) ...
+        assert!(
+            emulator
+                .handle_command(FelicaStandardCommand::Authentication2 {
+                    idm: IDM,
+                    challenge_2b,
+                })
+                .is_some(),
+            "Authentication2 runs again in Mode2"
+        );
+        // ... but it must not have reopened the window for the captured frame.
+        assert!(
+            emulator.handle_frame(&captured_write).is_none(),
+            "replaying Authentication2 must not make the captured Write acceptable again"
+        );
+    }
 }
