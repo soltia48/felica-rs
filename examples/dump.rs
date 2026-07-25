@@ -645,9 +645,7 @@ fn build_service_summary(service_code: &ServiceCode) -> ServiceSummary {
         code_hex: hex_u16(service_code_raw),
         number: service_code.number(),
         attributes_hex: hex_u8(service_code.attributes()),
-        attributes_description: service_code
-            .attributes_description()
-            .map(|desc| desc.to_string()),
+        attributes_description: service_code.attributes_description(),
         key_version: None,
     }
 }

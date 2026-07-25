@@ -41,7 +41,7 @@ fn from_bytes_rejects_truncated_read_without_encryption_success_without_panickin
     payload.extend_from_slice(&idm);
     payload.push(0x00); // status_flag1 = success
     payload.push(0x00); // status_flag2
-    let frame = frame_with_length_prefix(&payload); // 12 bytes total, no block count
+    let frame = frame_with_length_prefix(&payload).unwrap(); // 12 bytes total, no block count
     assert_driver_error_contains(
         FelicaStandardResponse::from_bytes(&frame),
         "short read without encryption success response",
@@ -60,7 +60,7 @@ fn from_bytes_parses_read_without_encryption_success_and_error() {
     ok.push(0x00); // sf2
     ok.push(0x01); // block count
     ok.extend_from_slice(&block);
-    match FelicaStandardResponse::from_bytes(&frame_with_length_prefix(&ok)).unwrap() {
+    match FelicaStandardResponse::from_bytes(&frame_with_length_prefix(&ok).unwrap()).unwrap() {
         FelicaStandardResponse::ReadWithoutEncryption {
             result: Some(r), ..
         } => {
@@ -74,7 +74,7 @@ fn from_bytes_parses_read_without_encryption_success_and_error() {
     err.extend_from_slice(&idm);
     err.push(0xFF); // sf1 != 0
     err.push(0xA1); // sf2
-    match FelicaStandardResponse::from_bytes(&frame_with_length_prefix(&err)).unwrap() {
+    match FelicaStandardResponse::from_bytes(&frame_with_length_prefix(&err).unwrap()).unwrap() {
         FelicaStandardResponse::ReadWithoutEncryption {
             status_flag1: 0xFF,
             result: None,
@@ -94,7 +94,7 @@ fn from_bytes_parses_polling_with_optional_bytes() {
     payload.extend_from_slice(&idm);
     payload.extend_from_slice(&pmm);
     payload.extend_from_slice(&optional);
-    let frame = frame_with_length_prefix(&payload);
+    let frame = frame_with_length_prefix(&payload).unwrap();
 
     let parsed = FelicaStandardResponse::from_bytes(&frame).unwrap();
     match parsed {
@@ -121,7 +121,7 @@ fn from_bytes_parses_request_service_v2_dual_keys() {
     payload.extend_from_slice(&0x2222u16.to_le_bytes());
     payload.extend_from_slice(&0x3333u16.to_le_bytes());
     payload.extend_from_slice(&0x4444u16.to_le_bytes());
-    let frame = frame_with_length_prefix(&payload);
+    let frame = frame_with_length_prefix(&payload).unwrap();
 
     let parsed = FelicaStandardResponse::from_bytes(&frame).unwrap();
     match parsed {
@@ -163,7 +163,7 @@ fn from_bytes_rejects_truncated_request_service_v2_dual_keys() {
     payload.extend_from_slice(&0x1111u16.to_le_bytes());
     payload.extend_from_slice(&0x2222u16.to_le_bytes());
     payload.extend_from_slice(&0x3333u16.to_le_bytes());
-    let frame = frame_with_length_prefix(&payload);
+    let frame = frame_with_length_prefix(&payload).unwrap();
 
     assert_driver_error_contains(
         FelicaStandardResponse::from_bytes(&frame),
@@ -177,7 +177,7 @@ fn from_bytes_parses_get_node_property_mac_payload() {
     let mut payload = vec![GET_NODE_PROPERTY_RESPONSE_CODE];
     payload.extend_from_slice(&idm);
     payload.extend_from_slice(&[0x00, 0x00, 0x02, 0x01, 0x00]);
-    let frame = frame_with_length_prefix(&payload);
+    let frame = frame_with_length_prefix(&payload).unwrap();
 
     let parsed = FelicaStandardResponse::from_bytes(&frame).unwrap();
     match parsed {
@@ -209,7 +209,7 @@ fn from_bytes_rejects_unknown_get_node_property_payload_length() {
     let mut payload = vec![GET_NODE_PROPERTY_RESPONSE_CODE];
     payload.extend_from_slice(&idm);
     payload.extend_from_slice(&[0x00, 0x00, 0x02, 0x01, 0x00, 0x01]);
-    let frame = frame_with_length_prefix(&payload);
+    let frame = frame_with_length_prefix(&payload).unwrap();
 
     assert_driver_error_contains(
         FelicaStandardResponse::from_bytes(&frame),
@@ -222,7 +222,7 @@ fn from_bytes_parses_authentication2_v2_variant() {
     let encrypted_payload = [0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97];
     let mut payload = vec![AUTHENTICATION2_V2_RESPONSE_CODE];
     payload.extend_from_slice(&encrypted_payload);
-    let frame = frame_with_length_prefix(&payload);
+    let frame = frame_with_length_prefix(&payload).unwrap();
 
     let parsed = FelicaStandardResponse::from_bytes(&frame).unwrap();
     match parsed {

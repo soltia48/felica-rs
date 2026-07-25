@@ -208,7 +208,7 @@ impl FelicaStandardResponse {
         }
         Self::ensure_response_len(data, 13, "short read without encryption success response")?;
         let block_count = data[12] as usize;
-        if block_count == 0 || block_count > MAX_BLOCK_LIST_LEN {
+        if block_count == 0 || block_count > MAX_BLOCK_COUNT {
             return Err(DriverError::Other(
                 "read without encryption block count must be between 1 and 255".into(),
             ));
@@ -652,7 +652,7 @@ impl FelicaStandardResponse {
             });
         }
         let block_count = data[2] as usize;
-        if block_count == 0 || block_count > MAX_BLOCK_LIST_LEN {
+        if block_count == 0 || block_count > MAX_BLOCK_COUNT {
             return Err(DriverError::Other(
                 "encrypted read response block count must be between 1 and 255".into(),
             ));

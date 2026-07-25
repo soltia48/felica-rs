@@ -200,7 +200,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         let mut payload = Vec::with_capacity(1 + encrypted_payload.len());
         payload.push(command_code);
         payload.extend_from_slice(encrypted_payload);
-        let frame = frame_with_length_prefix(&payload);
+        let frame = frame_with_length_prefix(&payload)?;
         let response = self
             .device
             .transceive(&self.target, &frame, Some(timeout_ms))?;
@@ -240,7 +240,15 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         &mut self,
         block_list: &[BlockListElement],
     ) -> Result<Vec<[u8; BLOCK_SIZE]>, FelicaStandardError> {
-        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        // Like Read Without Encryption, a secure read is bounded by its response
+        // rather than its command; the DES scheme's padding costs it one block
+        // against Read v2.
+        ensure_len_in_range(
+            "block_list",
+            block_list.len(),
+            1,
+            MAX_SECURE_READ_BLOCK_COUNT,
+        )?;
 
         let timeout_ms = self.polling_result.read_timeout_ms(block_list.len());
         let read_command = FelicaStandardCommand::Read {
@@ -280,7 +288,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         &mut self,
         block_list: &[BlockListElement],
     ) -> Result<Vec<[u8; BLOCK_SIZE]>, FelicaStandardError> {
-        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        ensure_len_in_range(
+            "block_list",
+            block_list.len(),
+            1,
+            MAX_SECURE_READ_V2_BLOCK_COUNT,
+        )?;
 
         let timeout_ms = self.polling_result.read_timeout_ms(block_list.len());
         let response = self.execute_command(
@@ -323,7 +336,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         block_list: &[BlockListElement],
         data: &[u8],
     ) -> Result<(), FelicaStandardError> {
-        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        // A write's true ceiling depends on whether its block list elements are
+        // two or three bytes wide, so there is no single count to check here; the
+        // 255-byte packet limit is enforced exactly when the frame is built.
+        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_COUNT)?;
         ensure_block_data_length(block_list.len(), data.len())?;
 
         let timeout_ms = self.polling_result.write_timeout_ms(block_list.len());
@@ -339,11 +355,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag1,
                 status_flag2,
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error("Write", status_flag1, status_flag2))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Write", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Write")),
         }
@@ -354,7 +367,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         block_list: &[BlockListElement],
         data: &[u8],
     ) -> Result<(), FelicaStandardError> {
-        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        // A write's true ceiling depends on whether its block list elements are
+        // two or three bytes wide, so there is no single count to check here; the
+        // 255-byte packet limit is enforced exactly when the frame is built.
+        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_COUNT)?;
         ensure_block_data_length(block_list.len(), data.len())?;
 
         let timeout_ms = self.polling_result.write_timeout_ms(block_list.len());
@@ -372,11 +388,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag1,
                 status_flag2,
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error("Write v2", status_flag1, status_flag2))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Write v2", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Write v2")),
         }
@@ -716,15 +729,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag1,
                 status_flag2,
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error(
-                        "Register Area",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Register Area", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Register Area")),
         }
@@ -795,15 +801,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag1,
                 status_flag2,
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error(
-                        "Change System Block",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Change System Block", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Change System Block")),
         }

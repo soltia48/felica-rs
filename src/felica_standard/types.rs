@@ -1,6 +1,117 @@
 use super::BLOCK_SIZE;
 use super::secure::encrypt_des_block;
 
+/// The three kinds of service §3.4 defines, each with its own block access rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceKind {
+    /// §3.4.2 — any block number may be read or written.
+    Random,
+    /// §3.4.3 — a log ring: reads pick a generation, writes always land on the
+    /// oldest block and must address block number 0.
+    Cyclic,
+    /// §3.4.4 — a stored value with automatic decrement/cashback arithmetic.
+    Purse,
+}
+
+/// A service attribute from §3.4.1 (table 3-2), with the authentication bit
+/// (b0) factored out into [`ServiceCode::requires_key`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceAttribute {
+    /// `0010 00b` / `0010 01b` — random service, read/write access.
+    RandomReadWrite,
+    /// `0010 10b` / `0010 11b` — random service, read-only access.
+    RandomReadOnly,
+    /// `0011 00b` / `0011 01b` — cyclic service, read/write access.
+    CyclicReadWrite,
+    /// `0011 10b` / `0011 11b` — cyclic service, read-only access.
+    CyclicReadOnly,
+    /// `0100 00b` / `0100 01b` — purse service, direct access. No arithmetic:
+    /// the purse value is written as given (table 3-6).
+    PurseDirect,
+    /// `0100 10b` / `0100 11b` — purse service, cashback **and** decrement
+    /// access (table 3-6).
+    PurseCashback,
+    /// `0101 00b` / `0101 01b` — purse service, decrement access only.
+    PurseDecrement,
+    /// `0101 10b` / `0101 11b` — purse service, read-only access.
+    PurseReadOnly,
+}
+
+impl ServiceAttribute {
+    /// Decodes the six-bit service attribute, ignoring its authentication bit.
+    ///
+    /// Returns `None` for the values table 3-2 leaves undefined.
+    pub fn from_attribute_bits(attribute: u8) -> Option<Self> {
+        // b0 is the authentication requirement, so the kind and access mode live
+        // in b5-b1 and every attribute pairs an "auth required" value with the
+        // "auth not required" value one greater.
+        match (attribute & 0x3F) >> 1 {
+            0b00100 => Some(ServiceAttribute::RandomReadWrite),
+            0b00101 => Some(ServiceAttribute::RandomReadOnly),
+            0b00110 => Some(ServiceAttribute::CyclicReadWrite),
+            0b00111 => Some(ServiceAttribute::CyclicReadOnly),
+            0b01000 => Some(ServiceAttribute::PurseDirect),
+            0b01001 => Some(ServiceAttribute::PurseCashback),
+            0b01010 => Some(ServiceAttribute::PurseDecrement),
+            0b01011 => Some(ServiceAttribute::PurseReadOnly),
+            _ => None,
+        }
+    }
+
+    /// Which of the three §3.4 service kinds this attribute belongs to.
+    pub fn kind(self) -> ServiceKind {
+        match self {
+            ServiceAttribute::RandomReadWrite | ServiceAttribute::RandomReadOnly => {
+                ServiceKind::Random
+            }
+            ServiceAttribute::CyclicReadWrite | ServiceAttribute::CyclicReadOnly => {
+                ServiceKind::Cyclic
+            }
+            ServiceAttribute::PurseDirect
+            | ServiceAttribute::PurseCashback
+            | ServiceAttribute::PurseDecrement
+            | ServiceAttribute::PurseReadOnly => ServiceKind::Purse,
+        }
+    }
+
+    /// Whether blocks of this service may be written at all (tables 3-3, 3-4, 3-6).
+    pub fn allows_write(self) -> bool {
+        !matches!(
+            self,
+            ServiceAttribute::RandomReadOnly
+                | ServiceAttribute::CyclicReadOnly
+                | ServiceAttribute::PurseReadOnly
+        )
+    }
+
+    /// Whether the purse decrement function applies on write (table 3-6).
+    pub fn allows_decrement(self) -> bool {
+        matches!(
+            self,
+            ServiceAttribute::PurseCashback | ServiceAttribute::PurseDecrement
+        )
+    }
+
+    /// Whether the purse cashback function applies, i.e. whether block list
+    /// access mode `001b` is accepted (table 3-6, §4.4.6).
+    pub fn allows_cashback(self) -> bool {
+        matches!(self, ServiceAttribute::PurseCashback)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ServiceAttribute::RandomReadWrite => "Random read/write",
+            ServiceAttribute::RandomReadOnly => "Random read-only",
+            ServiceAttribute::CyclicReadWrite => "Cyclic read/write",
+            ServiceAttribute::CyclicReadOnly => "Cyclic read-only",
+            ServiceAttribute::PurseDirect => "Purse direct",
+            ServiceAttribute::PurseCashback => "Purse cashback/decrement",
+            ServiceAttribute::PurseDecrement => "Purse decrement",
+            ServiceAttribute::PurseReadOnly => "Purse read-only",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServiceCode(pub u16);
 
@@ -13,36 +124,42 @@ impl ServiceCode {
         self.0
     }
 
+    /// The service number: the upper 10 bits of the service code (§3.4.1, figure 3-9).
     pub fn number(&self) -> u16 {
         self.0 >> 6
     }
 
+    /// The raw six-bit service attribute (§3.4.1, figure 3-9).
     pub fn attributes(&self) -> u8 {
         (self.0 & 0x3F) as u8
     }
 
-    pub fn attributes_description(&self) -> Option<&'static str> {
-        match self.attributes() {
-            0b001000 => Some("Random read/write with key"),
-            0b001001 => Some("Random read/write without key"),
-            0b001010 => Some("Random read-only with key"),
-            0b001011 => Some("Random read-only without key"),
-            0b001100 => Some("Cyclic read/write with key"),
-            0b001101 => Some("Cyclic read/write without key"),
-            0b001110 => Some("Cyclic read-only with key"),
-            0b001111 => Some("Cyclic read-only without key"),
-            0b010000 => Some("Purse direct with key"),
-            0b010001 => Some("Purse direct without key"),
-            0b010010 => Some("Purse cashback with key"),
-            0b010011 => Some("Purse cashback without key"),
-            0b010100 => Some("Purse decrement with key"),
-            0b010101 => Some("Purse decrement without key"),
-            0b010110 => Some("Purse read-only with key"),
-            0b010111 => Some("Purse read-only without key"),
-            _ => None,
-        }
+    /// The decoded service attribute, or `None` if the six attribute bits are
+    /// not one of the values table 3-2 defines.
+    pub fn attribute(&self) -> Option<ServiceAttribute> {
+        ServiceAttribute::from_attribute_bits(self.attributes())
     }
 
+    /// Which of the three §3.4 service kinds this service is, or `None` for an
+    /// attribute table 3-2 does not define.
+    pub fn kind(&self) -> Option<ServiceKind> {
+        self.attribute().map(ServiceAttribute::kind)
+    }
+
+    pub fn attributes_description(&self) -> Option<String> {
+        let suffix = if self.requires_key() {
+            "with key"
+        } else {
+            "without key"
+        };
+        Some(format!("{} {suffix}", self.attribute()?.label()))
+    }
+
+    /// Whether accessing this service requires prior mutual authentication.
+    ///
+    /// The authentication requirement is the low bit of the service attribute:
+    /// table 3-2 pairs every "認証必要" value with the "認証不要" value one
+    /// greater, so an even attribute requires a key.
     pub fn requires_key(&self) -> bool {
         self.0 & 0x0001 == 0
     }
@@ -52,11 +169,21 @@ impl ServiceCode {
     }
 }
 
+/// Status flag 1 (§4.5.1): whether the card completed the command, and if not,
+/// which service-code-list or block-list entry failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusFlag1 {
+    /// `00h` — the card processed the command normally.
     NormalCompletion,
+    /// `FFh` — the command carried no list, or the error does not belong to a
+    /// particular list entry.
     ErrorNotAssociatedWithList,
-    ErrorAtListIndex(u8),
+    /// `XXh` — the error belongs to a list entry. The byte is kept raw because
+    /// §4.5.1 defines **two** product-dependent encodings for it and the
+    /// response carries no indication of which one a card uses; see
+    /// [`ordinal_position`](Self::ordinal_position) and
+    /// [`bitmap_positions`](Self::bitmap_positions).
+    ErrorAtListPosition(u8),
 }
 
 impl StatusFlag1 {
@@ -64,8 +191,48 @@ impl StatusFlag1 {
         match value {
             0x00 => StatusFlag1::NormalCompletion,
             0xFF => StatusFlag1::ErrorNotAssociatedWithList,
-            other => StatusFlag1::ErrorAtListIndex(other),
+            other => StatusFlag1::ErrorAtListPosition(other),
         }
+    }
+
+    /// The raw error byte, for [`ErrorAtListPosition`](Self::ErrorAtListPosition).
+    pub fn error_byte(&self) -> Option<u8> {
+        match self {
+            StatusFlag1::ErrorAtListPosition(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Reads the error byte under §4.5.1's "エラー箇所を順番で示す" encoding, where
+    /// the byte *is* the 1-based position in the list — an error on the 10th
+    /// block list entry is reported as `0Ah`.
+    pub fn ordinal_position(&self) -> Option<u8> {
+        self.error_byte()
+    }
+
+    /// Reads the error byte under §4.5.1's "エラー箇所をビットデータで示す" encoding,
+    /// returning every 1-based list position a set bit can denote.
+    ///
+    /// In that encoding bit *n* (for `n` in 0..=6) means the *(n+1)*-th **or**
+    /// *(n+9)*-th entry, and bit 7 means the 8th entry; the encoding cannot tell
+    /// the two candidates of a bit apart, so both are returned. An error on the
+    /// 10th entry is reported as `02h`, which yields positions 2 and 10.
+    pub fn bitmap_positions(&self) -> Vec<u8> {
+        let Some(value) = self.error_byte() else {
+            return Vec::new();
+        };
+        let mut positions = Vec::new();
+        for bit in 0..8u8 {
+            if value & (1 << bit) == 0 {
+                continue;
+            }
+            positions.push(bit + 1);
+            if bit <= 6 {
+                positions.push(bit + 9);
+            }
+        }
+        positions.sort_unstable();
+        positions
     }
 
     pub fn description(&self) -> String {
@@ -74,7 +241,20 @@ impl StatusFlag1 {
             StatusFlag1::ErrorNotAssociatedWithList => {
                 "error not associated with a specific list entry".to_string()
             }
-            StatusFlag1::ErrorAtListIndex(index) => format!("error at list index {}", index),
+            // Both readings are surfaced because the card does not say which
+            // encoding it used, and §4.5.2 warns that these flags are for
+            // debugging rather than operational error handling.
+            StatusFlag1::ErrorAtListPosition(value) => {
+                let bitmap = self
+                    .bitmap_positions()
+                    .iter()
+                    .map(|position| position.to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                format!(
+                    "error at list position {value} (ordinal encoding) or {bitmap} (bit encoding)"
+                )
+            }
         }
     }
 }
@@ -667,7 +847,7 @@ mod tests {
         assert_eq!(code.number(), 0x123);
         assert_eq!(code.attributes(), 0b001010);
         assert_eq!(
-            code.attributes_description(),
+            code.attributes_description().as_deref(),
             Some("Random read-only with key")
         );
         assert!(code.requires_key());
@@ -676,9 +856,68 @@ mod tests {
         let no_key = ServiceCode::new((0x001 << 6) | 0b001001);
         assert!(!no_key.requires_key());
         assert_eq!(
-            no_key.attributes_description(),
+            no_key.attributes_description().as_deref(),
             Some("Random read/write without key")
         );
+    }
+
+    /// Every attribute in table 3-2, checked against the kind and the access
+    /// rules tables 3-3, 3-4 and 3-6 assign it.
+    #[test]
+    fn service_attribute_table_3_2_is_decoded_completely() {
+        use ServiceAttribute::*;
+        let expected = [
+            (0b001000u8, RandomReadWrite, ServiceKind::Random, true),
+            (0b001001, RandomReadWrite, ServiceKind::Random, false),
+            (0b001010, RandomReadOnly, ServiceKind::Random, true),
+            (0b001011, RandomReadOnly, ServiceKind::Random, false),
+            (0b001100, CyclicReadWrite, ServiceKind::Cyclic, true),
+            (0b001101, CyclicReadWrite, ServiceKind::Cyclic, false),
+            (0b001110, CyclicReadOnly, ServiceKind::Cyclic, true),
+            (0b001111, CyclicReadOnly, ServiceKind::Cyclic, false),
+            (0b010000, PurseDirect, ServiceKind::Purse, true),
+            (0b010001, PurseDirect, ServiceKind::Purse, false),
+            (0b010010, PurseCashback, ServiceKind::Purse, true),
+            (0b010011, PurseCashback, ServiceKind::Purse, false),
+            (0b010100, PurseDecrement, ServiceKind::Purse, true),
+            (0b010101, PurseDecrement, ServiceKind::Purse, false),
+            (0b010110, PurseReadOnly, ServiceKind::Purse, true),
+            (0b010111, PurseReadOnly, ServiceKind::Purse, false),
+        ];
+        for (bits, attribute, kind, requires_key) in expected {
+            let code = ServiceCode::new((0x123 << 6) | u16::from(bits));
+            assert_eq!(code.attribute(), Some(attribute), "attribute {bits:06b}");
+            assert_eq!(code.kind(), Some(kind), "kind {bits:06b}");
+            assert_eq!(code.requires_key(), requires_key, "key {bits:06b}");
+            assert!(code.attributes_description().is_some());
+        }
+
+        // Read-only attributes are the only ones that forbid writing.
+        assert!(RandomReadWrite.allows_write());
+        assert!(CyclicReadWrite.allows_write());
+        assert!(PurseDirect.allows_write());
+        assert!(PurseCashback.allows_write());
+        assert!(PurseDecrement.allows_write());
+        assert!(!RandomReadOnly.allows_write());
+        assert!(!CyclicReadOnly.allows_write());
+        assert!(!PurseReadOnly.allows_write());
+
+        // Table 3-6: cashback belongs to the cashback/decrement attribute alone,
+        // and direct access performs no arithmetic at all.
+        assert!(PurseCashback.allows_cashback());
+        assert!(!PurseDecrement.allows_cashback());
+        assert!(PurseCashback.allows_decrement());
+        assert!(PurseDecrement.allows_decrement());
+        assert!(!PurseDirect.allows_decrement());
+        assert!(!PurseDirect.allows_cashback());
+
+        // Values outside table 3-2 have no meaning.
+        for undefined in [0b000000u8, 0b000111, 0b011000, 0b100000, 0b111111] {
+            let code = ServiceCode::new((0x123 << 6) | u16::from(undefined));
+            assert_eq!(code.attribute(), None, "attribute {undefined:06b}");
+            assert_eq!(code.kind(), None);
+            assert_eq!(code.attributes_description(), None);
+        }
     }
 
     #[test]
@@ -690,11 +929,7 @@ mod tests {
         );
         assert_eq!(
             StatusFlag1::from_byte(0x12),
-            StatusFlag1::ErrorAtListIndex(0x12)
-        );
-        assert_eq!(
-            StatusFlag1::from_byte(0x05).description(),
-            "error at list index 5"
+            StatusFlag1::ErrorAtListPosition(0x12)
         );
 
         assert_eq!(
@@ -708,10 +943,42 @@ mod tests {
         );
     }
 
+    /// §4.5.1 defines two product-dependent encodings for the error position and
+    /// gives the same worked example for both: an error on the 10th list entry is
+    /// `0Ah` ordinally and `02h` as a bitmap. Neither can be ruled out from the
+    /// response alone, so both readings must be reported.
+    #[test]
+    fn status_flag1_reports_both_encodings_of_the_error_position() {
+        let ordinal_tenth = StatusFlag1::from_byte(0x0A);
+        assert_eq!(ordinal_tenth.error_byte(), Some(0x0A));
+        assert_eq!(ordinal_tenth.ordinal_position(), Some(10));
+        // 0Ah = bits 1 and 3 -> 2nd/10th and 4th/12th.
+        assert_eq!(ordinal_tenth.bitmap_positions(), vec![2, 4, 10, 12]);
+
+        let bitmap_tenth = StatusFlag1::from_byte(0x02);
+        assert_eq!(bitmap_tenth.ordinal_position(), Some(2));
+        assert!(bitmap_tenth.bitmap_positions().contains(&10));
+
+        // Bit 7 denotes the 8th entry only; it has no second candidate.
+        assert_eq!(StatusFlag1::from_byte(0x80).bitmap_positions(), vec![8]);
+
+        // Positions only exist for the error case.
+        assert_eq!(StatusFlag1::NormalCompletion.error_byte(), None);
+        assert!(
+            StatusFlag1::ErrorNotAssociatedWithList
+                .bitmap_positions()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn status_flag_description_formats_both_flags() {
         let text = status_flag_description(0x02, 0xA8);
-        assert!(text.contains("SF1: error at list index 2"));
+        assert!(
+            text.contains("SF1: error at list position 2 (ordinal encoding)"),
+            "unexpected description: {text}"
+        );
+        assert!(text.contains("2/10 (bit encoding)"), "unexpected: {text}");
         assert!(text.contains("SF2: block number exceeds service size"));
     }
 

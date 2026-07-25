@@ -57,7 +57,7 @@ impl FelicaStandardCommand {
                     ));
                 }
                 let block_count = rest[0] as usize;
-                if block_count == 0 || block_count > MAX_BLOCK_LIST_LEN {
+                if block_count == 0 || block_count > MAX_BLOCK_COUNT {
                     return Err(FelicaStandardError::Protocol(
                         "read without encryption block count out of range".into(),
                     ));
@@ -82,7 +82,7 @@ impl FelicaStandardCommand {
                     ));
                 }
                 let block_count = rest[0] as usize;
-                if block_count == 0 || block_count > MAX_BLOCK_LIST_LEN {
+                if block_count == 0 || block_count > MAX_BLOCK_COUNT {
                     return Err(FelicaStandardError::Protocol(
                         "write without encryption block count out of range".into(),
                     ));
@@ -461,7 +461,7 @@ impl FelicaStandardCommand {
                     ));
                 }
                 let block_count = payload[0] as usize;
-                if block_count == 0 || block_count > MAX_BLOCK_LIST_LEN {
+                if block_count == 0 || block_count > MAX_BLOCK_COUNT {
                     return Err(FelicaStandardError::Protocol(
                         "secure read block count out of range".into(),
                     ));
@@ -480,7 +480,7 @@ impl FelicaStandardCommand {
                     ));
                 }
                 let block_count = payload[0] as usize;
-                if block_count == 0 || block_count > MAX_BLOCK_LIST_LEN {
+                if block_count == 0 || block_count > MAX_BLOCK_COUNT {
                     return Err(FelicaStandardError::Protocol(
                         "secure write block count out of range".into(),
                     ));

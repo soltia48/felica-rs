@@ -18,7 +18,10 @@ mod primitives;
 #[cfg(test)]
 mod test_util;
 
-use crate::felica_standard::FelicaStandardError;
+use crate::felica_standard::{
+    BLOCK_SIZE, DES_BLOCK_SIZE, DES_MAC_SIZE, FelicaStandardError, MAX_PACKET_LEN,
+    V2_AES128_MAC_SIZE,
+};
 use aes_v2::{decrypt_secure_response_v2_aes128, encrypt_secure_request_v2_aes128};
 use des::{calculate_command_mac_des, decrypt_secure_response_des};
 use primitives::{encrypt_des_cbc_zero_iv, pad_to_des_block_size};
@@ -39,6 +42,60 @@ pub(crate) use primitives::{ct_eq, decrypt_des_cbc_zero_iv, encrypt_des_block};
 const TRANSACTION_NUMBER_SIZE: usize = 2;
 const TRANSACTION_ID_SIZE: usize = 6;
 const DES_SECURE_HEADER_SIZE: usize = TRANSACTION_NUMBER_SIZE + TRANSACTION_ID_SIZE;
+
+/// Rounds `len` up to whole DES blocks the way PKCS#7 padding does — always
+/// appending between one and [`DES_BLOCK_SIZE`] bytes, so an already-aligned
+/// length grows by a full block.
+const fn padded_to_des_block_size(len: usize) -> usize {
+    (len / DES_BLOCK_SIZE + 1) * DES_BLOCK_SIZE
+}
+
+/// Fixed part of a `Read`/`Read v2` response payload: both status flags and the
+/// block count, ahead of the block data itself.
+const SECURE_READ_RESPONSE_OVERHEAD: usize = 1 + 1 + 1;
+
+/// Most blocks a single DES `Read` can return.
+///
+/// A secure read is bounded by its response, not its command: the request stays
+/// small however many blocks it names, so an over-long one would be sent and then
+/// be unanswerable. The response frame is
+///
+/// ```text
+/// LEN(1) + response code(1) + E( txn(2) + txid(6) + SF1(1) + SF2(1) + n(1) + 16n ) + MAC(8)
+/// ```
+///
+/// where `E(..)` is PKCS#7-padded to whole DES blocks, against the
+/// [`MAX_PACKET_LEN`] ceiling of §2.2. The manual leaves the per-product maximum
+/// open (§4.4.5), but no product can exceed this.
+///
+/// [`MAX_PACKET_LEN`]: crate::felica_standard::MAX_PACKET_LEN
+pub(crate) const MAX_SECURE_READ_BLOCK_COUNT: usize = {
+    let mut blocks = 0;
+    while 2
+        + padded_to_des_block_size(
+            DES_SECURE_HEADER_SIZE + SECURE_READ_RESPONSE_OVERHEAD + (blocks + 1) * BLOCK_SIZE,
+        )
+        + DES_MAC_SIZE
+        <= MAX_PACKET_LEN
+    {
+        blocks += 1;
+    }
+    blocks
+};
+
+/// Most blocks a single AES-128 `Read v2` can return.
+///
+/// The v2 scheme encrypts with an OFB stream rather than a block cipher, so its
+/// response frame carries no padding:
+///
+/// ```text
+/// LEN(1) + response code(1) + counter(2) + SF1(1) + SF2(1) + n(1) + 16n + MAC(8)
+/// ```
+///
+/// which leaves room for one more block than the DES scheme.
+pub(crate) const MAX_SECURE_READ_V2_BLOCK_COUNT: usize = (MAX_PACKET_LEN
+    - (2 + TRANSACTION_NUMBER_SIZE + SECURE_READ_RESPONSE_OVERHEAD + V2_AES128_MAC_SIZE))
+    / BLOCK_SIZE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecureSessionScheme {

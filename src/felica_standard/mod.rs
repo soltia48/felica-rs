@@ -40,8 +40,8 @@ mod types;
 pub use api::{FelicaDriver, FelicaStandard};
 pub use command::FelicaStandardCommand;
 pub use emulator::{
-    DirectoryEntry, EmulatedArea, EmulatedService, EmulatedSystem, EmulatorConfigError,
-    FelicaStandardEmulator,
+    CommunicationPerformance, DirectoryEntry, EmulatedArea, EmulatedService, EmulatedSystem,
+    EmulatorConfigError, FelicaStandardEmulator, LimitPurseProperty,
 };
 pub use error::FelicaStandardError;
 pub use keys::{
@@ -60,9 +60,9 @@ pub use types::{
     MutualAuthenticationResult, NodeProperty, NodePropertyType, OptionVersion, ReadResult,
     ReadWithoutEncryptionResult, RegisterIssueIdResult, RegisterServiceResult,
     RequestBlockInformationExResult, RequestCodeListResult, RequestServiceV2KeyVersion,
-    RequestServiceV2Result, SearchServiceCodeResult, ServiceCode, SetParameterEncryptionType,
-    SetParameterPacketType, SpecificationVersion, StatusFlag1, StatusFlag2,
-    status_flag_description,
+    RequestServiceV2Result, SearchServiceCodeResult, ServiceAttribute, ServiceCode, ServiceKind,
+    SetParameterEncryptionType, SetParameterPacketType, SpecificationVersion, StatusFlag1,
+    StatusFlag2, status_flag_description,
 };
 
 pub(crate) use command::frame_with_length_prefix;

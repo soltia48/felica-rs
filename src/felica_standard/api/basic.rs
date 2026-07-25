@@ -56,7 +56,15 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             1,
             MAX_RW_SERVICE_CODES,
         )?;
-        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        // A read is bounded by its response rather than its command: the request
+        // stays small however many blocks it asks for, so an over-long one would
+        // go out on the air and simply never be answerable.
+        ensure_len_in_range(
+            "block_list",
+            block_list.len(),
+            1,
+            MAX_READ_WITHOUT_ENCRYPTION_BLOCK_COUNT,
+        )?;
         validate_block_list_indices(block_list, service_codes.len())?;
 
         let idm = self.idm_bytes()?;
@@ -112,7 +120,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             1,
             MAX_RW_SERVICE_CODES,
         )?;
-        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_LIST_LEN)?;
+        ensure_len_in_range("block_list", block_list.len(), 1, MAX_BLOCK_COUNT)?;
         validate_block_list_indices(block_list, service_codes.len())?;
         ensure_block_data_length(block_list.len(), data.len())?;
 
@@ -138,15 +146,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 ..
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error(
-                        "Write Without Encryption",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Write Without Encryption", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Write Without Encryption")),
         }
@@ -336,15 +337,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 ..
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error(
-                        "Set Parameter",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Set Parameter", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Set Parameter")),
         }
@@ -523,11 +517,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 ..
             } => {
-                if status_flag1 != 0 || status_flag2 != 0 {
-                    Err(Self::status_error("Reset Mode", status_flag1, status_flag2))
-                } else {
-                    Ok(())
-                }
+                Self::check_status_flags("Reset Mode", status_flag1, status_flag2)?;
+                Ok(())
             }
             _ => Err(unexpected_response("Reset Mode")),
         }

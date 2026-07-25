@@ -242,7 +242,9 @@ impl<T: Transport> Device<T> {
             request_code,
             time_slots,
         };
-        let frame = command.to_frame();
+        let frame = command
+            .to_frame()
+            .map_err(|err| DriverError::Other(format!("failed to build SENSF_REQ: {err}")))?;
         debug!("send SENSF_REQ {}", hex::encode(&frame));
         let response = self
             .chipset

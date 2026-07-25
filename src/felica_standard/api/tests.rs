@@ -4,6 +4,9 @@ use crate::felica_standard::secure::{
     build_secure_response_frame_des, build_secure_response_frame_v2_aes128,
     generate_registration_package_des,
 };
+use crate::felica_standard::{
+    MAX_PACKET_LEN, READ_COMMAND_CODE, ReadWithoutEncryptionResult, WRITE_COMMAND_CODE,
+};
 use std::collections::VecDeque;
 
 struct MockDriver {
@@ -546,4 +549,267 @@ fn send_command_rejects_when_idm_length_is_not_8() {
         .expect("polling should succeed");
 
     assert_invalid_parameter_contains(felica.request_response(), "IDm must be 8 bytes long");
+}
+
+/// §4.4.2 defines request codes 00h-02h and time slot values 00h/01h/03h/07h/0Fh,
+/// and states that any other time slot value behaves differently from product to
+/// product. Neither may be put on the air.
+#[test]
+fn polling_rejects_undefined_request_codes_and_time_slot_values() {
+    for request_code in [0x03u8, 0x10, 0xFF] {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        assert_invalid_parameter_contains(
+            FelicaStandard::polling(&mut driver, "212F", 0xFFFF, request_code, 0x00),
+            "is reserved",
+        );
+    }
+
+    for time_slots in [0x02u8, 0x05, 0x08, 0x10, 0xFF] {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        assert_invalid_parameter_contains(
+            FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, time_slots),
+            "is not defined",
+        );
+    }
+}
+
+#[test]
+fn polling_accepts_every_defined_request_code_and_time_slot_value() {
+    for request_code in [0x00u8, 0x01, 0x02] {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        assert!(FelicaStandard::polling(&mut driver, "212F", 0xFFFF, request_code, 0x00).is_ok());
+    }
+
+    for time_slots in [0x00u8, 0x01, 0x03, 0x07, 0x0F] {
+        let mut driver = MockDriver::with_polling_result(sample_polling_result());
+        assert!(FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, time_slots).is_ok());
+    }
+}
+
+/// §4.5.2 (table 4-11): status flag 2 = 71h is a warning raised *after* the write
+/// has happened, and some products pair it with status flag 1 = 00h. Such a
+/// response reports a completed write and must not surface as an error.
+#[test]
+fn write_without_encryption_accepts_the_memory_rewrite_count_warning() {
+    let mut driver = MockDriver::with_polling_result(sample_polling_result());
+    driver.queue_response(
+        FelicaStandardResponse::WriteWithoutEncryption {
+            idm: sample_idm(),
+            status_flag1: 0x00,
+            status_flag2: 0x71,
+        }
+        .to_frame()
+        .unwrap(),
+    );
+
+    let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+        .expect("polling should succeed");
+    let block_list = [BlockListElement::new(0x0000, 0x00, 0x00)];
+    felica
+        .write_without_encryption(
+            &[ServiceCode::new(0x0009)],
+            &block_list,
+            &[0xAA; BLOCK_SIZE],
+        )
+        .expect("a normal-completion status flag 1 means the write was performed");
+}
+
+/// A non-zero status flag 1 still fails, warning byte or not.
+#[test]
+fn write_without_encryption_still_fails_on_a_non_zero_status_flag1() {
+    let mut driver = MockDriver::with_polling_result(sample_polling_result());
+    driver.queue_response(
+        FelicaStandardResponse::WriteWithoutEncryption {
+            idm: sample_idm(),
+            status_flag1: 0xFF,
+            status_flag2: 0x71,
+        }
+        .to_frame()
+        .unwrap(),
+    );
+
+    let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+        .expect("polling should succeed");
+    let block_list = [BlockListElement::new(0x0000, 0x00, 0x00)];
+    match felica.write_without_encryption(
+        &[ServiceCode::new(0x0009)],
+        &block_list,
+        &[0xAA; BLOCK_SIZE],
+    ) {
+        Err(FelicaStandardError::Status {
+            status_flag1,
+            status_flag2,
+            ..
+        }) => {
+            assert_eq!(status_flag1, 0xFF);
+            assert_eq!(status_flag2, 0x71);
+        }
+        other => panic!("expected a status error, got {other:?}"),
+    }
+}
+
+/// §4.4.5 leaves 最大同時読み出しブロック数 to the product, but the *response* is
+/// what bounds a read: 16 bytes per block on a 13-byte header against the
+/// 255-byte packet limit of §2.2 allows 15 blocks at most. The command itself
+/// stays small, so this cannot be caught when the frame is built.
+#[test]
+fn read_without_encryption_rejects_more_blocks_than_a_response_can_carry() {
+    let block_list: Vec<BlockListElement> = (0..16)
+        .map(|block| BlockListElement::new(block, 0x00, 0x00))
+        .collect();
+
+    let mut driver = MockDriver::with_polling_result(sample_polling_result());
+    let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+        .expect("polling should succeed");
+    assert_invalid_parameter_contains(
+        felica.read_without_encryption(&[ServiceCode::new(0x0009)], &block_list),
+        "must contain between 1 and 15 entries",
+    );
+
+    // 15 blocks is accepted, and the response it implies is exactly 253 bytes.
+    let blocks: Vec<[u8; BLOCK_SIZE]> = (0..15).map(|index| [index as u8; BLOCK_SIZE]).collect();
+    let frame = FelicaStandardResponse::ReadWithoutEncryption {
+        idm: sample_idm(),
+        status_flag1: 0x00,
+        status_flag2: 0x00,
+        result: Some(ReadWithoutEncryptionResult {
+            blocks: blocks.clone(),
+        }),
+    }
+    .to_frame()
+    .expect("a 15-block response fits in one packet");
+    assert_eq!(frame.len(), 253);
+
+    let mut driver = MockDriver::with_polling_result(sample_polling_result());
+    driver.queue_response(frame);
+    let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+        .expect("polling should succeed");
+    let read = felica
+        .read_without_encryption(&[ServiceCode::new(0x0009)], &block_list[..15])
+        .expect("15 blocks is within the response limit");
+    assert_eq!(read, blocks);
+}
+
+/// The block count a secure command can carry is fixed by the 255-byte packet
+/// limit of §2.2 acting on the secure-messaging framing, measured here by
+/// building real frames rather than by restating the arithmetic.
+///
+/// Reads are bounded by their *response* and writes by their *command*:
+///
+/// | command  | read (response-bound) | write (command-bound, 2/3-byte elements) |
+/// |----------|----------------------:|-----------------------------------------:|
+/// | Read/Write     (DES)    | 14 | 12 / 12 |
+/// | Read/Write v2  (AES)    | 15 | 13 / 12 |
+///
+/// The DES scheme loses a block to its PKCS#7 padding; the v2 scheme is an OFB
+/// stream and needs none.
+#[test]
+fn secure_block_count_limits_follow_the_secure_messaging_framing() {
+    fn block_list_payload(blocks: usize, three_byte: bool) -> Vec<u8> {
+        // Block numbers below 256 pack into two bytes; 0x0100 upward force three.
+        let base = if three_byte { 0x0100u16 } else { 0x0000 };
+        let mut payload = vec![blocks as u8];
+        for index in 0..blocks {
+            payload.extend(BlockListElement::new(base + index as u16, 0, 0).pack());
+        }
+        payload
+    }
+
+    fn credentials(des: bool) -> SecureSessionCredentials {
+        if des {
+            SecureSessionCredentials::Des([0x11; 8])
+        } else {
+            SecureSessionCredentials::Aes128 {
+                encryption_key: [0x22; 16],
+                mac_key: [0x33; 16],
+                challenge_3c: [0x44; 4],
+            }
+        }
+    }
+
+    /// On-air length of the command frame the client would send.
+    fn command_frame_len(des: bool, code: u8, command_payload: &[u8]) -> Option<usize> {
+        let mut context = AuthenticatedContext::new(0, [1, 2, 3, 4, 5, 6], credentials(des));
+        let captured = SecureCommandContext::capture(&mut context).ok()?;
+        let payload = captured.build_secure_payload(command_payload);
+        let encrypted = captured.encrypt_command(code, payload).ok()?;
+        let mut framed = vec![code];
+        framed.extend_from_slice(&encrypted);
+        frame_with_length_prefix(&framed).ok().map(|f| f.len())
+    }
+
+    /// On-air length of the response frame the card would have to send back.
+    fn read_response_frame_len(des: bool, code: u8, blocks: usize) -> Option<usize> {
+        let mut payload = vec![0x00, 0x00, blocks as u8];
+        payload.extend(vec![0u8; blocks * BLOCK_SIZE]);
+        if des {
+            build_secure_response_frame_des(code, 1, &[1, 2, 3, 4, 5, 6], &[0x11; 8], &payload)
+                .map(|frame| frame.len())
+        } else {
+            build_secure_response_frame_v2_aes128(
+                code,
+                1,
+                &[1, 2, 3, 4, 5, 6],
+                &[0x44; 4],
+                &[0x22; 16],
+                &[0x33; 16],
+                &payload,
+            )
+            .map(|frame| frame.len())
+        }
+    }
+
+    /// Largest block count for which `frame_len` still yields a legal packet.
+    fn largest_fitting(mut frame_len: impl FnMut(usize) -> Option<usize>) -> usize {
+        let mut blocks = 0;
+        while matches!(frame_len(blocks + 1), Some(len) if len <= MAX_PACKET_LEN) {
+            blocks += 1;
+        }
+        blocks
+    }
+
+    // Reads: the response is what runs out of room, and the constants the client
+    // checks against must be exactly that measured limit.
+    assert_eq!(
+        largest_fitting(|blocks| read_response_frame_len(true, READ_COMMAND_CODE + 1, blocks)),
+        14,
+    );
+    assert_eq!(MAX_SECURE_READ_BLOCK_COUNT, 14);
+    assert_eq!(
+        largest_fitting(|blocks| read_response_frame_len(false, READ_V2_RESPONSE_CODE, blocks)),
+        15,
+    );
+    assert_eq!(MAX_SECURE_READ_V2_BLOCK_COUNT, 15);
+
+    // A read command is nowhere near the limit at those counts, which is why the
+    // frame builder alone cannot catch an over-long read.
+    for (des, code, limit) in [
+        (true, READ_COMMAND_CODE, MAX_SECURE_READ_BLOCK_COUNT),
+        (false, READ_V2_COMMAND_CODE, MAX_SECURE_READ_V2_BLOCK_COUNT),
+    ] {
+        for three_byte in [false, true] {
+            assert!(
+                largest_fitting(|blocks| command_frame_len(
+                    des,
+                    code,
+                    &block_list_payload(blocks, three_byte)
+                )) > limit,
+                "the command side must not be the binding constraint for a read"
+            );
+        }
+    }
+
+    // Writes: the command is what runs out of room, and the limit depends on the
+    // block list element width, so it cannot be a single constant.
+    fn write_command_limit(des: bool, code: u8, three_byte: bool) -> usize {
+        largest_fitting(|blocks| {
+            let mut payload = block_list_payload(blocks, three_byte);
+            payload.extend(vec![0u8; blocks * BLOCK_SIZE]);
+            command_frame_len(des, code, &payload)
+        })
+    }
+    assert_eq!(write_command_limit(true, WRITE_COMMAND_CODE, false), 12);
+    assert_eq!(write_command_limit(true, WRITE_COMMAND_CODE, true), 12);
+    assert_eq!(write_command_limit(false, WRITE_V2_COMMAND_CODE, false), 13);
+    assert_eq!(write_command_limit(false, WRITE_V2_COMMAND_CODE, true), 12);
 }

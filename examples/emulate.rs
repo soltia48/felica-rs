@@ -72,5 +72,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             next_frame = device.send_response_receive_command(&response, COMMAND_TIMEOUT_MS)?;
         }
+
+        // The session is over, which for a real card means it has left the field.
+        // Modes do not survive power loss (§4.3), and a system left above Mode0
+        // would ignore the next Polling addressed to it.
+        emulator.power_off();
     }
 }

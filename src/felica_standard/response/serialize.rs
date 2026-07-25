@@ -52,7 +52,7 @@ impl FelicaStandardResponse {
                         )
                     })?;
                     let blocks = &result.blocks;
-                    if blocks.is_empty() || blocks.len() > MAX_BLOCK_LIST_LEN {
+                    if blocks.is_empty() || blocks.len() > MAX_BLOCK_COUNT {
                         return Err(FelicaStandardError::Protocol(
                             "read without encryption block count out of range".into(),
                         ));
@@ -620,7 +620,7 @@ impl FelicaStandardResponse {
             ),
             _ => {
                 let payload = self.to_payload()?;
-                Ok(frame_with_length_prefix(&payload))
+                frame_with_length_prefix(&payload)
             }
         }
     }
@@ -648,7 +648,7 @@ impl FelicaStandardResponse {
                         )
                     })?;
                     let blocks = &result.blocks;
-                    if blocks.is_empty() || blocks.len() > MAX_BLOCK_LIST_LEN {
+                    if blocks.is_empty() || blocks.len() > MAX_BLOCK_COUNT {
                         return Err(FelicaStandardError::Protocol(
                             "secure read block count out of range".into(),
                         ));

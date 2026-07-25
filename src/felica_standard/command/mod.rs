@@ -4,9 +4,10 @@ use super::{
     CHANGE_SYSTEM_BLOCK_COMMAND_CODE, ContainerProperty, FelicaStandardError,
     GET_AREA_INFORMATION_COMMAND_CODE, GET_CONTAINER_ID_COMMAND_CODE,
     GET_CONTAINER_ISSUE_INFORMATION_COMMAND_CODE, GET_CONTAINER_PROPERTY_COMMAND_CODE,
-    GET_NODE_PROPERTY_COMMAND_CODE, GET_SYSTEM_STATUS_COMMAND_CODE, IDM_LEN, MAX_BLOCK_LIST_LEN,
-    MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_RW_SERVICE_CODES, MAX_SERVICE_CODES,
-    NodePropertyType, POLLING_COMMAND_CODE, READ_COMMAND_CODE, READ_V2_COMMAND_CODE,
+    GET_NODE_PROPERTY_COMMAND_CODE, GET_SYSTEM_STATUS_COMMAND_CODE, IDM_LEN, MAX_BLOCK_COUNT,
+    MAX_NODE_CODES, MAX_NODE_PROPERTY_CODES, MAX_PACKET_LEN, MAX_RW_SERVICE_CODES,
+    MAX_SERVICE_CODES, NodePropertyType, POLLING_COMMAND_CODE, POLLING_REQUEST_CODES,
+    POLLING_TIME_SLOTS, READ_COMMAND_CODE, READ_V2_COMMAND_CODE,
     READ_WITHOUT_ENCRYPTION_COMMAND_CODE, REGISTER_AREA_COMMAND_CODE,
     REGISTER_ISSUE_ID_COMMAND_CODE, REGISTER_SERVICE_COMMAND_CODE,
     REQUEST_BLOCK_INFORMATION_COMMAND_CODE, REQUEST_BLOCK_INFORMATION_EX_COMMAND_CODE,
@@ -154,11 +155,25 @@ pub(crate) enum CommandEncoding {
     Secure { opcode: u8, payload: Vec<u8> },
 }
 
-pub(crate) fn frame_with_length_prefix(payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(payload.len() + 1);
-    frame.push((payload.len() + 1) as u8);
+/// Prefixes `payload` with the FeliCa data length (LEN) byte.
+///
+/// Per §2.2 (table 2-2) LEN is a single byte carrying "packet data length + 1",
+/// so a packet may not exceed [`MAX_PACKET_LEN`] bytes. Over-long payloads are
+/// rejected rather than silently truncated: a wrapped-around LEN byte would put
+/// a frame on the air that every card answers with silence, because the received
+/// data length no longer matches the command's expected length.
+pub(crate) fn frame_with_length_prefix(payload: &[u8]) -> Result<Vec<u8>, FelicaStandardError> {
+    let frame_len = payload.len() + 1;
+    if frame_len > MAX_PACKET_LEN {
+        return Err(FelicaStandardError::Protocol(format!(
+            "FeliCa packet would be {frame_len} bytes, but the one-byte data length field \
+             caps a packet at {MAX_PACKET_LEN} bytes"
+        )));
+    }
+    let mut frame = Vec::with_capacity(frame_len);
+    frame.push(frame_len as u8);
     frame.extend_from_slice(payload);
-    frame
+    Ok(frame)
 }
 
 mod parse;

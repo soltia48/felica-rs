@@ -332,7 +332,7 @@ pub(crate) fn build_secure_response_frame_v2_aes128(
     frame_payload.extend_from_slice(&counter_bytes);
     frame_payload.extend_from_slice(&cipher_payload);
     frame_payload.extend_from_slice(&cipher_mac);
-    Some(frame_with_length_prefix(&frame_payload))
+    frame_with_length_prefix(&frame_payload).ok()
 }
 
 pub fn generate_group_key_v2_aes128(

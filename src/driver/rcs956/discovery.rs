@@ -10,6 +10,16 @@ use crate::driver::rcs956::device::Device;
 use crate::felica_standard::Type3TagPollingResult;
 use crate::transport::Transport;
 use log::{debug, warn};
+use std::time::Duration;
+
+/// How long to keep the RF field up before sending the first Polling command.
+///
+/// A card needs up to 20 ms from entering the field to being able to receive a
+/// command, and the FeliCa card user's manual (§2.4.1) recommends holding the
+/// field for at least 20.4 ms — 20 ms of start-up plus margin for the field's
+/// own rise time — before polling. Polling earlier is allowed but only if the
+/// caller retries, so a driver that polls once must wait out the full time.
+const CARD_STARTUP_TIME: Duration = Duration::from_micros(20_400);
 
 impl<T: Transport> Device<T> {
     /// Detects a Type A target (NFC-A).
@@ -188,11 +198,12 @@ impl<T: Transport> Device<T> {
 
         debug!("polling for NFC-F target at {}", target.bitrate());
 
-        // Check if RF field is already on, if not activate it and wait
+        // Check if RF field is already on, if not activate it and wait out the
+        // card's start-up time before polling.
         let tx_control = self.chipset.read_single_register(ciu::TX_CONTROL)?;
         if tx_control & 0b00000011 == 0 {
             self.chipset.rf_configuration(0x01, &[0x01])?;
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(CARD_STARTUP_TIME);
         }
 
         // Build SENSF_REQ

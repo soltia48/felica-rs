@@ -229,7 +229,7 @@ pub(crate) fn build_secure_response_frame_des(
     let mut frame_payload = Vec::with_capacity(1 + encrypted.len());
     frame_payload.push(response_code);
     frame_payload.extend_from_slice(&encrypted);
-    Some(frame_with_length_prefix(&frame_payload))
+    frame_with_length_prefix(&frame_payload).ok()
 }
 
 pub fn generate_service_keys_des(

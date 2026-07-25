@@ -249,7 +249,9 @@ impl<T: Transport> Device<T> {
             request_code,
             time_slots,
         };
-        let frame = command.to_frame();
+        let frame = command
+            .to_frame()
+            .map_err(|err| DriverError::Other(format!("failed to build SENSF_REQ: {err}")))?;
         let timeout_ms = ((0.003625_f32 + time_slots as f32 * 0.001208_f32) * 1000.0).ceil() as u64;
         let flags = TransmissionFlags::felica();
         let response = self

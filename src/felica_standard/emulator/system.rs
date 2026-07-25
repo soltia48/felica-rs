@@ -3,10 +3,11 @@
 //! authentication, and processes secure-messaging frames.
 
 use super::SharedBlocks;
+use super::blocks::{CyclicWrite, PurseOperation, apply_cyclic_write, apply_purse_write};
 use super::encode_response_frame;
 use super::structure::{
-    DirectoryEntry, EmulatedArea, EmulatedService, EmulatorConfigError, ROOT_AREA_CODE,
-    ROOT_END_SERVICE_CODE,
+    DirectoryEntry, EmulatedArea, EmulatedService, EmulatorConfigError, LimitPurseProperty,
+    ROOT_AREA_CODE, ROOT_END_SERVICE_CODE,
 };
 use crate::felica_standard::command::is_register_command;
 use crate::felica_standard::secure::{
@@ -16,7 +17,7 @@ use crate::felica_standard::secure::{
 };
 use crate::felica_standard::{
     Authentication2Response, BLOCK_SIZE, BlockListElement, DES_BLOCK_SIZE, FelicaStandardCommand,
-    FelicaStandardResponse, ReadResult, ServiceCode,
+    FelicaStandardResponse, ReadResult, ServiceAttribute, ServiceCode, ServiceKind,
 };
 use std::collections::BTreeMap;
 
@@ -44,6 +45,73 @@ impl SystemMode {
     }
 }
 
+/// Which modes §4.3 (table 4-1) lets a command run in.
+///
+/// A command sent in a mode it is not listed for draws no response at all and
+/// leaves the mode untouched — the table's "－" — rather than an error status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModeRequirement {
+    /// Runs in every mode and leaves it unchanged: Request Service, Request
+    /// Response, Search Service Code, Request System Code.
+    AnyMode,
+    /// Runs only in Mode0: Read Without Encryption, Write Without Encryption,
+    /// and Polling addressed to the system currently communicating.
+    Unauthenticated,
+    /// Runs in Mode1 and Mode2: Authentication2.
+    AuthenticationStarted,
+    /// Runs only in Mode2: Read, Write.
+    Authenticated,
+    /// Runs in Mode2 and Mode3: the issuing commands, which move the card to
+    /// Mode3 and may then be repeated there.
+    Issuing,
+}
+
+/// The communication performance a card reports for Polling request code `02h`
+/// (§4.4.2, table 4-8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommunicationPerformance {
+    /// b0 of D1: able to communicate at 212 kbps.
+    pub supports_212_kbps: bool,
+    /// b1 of D1: able to communicate at 424 kbps.
+    pub supports_424_kbps: bool,
+    /// b7 of D1: supports automatic bitrate detection.
+    pub supports_automatic_bitrate_detection: bool,
+}
+
+impl Default for CommunicationPerformance {
+    fn default() -> Self {
+        // FeliCa defines exactly two data rates (§2.1, table 2-1) and both are
+        // what a reader polls at, so a card that answers at all supports 212 kbps
+        // at minimum. Reporting neither — as an all-zero response does — would
+        // contradict the response itself.
+        Self {
+            supports_212_kbps: true,
+            supports_424_kbps: true,
+            supports_automatic_bitrate_detection: false,
+        }
+    }
+}
+
+impl CommunicationPerformance {
+    /// Encodes the two request data bytes of table 4-8, D0 first.
+    ///
+    /// D0 is fixed at `00h`, and in D1 the 848 kbps and 1.6 Mbps bits plus b6-b4
+    /// are reserved and stay zero.
+    pub(super) fn to_request_data(self) -> [u8; 2] {
+        let mut d1 = 0u8;
+        if self.supports_212_kbps {
+            d1 |= 0b0000_0001;
+        }
+        if self.supports_424_kbps {
+            d1 |= 0b0000_0010;
+        }
+        if self.supports_automatic_bitrate_detection {
+            d1 |= 0b1000_0000;
+        }
+        [0x00, d1]
+    }
+}
+
 pub struct EmulatedSystem {
     pub(super) system_code: u16,
     pub(super) idm: [u8; 8],
@@ -54,6 +122,7 @@ pub struct EmulatedSystem {
     system_key: [u8; 8],
     idi: [u8; 8],
     pmi: [u8; 8],
+    communication_performance: CommunicationPerformance,
     pending_auth: Option<PendingAuthentication>,
     secure_session: Option<SecureSession>,
 }
@@ -71,6 +140,7 @@ impl EmulatedSystem {
             system_key: [0x00; 8],
             idi: [0x00; 8],
             pmi: [0x00; 8],
+            communication_performance: CommunicationPerformance::default(),
             pending_auth: None,
             secure_session: None,
         })
@@ -133,13 +203,13 @@ impl EmulatedSystem {
         service: EmulatedService,
     ) -> Result<&mut Self, EmulatorConfigError> {
         self.root_area.add_service(service)?;
-        self.sync_overlapping_services();
+        self.sync_overlapping_services()?;
         Ok(self)
     }
 
     pub fn add_area(&mut self, area: EmulatedArea) -> Result<&mut Self, EmulatorConfigError> {
         self.root_area.add_area(area)?;
-        self.sync_overlapping_services();
+        self.sync_overlapping_services()?;
         Ok(self)
     }
 
@@ -149,8 +219,37 @@ impl EmulatedSystem {
         entries
     }
 
+    /// What this system reports for Polling request code `02h` (§4.4.2, table 4-8).
+    pub fn communication_performance(&self) -> CommunicationPerformance {
+        self.communication_performance
+    }
+
+    pub fn set_communication_performance(
+        &mut self,
+        performance: CommunicationPerformance,
+    ) -> &mut Self {
+        self.communication_performance = performance;
+        self
+    }
+
     pub(super) fn mode_code(&self) -> u8 {
         self.mode.code()
+    }
+
+    /// Whether §4.3 (table 4-1) lets a command with this mode requirement run in
+    /// the system's current mode.
+    pub(super) fn mode_permits(&self, requirement: ModeRequirement) -> bool {
+        match requirement {
+            ModeRequirement::AnyMode => true,
+            ModeRequirement::Unauthenticated => self.mode == SystemMode::Mode0,
+            ModeRequirement::AuthenticationStarted => {
+                matches!(self.mode, SystemMode::Mode1 | SystemMode::Mode2)
+            }
+            ModeRequirement::Authenticated => self.mode == SystemMode::Mode2,
+            ModeRequirement::Issuing => {
+                matches!(self.mode, SystemMode::Mode2 | SystemMode::Mode3)
+            }
+        }
     }
 
     pub(super) fn find_service(&self, service_code: ServiceCode) -> Option<&EmulatedService> {
@@ -276,7 +375,10 @@ impl EmulatedSystem {
         _idm: [u8; 8],
         challenge_2b: [u8; 8],
     ) -> Option<Vec<u8>> {
-        let pending = self.pending_auth.take()?;
+        // Table 4-1 lists Authentication2 for Mode1 (1->2) and Mode2 (2->2), so
+        // the authentication context outlives the first Authentication2 and a
+        // repeat in Mode2 simply re-establishes the session.
+        let pending = self.pending_auth.as_ref()?;
         // `challenge_2b` is the reader's proof it knows the key; compare the
         // expected value in constant time so a wrong guess leaks no timing.
         let expected = pending.context.encrypt_challenge2b(&pending.random_2);
@@ -299,7 +401,7 @@ impl EmulatedSystem {
             transaction_number,
             transaction_id,
             transaction_key: pending.random_2,
-            service_codes: pending.service_codes,
+            service_codes: pending.service_codes.clone(),
         });
         self.mode = SystemMode::Mode2;
 
@@ -308,69 +410,213 @@ impl EmulatedSystem {
         ))
     }
 
-    pub(super) fn validate_block(
+    /// Checks one block list element against the success requirements of §4.4.5
+    /// (read) and §4.4.6 (write), reporting the (status flag 1, status flag 2)
+    /// pair the card would return.
+    ///
+    /// `require_auth_free` distinguishes Read/Write Without Encryption, which may
+    /// only reach services whose attribute is "認証不要", from the encrypted
+    /// Read/Write, which §4.2 allows on both kinds of service.
+    fn validate_block_element(
         &self,
         service_codes: &[ServiceCode],
         index: usize,
         block: &BlockListElement,
         access: AccessType,
-    ) -> Result<(ServiceCode, usize), (u8, u8)> {
-        if block.access_mode != 0 {
-            return Err((list_error_index(index), 0xA7));
-        }
+        require_auth_free: bool,
+    ) -> Result<ValidatedBlock, (u8, u8)> {
+        let position = list_error_index(index);
 
+        // "「サービスコードリスト順番」の値がサービス数を超えていないこと" -> A3h.
         let service_index = block.service_code_list_index as usize;
         let Some(service_code) = service_codes.get(service_index).copied() else {
-            return Err((list_error_index(index), 0xA3));
+            return Err((position, 0xA3));
         };
-        let Some(service) = self.find_service(service_code) else {
-            return Err((list_error_index(index), 0xA5));
+
+        // §4.4.5 permits access mode 000b only; §4.4.6 additionally permits 001b
+        // for a cashback write. Anything else is A7h (ブロックリスト不正:
+        // アクセスモード).
+        let access_mode_allowed = match access {
+            AccessType::Read => block.access_mode == 0b000,
+            AccessType::Write => matches!(block.access_mode, 0b000 | 0b001),
         };
-        if service_code.requires_key() {
-            return Err((list_error_index(index), 0xA5));
-        }
-        if matches!(access, AccessType::Write) && !service_allows_write(service_code) {
-            return Err((list_error_index(index), 0xA5));
+        if !access_mode_allowed {
+            return Err((position, 0xA7));
         }
 
+        // "サービスコードリストで指定するアクセス先がエリアもしくはシステムではないこと".
+        // A4h is サービスタイプ不正, which table 4-12 defines as a wrong area *or*
+        // service attribute — and an area code carries an area attribute, which is
+        // never a valid service attribute, so this one test covers both.
+        if service_code.raw() == SYSTEM_NODE_CODE {
+            return Err((position, 0xA4));
+        }
+        let Some(attribute) = service_code.attribute() else {
+            return Err((position, 0xA4));
+        };
+
+        // "サービスコードリストで指定するサービスがシステム内に存在すること" -> A6h.
+        let Some(service) = self.find_service(service_code) else {
+            return Err((position, 0xA6));
+        };
+
+        // "サービスコードリストで指定するサービスのサービス属性が認証不要であること".
+        if require_auth_free && service_code.requires_key() {
+            return Err((position, 0xA5));
+        }
+
+        if matches!(access, AccessType::Write) {
+            // "サービス属性がリードオンリーではないこと".
+            if !attribute.allows_write() {
+                return Err((position, 0xA5));
+            }
+            // "アクセスモードに 001b が指定された場合、指定されたサービスのサービス属性
+            // が、パースサービスのキャッシュバック／デクリメントアクセスであること".
+            if block.access_mode == 0b001 && !attribute.allows_cashback() {
+                return Err((position, 0xA5));
+            }
+        } else if block.access_mode != 0b000 {
+            return Err((position, 0xA7));
+        }
+
+        // "ブロック番号が、指定したサービスに設定されたブロック数の範囲内であること" -> A8h.
         let block_number = block.block_number_or_key_version as usize;
         let block_count = service.blocks.borrow().len();
         if block_number >= block_count {
-            return Err((list_error_index(index), 0xA8));
+            return Err((position, 0xA8));
         }
 
-        Ok((service_code, block_number))
+        Ok(ValidatedBlock {
+            position,
+            service_code,
+            attribute,
+            block_number,
+            access_mode: block.access_mode,
+            limit_purse: service.limit_purse(),
+        })
     }
 
-    fn validate_secure_block(
+    pub(super) fn validate_read_block(
         &self,
         service_codes: &[ServiceCode],
         index: usize,
         block: &BlockListElement,
-        access: AccessType,
+        require_auth_free: bool,
     ) -> Result<(ServiceCode, usize), (u8, u8)> {
-        if block.access_mode != 0 {
-            return Err((list_error_index(index), 0xA7));
+        let validated = self.validate_block_element(
+            service_codes,
+            index,
+            block,
+            AccessType::Read,
+            require_auth_free,
+        )?;
+        Ok((validated.service_code, validated.block_number))
+    }
+
+    /// Applies a whole block list of writes, honouring the per-kind semantics of
+    /// §3.4.2 (random), §3.4.3 (cyclic) and §3.4.4 (purse).
+    ///
+    /// Every element is validated and every new block computed before anything is
+    /// stored, which is what gives §3.6.1's guarantee that a command's writes are
+    /// applied "完全に行われる" or not at all.
+    pub(super) fn apply_block_writes(
+        &self,
+        service_codes: &[ServiceCode],
+        block_list: &[BlockListElement],
+        data: &[u8],
+        require_auth_free: bool,
+    ) -> Result<(), (u8, u8)> {
+        let mut planned = Vec::with_capacity(block_list.len());
+        for (index, element) in block_list.iter().enumerate() {
+            let validated = self.validate_block_element(
+                service_codes,
+                index,
+                element,
+                AccessType::Write,
+                require_auth_free,
+            )?;
+            let offset = index * BLOCK_SIZE;
+            let mut block = [0u8; BLOCK_SIZE];
+            block.copy_from_slice(&data[offset..offset + BLOCK_SIZE]);
+            planned.push((validated, block));
         }
 
-        let service_index = block.service_code_list_index as usize;
-        let Some(service_code) = service_codes.get(service_index).copied() else {
-            return Err((list_error_index(index), 0xA3));
-        };
-        let Some(service) = self.find_service(service_code) else {
-            return Err((list_error_index(index), 0xA5));
-        };
-        if matches!(access, AccessType::Write) && !service_allows_write(service_code) {
-            return Err((list_error_index(index), 0xA5));
+        // Overlapping services share one block store (§3.4.6), so stage the work
+        // per store, keyed by the service number they overlap on.
+        let mut staged: BTreeMap<u16, (SharedBlocks, Vec<[u8; BLOCK_SIZE]>)> = BTreeMap::new();
+        for (validated, _) in &planned {
+            let number = validated.service_code.number();
+            if staged.contains_key(&number) {
+                continue;
+            }
+            let service = self
+                .find_service(validated.service_code)
+                .expect("the service was resolved during validation");
+            let snapshot = service.blocks.borrow().clone();
+            staged.insert(number, (service.blocks.clone(), snapshot));
         }
 
-        let block_number = block.block_number_or_key_version as usize;
-        let block_count = service.blocks.borrow().len();
-        if block_number >= block_count {
-            return Err((list_error_index(index), 0xA8));
+        let mut cursor = 0usize;
+        while cursor < planned.len() {
+            // §3.4.3 treats blocks written consecutively to the same cyclic
+            // service as one data unit, so runs have to be found before applying
+            // anything.
+            let number = planned[cursor].0.service_code.number();
+            let mut end = cursor + 1;
+            while end < planned.len() && planned[end].0.service_code.number() == number {
+                end += 1;
+            }
+            let run = &planned[cursor..end];
+            let (_, blocks) = staged
+                .get_mut(&number)
+                .expect("every planned service was staged");
+
+            match run[0].0.attribute.kind() {
+                ServiceKind::Random => {
+                    for (validated, block) in run {
+                        blocks[validated.block_number] = *block;
+                    }
+                }
+                ServiceKind::Cyclic => {
+                    // "書き込み時は、常にブロック番号に 0 を指定する必要があります".
+                    if let Some((validated, _)) = run
+                        .iter()
+                        .find(|(validated, _)| validated.block_number != 0)
+                    {
+                        return Err((validated.position, 0xA5));
+                    }
+                    let command_blocks: Vec<[u8; BLOCK_SIZE]> =
+                        run.iter().map(|(_, block)| *block).collect();
+                    match apply_cyclic_write(blocks, &command_blocks) {
+                        Ok(CyclicWrite::Updated(updated)) => *blocks = updated,
+                        Ok(CyclicWrite::Unchanged) => {}
+                        Err(sf2) => return Err((run[0].0.position, sf2)),
+                    }
+                }
+                ServiceKind::Purse => {
+                    for (validated, command) in run {
+                        let operation =
+                            PurseOperation::resolve(validated.attribute, validated.access_mode)
+                                .map_err(|sf2| (validated.position, sf2))?;
+                        let stored = blocks[validated.block_number];
+                        match apply_purse_write(&stored, command, operation, validated.limit_purse)
+                        {
+                            Ok(Some(updated)) => blocks[validated.block_number] = updated,
+                            // §3.4.4: a repeated execution ID completes normally
+                            // without updating the block.
+                            Ok(None) => {}
+                            Err(sf2) => return Err((validated.position, sf2)),
+                        }
+                    }
+                }
+            }
+            cursor = end;
         }
 
-        Ok((service_code, block_number))
+        for (shared, blocks) in staged.into_values() {
+            *shared.borrow_mut() = blocks;
+        }
+        Ok(())
     }
 
     pub(super) fn block_count_for_node(&self, node_code: u16) -> u16 {
@@ -391,9 +637,9 @@ impl EmulatedSystem {
         self.secure_session = None;
     }
 
-    fn sync_overlapping_services(&mut self) {
+    fn sync_overlapping_services(&mut self) -> Result<(), EmulatorConfigError> {
         let mut registry = BTreeMap::new();
-        self.root_area.sync_overlapping_services(&mut registry);
+        self.root_area.sync_overlapping_services(&mut registry)
     }
 
     pub(super) fn handle_secure_frame(
@@ -401,6 +647,18 @@ impl EmulatedSystem {
         command_code: u8,
         encrypted_payload: &[u8],
     ) -> Option<Vec<u8>> {
+        // Table 4-1: Read and Write run in Mode2 only, while the issuing commands
+        // run in Mode2 (moving the card to Mode3) and again in Mode3. A secure
+        // frame sent in any other mode draws no response.
+        let requirement = if is_register_command(command_code) {
+            ModeRequirement::Issuing
+        } else {
+            ModeRequirement::Authenticated
+        };
+        if !self.mode_permits(requirement) {
+            return None;
+        }
+
         let (transaction_key, transaction_id, service_codes, last_transaction_number) = {
             let session = self.secure_session.as_ref()?;
             (
@@ -493,8 +751,9 @@ impl EmulatedSystem {
     ) -> FelicaStandardResponse {
         let mut blocks = Vec::with_capacity(block_list.len());
         for (index, block) in block_list.iter().enumerate() {
+            // §4.2: the encrypted Read reaches services of either attribute.
             let (service_code, block_number) =
-                match self.validate_secure_block(service_codes, index, block, AccessType::Read) {
+                match self.validate_read_block(service_codes, index, block, false) {
                     Ok(value) => value,
                     Err((sf1, sf2)) => {
                         return FelicaStandardResponse::Read {
@@ -531,51 +790,28 @@ impl EmulatedSystem {
                 status_flag2: 0xAC,
             };
         }
-        let mut updates = Vec::with_capacity(block_list.len());
-        for (index, block) in block_list.iter().enumerate() {
-            let (service_code, block_number) =
-                match self.validate_secure_block(service_codes, index, block, AccessType::Write) {
-                    Ok(value) => value,
-                    Err((sf1, sf2)) => {
-                        return FelicaStandardResponse::Write {
-                            status_flag1: sf1,
-                            status_flag2: sf2,
-                        };
-                    }
-                };
-            let offset = index * BLOCK_SIZE;
-            let mut block_data = [0u8; BLOCK_SIZE];
-            block_data.copy_from_slice(&data[offset..offset + BLOCK_SIZE]);
-            updates.push((service_code, block_number, block_data));
-        }
-
-        let mut shared_blocks: BTreeMap<u16, SharedBlocks> = BTreeMap::new();
-        for (service_code, block_number, block_data) in updates {
-            let service_number = service_code.number();
-            let shared = if let Some(shared) = shared_blocks.get(&service_number) {
-                shared.clone()
-            } else {
-                let Some(service) = self.find_service(service_code) else {
-                    return FelicaStandardResponse::Write {
-                        status_flag1: 0xFF,
-                        status_flag2: 0xA6,
-                    };
-                };
-                let shared = service.blocks.clone();
-                shared_blocks.insert(service_number, shared.clone());
-                shared
-            };
-            let mut blocks = shared.borrow_mut();
-            if let Some(slot) = blocks.get_mut(block_number) {
-                *slot = block_data;
-            }
-        }
-
-        FelicaStandardResponse::Write {
-            status_flag1: 0x00,
-            status_flag2: 0x00,
+        match self.apply_block_writes(service_codes, block_list, data, false) {
+            Ok(()) => FelicaStandardResponse::Write {
+                status_flag1: 0x00,
+                status_flag2: 0x00,
+            },
+            Err((sf1, sf2)) => FelicaStandardResponse::Write {
+                status_flag1: sf1,
+                status_flag2: sf2,
+            },
         }
     }
+}
+
+/// A block list element that has passed the §4.4.5/§4.4.6 success requirements.
+struct ValidatedBlock {
+    /// Value to report in status flag 1 if this element later fails.
+    position: u8,
+    service_code: ServiceCode,
+    attribute: ServiceAttribute,
+    block_number: usize,
+    access_mode: u8,
+    limit_purse: Option<LimitPurseProperty>,
 }
 
 struct PendingAuthentication {
@@ -606,13 +842,6 @@ fn list_error_index(index: usize) -> u8 {
     }
 }
 
-fn service_allows_write(service_code: ServiceCode) -> bool {
-    !matches!(
-        service_code.attributes(),
-        0b001010 | 0b001011 | 0b001110 | 0b001111 | 0b010110 | 0b010111
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,14 +856,6 @@ mod tests {
         assert_eq!(list_error_index(0), 1);
         assert_eq!(list_error_index(200), 201);
         assert_eq!(list_error_index(usize::MAX), u8::MAX);
-    }
-
-    #[test]
-    fn service_write_permission_rules() {
-        let read_only = ServiceCode::new((0x0100 << 6) | 0b001011);
-        let writable = ServiceCode::new((0x0100 << 6) | 0b001001);
-        assert!(!service_allows_write(read_only));
-        assert!(service_allows_write(writable));
     }
 
     const AUTH_SERVICE: u16 = 0x1008; // even -> authentication-required

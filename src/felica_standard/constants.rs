@@ -9,8 +9,54 @@ pub const MAX_SERVICE_CODES: usize = 0x20;
 /// Maximum number of service codes for read/write operations.
 pub const MAX_RW_SERVICE_CODES: usize = 0x10;
 
-/// Maximum length of the block list.
-pub const MAX_BLOCK_LIST_LEN: usize = 0xFF;
+/// Largest block count a command or response can state.
+///
+/// This is the width of the block count field, which §4.4.5 and §4.4.6 define as
+/// one byte — not a limit on how many blocks a card will actually accept. The
+/// manual leaves 最大同時読み出し／書き込みブロック数 to each product, and even the
+/// most permissive product is bounded by what a single packet holds; see
+/// [`MAX_PACKET_LEN`] and [`MAX_READ_WITHOUT_ENCRYPTION_BLOCK_COUNT`].
+pub const MAX_BLOCK_COUNT: usize = 0xFF;
+
+/// Maximum length of a FeliCa packet in bytes, counting the one-byte data
+/// length (LEN) field itself.
+///
+/// The card user's manual (§2.2, table 2-2) defines LEN as a single byte whose
+/// value is the packet data length plus one, so no packet — command or
+/// response — can be longer than 255 bytes.
+///
+/// This bound is what actually caps a block list. §4.4.6's worked examples fall
+/// straight out of it: a Write Without Encryption naming one service with
+/// two-byte block list elements tops out at 13 blocks (248 bytes) and one naming
+/// sixteen services with three-byte elements at 11 blocks (253 bytes), which are
+/// exactly the figures the manual quotes.
+pub const MAX_PACKET_LEN: usize = 0xFF;
+
+/// Fixed part of a Read Without Encryption response: the LEN byte, the response
+/// code, the IDm, both status flags and the block count (§4.4.5).
+const READ_WITHOUT_ENCRYPTION_RESPONSE_OVERHEAD: usize = 1 + 1 + IDM_LEN + 1 + 1 + 1;
+
+/// Most blocks a single Read Without Encryption can return.
+///
+/// §4.4.5 makes 最大同時読み出しブロック数 product-specific, but no product can
+/// exceed what one response packet holds: 16 bytes per block on top of a fixed
+/// 13-byte header, against the [`MAX_PACKET_LEN`] ceiling of §2.2. Unlike a
+/// write, a read is limited by the *response* — the command itself stays small —
+/// so the request has to be checked against this before it is sent.
+pub const MAX_READ_WITHOUT_ENCRYPTION_BLOCK_COUNT: usize =
+    (MAX_PACKET_LEN - READ_WITHOUT_ENCRYPTION_RESPONSE_OVERHEAD) / BLOCK_SIZE;
+
+/// Request codes the Polling command defines (§4.4.2): `00h` requests no
+/// additional data, `01h` the system code and `02h` the communication
+/// performance. All other values are reserved.
+pub const POLLING_REQUEST_CODES: [u8; 3] = [0x00, 0x01, 0x02];
+
+/// Time slot values the Polling command defines (§4.4.2, table 4-6), granting
+/// the card 1, 2, 4, 8 or 16 anti-collision response slots respectively.
+///
+/// The manual states that only these values may be sent, since the behaviour of
+/// any other value is product-dependent.
+pub const POLLING_TIME_SLOTS: [u8; 5] = [0x00, 0x01, 0x03, 0x07, 0x0F];
 
 /// Maximum number of node codes in a single request.
 pub const MAX_NODE_CODES: usize = 0x20;
@@ -269,7 +315,9 @@ mod tests {
         assert_eq!(V2_AES128_BLOCK_SIZE, 16);
         assert_eq!(V2_AES128_MAC_SIZE, 8);
         assert!(MAX_SERVICE_CODES >= MAX_RW_SERVICE_CODES);
-        assert!(MAX_BLOCK_LIST_LEN >= MAX_SERVICE_CODES);
+        assert!(MAX_BLOCK_COUNT >= MAX_SERVICE_CODES);
         assert!(MAX_NODE_CODES >= MAX_NODE_PROPERTY_CODES);
+        // The LEN field is one byte holding "packet data length + 1".
+        assert_eq!(MAX_PACKET_LEN, u8::MAX as usize);
     }
 }
