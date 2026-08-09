@@ -122,7 +122,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             transaction_number,
             transaction_id,
             SecureSessionCredentials::Des(random_2),
-        );
+        )
+        // A block list element's "service code list order" counts the service
+        // list only (§4.4.5); the area list scopes the key chain and is not
+        // addressable. A node whose key is to be changed therefore has to be
+        // named among the services, which the system node `FFFFh` may be.
+        .with_nodes(services.iter().map(ServiceCode::raw).collect());
         self.authenticated_context = Some(context);
 
         // `random_2` now lives in the session context, which clears it on drop.
@@ -420,10 +425,34 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
             ));
         }
 
+        // A block list element names its target by position in the node list the
+        // session was authenticated against, so a key can only be changed for a
+        // node that list contains. Resolving the position here — rather than
+        // assuming one — is what keeps a mistyped node from silently rewriting a
+        // different node's key.
+        let context = self
+            .authenticated_context
+            .as_ref()
+            .ok_or(FelicaStandardError::AuthenticationRequired)?;
+
         let mut block_list = Vec::with_capacity(change_key_params.len());
         for params in change_key_params {
+            let index = context.node_index(params.node).ok_or_else(|| {
+                FelicaStandardError::InvalidParameter(format!(
+                    "node {:#06X} is not in the authenticated node list {:04X?}",
+                    params.node,
+                    context.nodes()
+                ))
+            })?;
+            // "サービスコードリスト順番" is four bits wide (§4.4.5, figure 4-8).
+            if index > 0x0F {
+                return Err(FelicaStandardError::InvalidParameter(format!(
+                    "node {:#06X} is at position {index} of the authenticated node list, which a block list element cannot address",
+                    params.node
+                )));
+            }
             let block_number = params.block_descriptor_block_number();
-            block_list.push(BlockListElement::new(block_number, 0, 4));
+            block_list.push(BlockListElement::new(block_number, index as u8, 4));
         }
 
         let mut data = Vec::with_capacity(change_key_params.len() * BLOCK_SIZE);
@@ -603,7 +632,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 mac_key,
                 challenge_3c,
             },
-        );
+        )
+        .with_nodes(nodes.to_vec());
         self.authenticated_context = Some(authenticated);
 
         // The derived session keys now live in the session context, which clears

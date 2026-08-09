@@ -742,6 +742,7 @@ pub struct MutualAuthenticationResult {
 /// [`SecureSessionCredentials`]: super::SecureSessionCredentials
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ChangeKeyParameters {
+    pub node: u16,
     pub parent_key: [u8; 8],
     pub new_key: [u8; 8],
     pub old_key: [u8; 8],
@@ -807,6 +808,7 @@ impl RequestServiceV2KeyVersion {
 impl fmt::Debug for ChangeKeyParameters {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChangeKeyParameters")
+            .field("node", &format_args!("{:#06X}", self.node))
             .field("parent_key", &Redacted(self.parent_key.len()))
             .field("new_key", &Redacted(self.new_key.len()))
             .field("old_key", &Redacted(self.old_key.len()))
@@ -817,17 +819,23 @@ impl fmt::Debug for ChangeKeyParameters {
 
 impl ChangeKeyParameters {
     pub fn new(
+        node: u16,
         parent_key: [u8; 8],
         new_key: [u8; 8],
         old_key: [u8; 8],
         new_key_version: u16,
     ) -> Self {
         Self {
+            node,
             parent_key,
             new_key,
             old_key,
             new_key_version,
         }
+    }
+
+    pub fn node(&self) -> u16 {
+        self.node
     }
 
     pub fn new_key_version(&self) -> u16 {
@@ -1154,21 +1162,22 @@ mod tests {
 
     #[test]
     fn change_key_parameters_accessors_and_payload_shape() {
-        let params = ChangeKeyParameters::new([1; 8], [2; 8], [3; 8], 0x1234);
+        let params = ChangeKeyParameters::new(0x1008, [1; 8], [2; 8], [3; 8], 0x1234);
+        assert_eq!(params.node(), 0x1008);
         assert_eq!(params.new_key_version(), 0x1234);
         assert_eq!(params.block_descriptor_block_number(), 0x1234);
 
         let payload_a = params.payload();
         assert_eq!(payload_a.len(), 16);
 
-        let payload_b = ChangeKeyParameters::new([1; 8], [2; 8], [3; 8], 0x1235).payload();
+        let payload_b = ChangeKeyParameters::new(0x1008, [1; 8], [2; 8], [3; 8], 0x1235).payload();
         assert_ne!(payload_a, payload_b);
     }
 
     /// The three keys in a key-change request must not print.
     #[test]
     fn change_key_parameters_debug_redacts_the_keys() {
-        let params = ChangeKeyParameters::new([0xDE; 8], [0xAD; 8], [0xBE; 8], 0x1234);
+        let params = ChangeKeyParameters::new(0x1008, [0xDE; 8], [0xAD; 8], [0xBE; 8], 0x1234);
         let text = format!("{params:?}");
         assert_eq!(text.matches("<8 bytes redacted>").count(), 3);
         assert!(!text.contains("222"), "leaked a key byte: {text}");

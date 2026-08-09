@@ -533,9 +533,79 @@ fn change_keys_rejects_aes128_session() {
     ));
 
     let params = [ChangeKeyParameters::new(
-        [0x01; 8], [0x02; 8], [0x03; 8], 0x0100,
+        0x1008, [0x01; 8], [0x02; 8], [0x03; 8], 0x0100,
     )];
     assert_invalid_parameter_contains(felica.change_keys(&params), "only supported for Write");
+}
+
+/// A key change names its node by position in the list the session was opened
+/// against, so a node that list does not contain has no position to use. Sending
+/// it anyway would rewrite the key of whichever node does sit at the position,
+/// which is why this is rejected before anything reaches the card.
+#[test]
+fn change_keys_rejects_a_node_outside_the_authenticated_node_list() {
+    let mut driver = MockDriver::with_polling_result(sample_polling_result());
+    let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+        .expect("polling should succeed");
+    felica.set_authenticated_context(
+        AuthenticatedContext::new(
+            1,
+            [1, 2, 3, 4, 5, 6],
+            SecureSessionCredentials::Des([0x10; 8]),
+        )
+        .with_nodes(vec![0x0048, 0xFFFF]),
+    );
+
+    let params = [ChangeKeyParameters::new(
+        0x1008, [0x01; 8], [0x02; 8], [0x03; 8], 0x0100,
+    )];
+    assert_invalid_parameter_contains(
+        felica.change_keys(&params),
+        "is not in the authenticated node list",
+    );
+}
+
+/// The system node is addressable like any other: naming it among the session's
+/// services is what makes its key changeable.
+#[test]
+fn change_keys_targets_a_node_of_the_authenticated_session() {
+    let mut driver = MockDriver::with_polling_result(sample_polling_result());
+    let tx_id = [1, 2, 3, 4, 5, 6];
+    let tx_key = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+
+    let secure_payload = FelicaStandardResponse::Write {
+        status_flag1: 0x00,
+        status_flag2: 0x00,
+    }
+    .to_secure_payload()
+    .unwrap();
+    let response_frame = build_secure_response_frame_des(
+        WRITE_COMMAND_CODE + 1,
+        3,
+        &tx_id,
+        &tx_key,
+        &secure_payload,
+    )
+    .expect("secure response frame build should succeed");
+    driver.queue_response(response_frame);
+
+    let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
+        .expect("polling should succeed");
+    felica.set_authenticated_context(
+        AuthenticatedContext::new(1, tx_id, SecureSessionCredentials::Des(tx_key))
+            .with_nodes(vec![0x0048, 0xFFFF]),
+    );
+
+    let context = felica.authenticated_context().unwrap();
+    assert_eq!(context.nodes(), &[0x0048, 0xFFFF]);
+    assert_eq!(context.node_index(0xFFFF), Some(1));
+
+    let params = [ChangeKeyParameters::new(
+        0xFFFF, [0x01; 8], [0x02; 8], [0x03; 8], 0x0003,
+    )];
+    felica
+        .change_keys(&params)
+        .expect("changing the system key of a listed node should succeed");
 }
 
 #[test]

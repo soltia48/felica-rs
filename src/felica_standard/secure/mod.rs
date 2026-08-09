@@ -201,6 +201,11 @@ pub struct AuthenticatedContext {
     transaction_number: u16,
     transaction_id: [u8; 6],
     credentials: SecureSessionCredentials,
+    /// The service list this session was opened against, in Authentication1
+    /// order. Node codes are structure, not secrets, so they are not zeroized
+    /// with the session keys.
+    #[zeroize(skip)]
+    nodes: Vec<u16>,
 }
 
 impl AuthenticatedContext {
@@ -213,7 +218,40 @@ impl AuthenticatedContext {
             transaction_number,
             transaction_id,
             credentials,
+            nodes: Vec::new(),
         }
+    }
+
+    /// Records the session's addressable node list.
+    ///
+    /// A block list element names its target by position in this list (§4.4.5,
+    /// "サービスコードリスト順番"), so anything that has to identify a node of
+    /// the live session — reading a block, or [`change_keys`] naming the node
+    /// whose key it replaces — depends on the order being preserved.
+    ///
+    /// For DES this is the **service** list of Authentication1: the area list
+    /// scopes the key chain and is not addressable. For v2 it is the node list.
+    ///
+    /// A context built by hand (a relay that holds the keys, say) should pass
+    /// the same list it authenticated with; leaving it empty only means node
+    /// lookups fail with [`InvalidParameter`], never that a wrong node is used.
+    ///
+    /// [`change_keys`]: crate::felica_standard::FelicaStandard::change_keys
+    /// [`InvalidParameter`]: FelicaStandardError::InvalidParameter
+    pub fn with_nodes(mut self, nodes: Vec<u16>) -> Self {
+        self.nodes = nodes;
+        self
+    }
+
+    /// The addressable nodes of this session, in Authentication1 order.
+    pub fn nodes(&self) -> &[u16] {
+        &self.nodes
+    }
+
+    /// Position of `node` in the session's node list, which is what a block list
+    /// element's "service code list order" field selects (§4.4.5, figure 4-8).
+    pub fn node_index(&self, node: u16) -> Option<usize> {
+        self.nodes.iter().position(|listed| *listed == node)
     }
 
     pub fn scheme(&self) -> SecureSessionScheme {
