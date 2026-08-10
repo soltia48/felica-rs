@@ -1,6 +1,7 @@
+use crate::clf::errors::CommunicationError;
 use crate::driver::errors::{DriverError, Result};
 use crate::transport::Transport;
-use log::debug;
+use log::{debug, warn};
 use std::borrow::Cow;
 use std::convert::{TryFrom, TryInto};
 use std::io::{self, Error, ErrorKind};
@@ -18,6 +19,11 @@ const TRANSCEIVE_TAG: u8 = 0x95;
 const RESPONSE_STATUS_TAG: u8 = 0x96;
 const RESPONSE_DATA_TAG: u8 = 0x97;
 const SWITCH_PROTOCOL_METADATA_TAG: u8 = 0x8F;
+const STATUS_TLV_TAG: u8 = 0xC0;
+const DEVICE_STATE_TLV_TAG: u8 = 0x80;
+const EXTENDED_TAG_PREFIX: u8 = 0x5F;
+const ATR_TLV_TAG: u8 = 0x51;
+const FDT_TLV_TAG: u8 = 0x46;
 const GET_DATA_INS: u8 = 0xCA;
 const GET_FIRMWARE_VERSION_INS: u8 = 0x56;
 const GET_PROPERTY_INS: u8 = 0x5F;
@@ -41,6 +47,14 @@ const DIAG_TEST_COMMUNICATION_LINE: u8 = 0x00;
 const DIAG_TEST_ROM: u8 = 0x01;
 const DIAG_TEST_RAM: u8 = 0x02;
 const DIAG_TEST_POLLING: u8 = 0x03;
+const READ_RFFE_PARAMETER_INS: u8 = 0x61;
+const WRITE_RFFE_PARAMETER_INS: u8 = 0x62;
+const RFFE_PARAM_EEPROM: u8 = 0x01;
+const RFFE_PARAM_PD_SC_DPC: u8 = 0x02;
+const RFFE_PARAM_PROTOCOL_CONFIGURATION: u8 = 0x03;
+const RFFE_PARAM_PRODUCTION_DATA: u8 = 0x01;
+const RFFE_PARAM_SYSTEM_CONFIGURATION: u8 = 0x02;
+const RFFE_PARAM_DPC: u8 = 0x03;
 
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const SLOT_BUSY_WAIT_TIME: Duration = Duration::from_millis(50);
@@ -48,6 +62,7 @@ const TIME_EXTENSION_WAIT: Duration = Duration::from_millis(20);
 const RF_ON_GUARD_TIME: Duration = Duration::from_millis(21);
 const RF_OFF_GUARD_TIME: Duration = Duration::from_millis(30);
 const SWITCH_PROTOCOL_GUARD_TIME: Duration = Duration::from_millis(20);
+const CCID_SLOT_NUMBER: u8 = 0;
 const SLOT_BUSY_RETRY_COUNT: usize = 1;
 const SLOT_BUSY_END_SESSION_RETRIES: usize = 4;
 const SEQUENCE_ERROR_RETRY_COUNT: usize = 2;
@@ -118,6 +133,10 @@ impl TransmissionFlags {
 pub struct Pcsc<T: Transport> {
     ccid: CcidTransport<T>,
     receive_timeout: Duration,
+    /// The reader keeps the transmission bit framing it was last given, so a
+    /// command that shortened the frame has to be followed by an explicit reset
+    /// before the next full-byte command.
+    modified_bit_framing: bool,
 }
 
 impl<T: Transport> Pcsc<T> {
@@ -125,6 +144,7 @@ impl<T: Transport> Pcsc<T> {
         Self {
             ccid: CcidTransport::new(transport),
             receive_timeout: DEFAULT_RECEIVE_TIMEOUT,
+            modified_bit_framing: false,
         }
     }
 
@@ -135,6 +155,8 @@ impl<T: Transport> Pcsc<T> {
     pub fn start_transparent_session(&mut self, priority: bool) -> Result<()> {
         debug!("start transparent session (priority={priority})");
         if priority {
+            // Releasing a session another process may hold is best effort: there
+            // is nothing to end when no session is open.
             let _ = self.manage_session(
                 &[(END_TRANSPARENT_SESSION_TAG, &[][..])],
                 SLOT_BUSY_END_SESSION_RETRIES,
@@ -142,21 +164,28 @@ impl<T: Transport> Pcsc<T> {
         }
         self.manage_session(
             &[(START_TRANSPARENT_SESSION_TAG, &[][..])],
-            SLOT_BUSY_END_SESSION_RETRIES,
+            SLOT_BUSY_RETRY_COUNT,
         )?;
         self.turn_off_rf()?;
         sleep(RF_OFF_GUARD_TIME);
         self.turn_on_rf()?;
         sleep(RF_ON_GUARD_TIME);
+        self.modified_bit_framing = false;
         Ok(())
     }
 
     pub fn end_transparent_session(&mut self) -> Result<()> {
         debug!("end transparent session");
+        // The RF field is switched off first so the card is not left powered; a
+        // failure here must not keep the session open.
+        if let Err(err) = self.turn_off_rf() {
+            debug!("turning the RF off before ending the session failed: {err}");
+        }
         self.manage_session(
             &[(END_TRANSPARENT_SESSION_TAG, &[][..])],
             SLOT_BUSY_END_SESSION_RETRIES,
         )?;
+        self.modified_bit_framing = false;
         Ok(())
     }
 
@@ -273,21 +302,28 @@ impl<T: Transport> Pcsc<T> {
         self.send_escape_command(command).map(|_| ())
     }
 
-    pub fn set_rf_speed(&mut self, rw_to_card: u8, card_to_rw: u8, option: u8) -> Result<()> {
-        let data = [rw_to_card, card_to_rw, option];
+    /// Sets the RF speed the frontend uses for `protocol` (0: Type A,
+    /// 1: Type B, 2: Type F), where the two speed codes are the ones reported by
+    /// [`Self::card_baudrate`].
+    pub fn set_rf_speed(&mut self, protocol: u8, rw_to_card: u8, card_to_rw: u8) -> Result<()> {
+        let data = [protocol, rw_to_card, card_to_rw];
         let command = EscapeCommand::with_data(0x5C, 0x00, 0x00, &data);
         self.send_escape_command(command).map(|_| ())
     }
 
-    pub fn get_rf_speed(&mut self, selector: u8) -> Result<Vec<u8>> {
-        let data = [selector];
+    /// Reads the RF speed currently configured for `protocol`, returning the
+    /// reader-to-card code first and the card-to-reader code second.
+    pub fn get_rf_speed(&mut self, protocol: u8) -> Result<Vec<u8>> {
+        let data = [protocol];
         let command = EscapeCommand::with_data(0x5D, 0x00, 0x00, &data);
         self.send_escape_command(command)
     }
 
     pub fn set_comm_speed(&mut self, speed: u8) -> Result<()> {
-        let data = [0x6E, 0x03, 0x05, 0x01, speed];
-        self.manage_session(&[(0xFF, &data)], SLOT_BUSY_RETRY_COUNT)?;
+        // Vendor specific parameters are nested TLVs: FF <sub tag> <len> <value>,
+        // the same shape switch_protocol uses for FSDI and CID.
+        let payload = [VENDOR_SPECIFIC_TAG, 0x6E, 0x03, 0x05, 0x01, speed];
+        self.manage_session_raw(&payload, 0x00, SLOT_BUSY_RETRY_COUNT)?;
         Ok(())
     }
 
@@ -428,8 +464,36 @@ impl<T: Transport> Pcsc<T> {
         self.start_transparent_session(false)
     }
 
-    pub fn read_rffe_parameter(&mut self, category: u8, selector: u8) -> Result<Vec<u8>> {
-        self.rffe_command(0x61, category, selector, &[])
+    /// Reads an RFFE parameter. Only the EEPROM category carries a request
+    /// payload (the address block to read); the other categories are addressed
+    /// by `selector` alone.
+    pub fn read_rffe_parameter(
+        &mut self,
+        category: u8,
+        selector: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>> {
+        let payload: &[u8] = match category {
+            RFFE_PARAM_EEPROM => {
+                if selector != 0 {
+                    return Err(DriverError::Other(
+                        "EEPROM parameters use selector 0".into(),
+                    ));
+                }
+                data
+            }
+            RFFE_PARAM_PD_SC_DPC => {
+                Self::ensure_pd_sc_dpc_selector(selector, false)?;
+                &[]
+            }
+            RFFE_PARAM_PROTOCOL_CONFIGURATION => &[],
+            _ => {
+                return Err(DriverError::Other(format!(
+                    "unsupported RFFE parameter category {category}"
+                )));
+            }
+        };
+        self.rffe_command(READ_RFFE_PARAMETER_INS, category, selector, payload)
     }
 
     pub fn write_rffe_parameter(
@@ -438,7 +502,40 @@ impl<T: Transport> Pcsc<T> {
         selector: u8,
         data: &[u8],
     ) -> Result<Vec<u8>> {
-        self.rffe_command(0x62, category, selector, data)
+        match category {
+            RFFE_PARAM_EEPROM => {
+                if selector != 0 {
+                    return Err(DriverError::Other(
+                        "EEPROM parameters use selector 0".into(),
+                    ));
+                }
+            }
+            RFFE_PARAM_PD_SC_DPC => Self::ensure_pd_sc_dpc_selector(selector, true)?,
+            RFFE_PARAM_PROTOCOL_CONFIGURATION => {}
+            _ => {
+                return Err(DriverError::Other(format!(
+                    "unsupported RFFE parameter category {category}"
+                )));
+            }
+        }
+        self.rffe_command(WRITE_RFFE_PARAMETER_INS, category, selector, data)
+    }
+
+    /// Validates the selector of the PD/SC/DPC category. Production data is
+    /// readable but not writable.
+    fn ensure_pd_sc_dpc_selector(selector: u8, write: bool) -> Result<()> {
+        let allowed = matches!(
+            (selector, write),
+            (RFFE_PARAM_PRODUCTION_DATA, false)
+                | (RFFE_PARAM_SYSTEM_CONFIGURATION | RFFE_PARAM_DPC, _)
+        );
+        if allowed {
+            Ok(())
+        } else {
+            Err(DriverError::Other(format!(
+                "unsupported PD/SC/DPC parameter selector {selector}"
+            )))
+        }
     }
 
     pub fn turn_off_rf(&mut self) -> Result<()> {
@@ -481,15 +578,10 @@ impl<T: Transport> Pcsc<T> {
         payload.push(2);
         payload.push(mode);
         payload.push(parameter);
-        let mut frame = vec![0xFF, MANAGE_SESSION_INS, 0x00, 0x02, payload.len() as u8];
-        frame.extend_from_slice(&payload);
-        frame.push(0x00);
-        let response = self
-            .ccid
-            .escape(&frame, self.receive_timeout, SLOT_BUSY_RETRY_COUNT)?;
-        Self::verify_status(&response)?;
-        let tlv = &response[..response.len() - 2];
-        Self::parse_status_block(tlv)?;
+        let response = self.manage_session_raw(&payload, 0x02, SLOT_BUSY_RETRY_COUNT)?;
+        Self::parse_switch_protocol_response(&response)?;
+        // Switching the protocol re-initialises the framing the reader applies.
+        self.modified_bit_framing = false;
         sleep(SWITCH_PROTOCOL_GUARD_TIME);
         Ok(())
     }
@@ -533,8 +625,21 @@ impl<T: Transport> Pcsc<T> {
             payload.push(value.len() as u8);
             payload.extend_from_slice(value);
         }
-        let mut frame = vec![0xFF, MANAGE_SESSION_INS, 0x00, 0x00, payload.len() as u8];
-        frame.extend_from_slice(&payload);
+        let response = self.manage_session_raw(&payload, 0x00, slot_busy_retries)?;
+        Self::parse_manage_session_response(&response)?;
+        Ok(response)
+    }
+
+    /// Sends a Manage Session APDU carrying `payload` on the given P2 channel and
+    /// returns the response data without the trailing status word.
+    fn manage_session_raw(
+        &mut self,
+        payload: &[u8],
+        channel: u8,
+        slot_busy_retries: usize,
+    ) -> Result<Vec<u8>> {
+        let mut frame = vec![0xFF, MANAGE_SESSION_INS, 0x00, channel, payload.len() as u8];
+        frame.extend_from_slice(payload);
         frame.push(0x00);
         let response = self
             .ccid
@@ -552,24 +657,41 @@ impl<T: Transport> Pcsc<T> {
     ) -> Result<TransparentExchangeResult> {
         let mut fields = Vec::new();
         if let Some(flags) = flags {
+            // The mask is sent even when it is zero: the reader keeps the flags of
+            // the previous command, so the defaults have to be restated.
             let mask = Self::build_flag_mask(flags);
-            if mask != 0 {
-                fields.push(TRANSMISSION_AND_RECEPTION_FLAG_TAG);
-                fields.push(2);
-                fields.push((mask >> 8) as u8);
-                fields.push((mask & 0xFF) as u8);
-            }
-            if let Some(bits) = flags.tx_valid_bits {
-                let value = bits.min(7);
+            fields.push(TRANSMISSION_AND_RECEPTION_FLAG_TAG);
+            fields.push(2);
+            fields.push((mask >> 8) as u8);
+            fields.push((mask & 0xFF) as u8);
+        }
+        let tx_valid_bits = flags.and_then(|flags| flags.tx_valid_bits);
+        match tx_valid_bits {
+            Some(bits) => {
+                if !(1..=8).contains(&bits) {
+                    return Err(DriverError::Other(format!(
+                        "invalid TX number of valid bits {bits}"
+                    )));
+                }
+                // A complete byte is encoded as zero valid bits.
+                let value = if bits < 8 { bits } else { 0 };
                 fields.push(TRANSMISSION_BIT_FRAMING_TAG);
                 fields.push(1);
                 fields.push(value);
             }
+            // Undo the short framing left behind by the previous command.
+            None if self.modified_bit_framing => {
+                fields.push(TRANSMISSION_BIT_FRAMING_TAG);
+                fields.push(1);
+                fields.push(0);
+            }
+            None => {}
         }
+        self.modified_bit_framing = tx_valid_bits.is_some();
         if timeout > Duration::from_millis(0) {
             let micros = (timeout.as_millis() * 1_000).min(u32::MAX as u128) as u32;
-            fields.push(0x5F);
-            fields.push(0x46);
+            fields.push(EXTENDED_TAG_PREFIX);
+            fields.push(FDT_TLV_TAG);
             fields.push(4);
             fields.extend_from_slice(&micros.to_le_bytes());
         }
@@ -632,57 +754,125 @@ impl<T: Transport> Pcsc<T> {
         )))
     }
 
-    fn parse_status_block(data: &[u8]) -> Result<()> {
+    /// Reads the single byte length that follows a TLV tag and returns the value.
+    ///
+    /// `idx` points at the length byte on entry and past the value on return.
+    fn take_tlv_value<'a>(data: &'a [u8], idx: &mut usize, context: &str) -> Result<&'a [u8]> {
+        let len_index = *idx;
+        let len = *data
+            .get(len_index)
+            .ok_or_else(|| DriverError::Other(format!("{context}: TLV length missing")))?
+            as usize;
+        // The value has to stay inside the response, matching the bounds check the
+        // reference library applies.
+        if len_index + len >= data.len() {
+            return Err(DriverError::Other(format!(
+                "{context}: TLV length out of range"
+            )));
+        }
+        let start = len_index + 1;
+        *idx = start + len;
+        Ok(&data[start..start + len])
+    }
+
+    /// Checks the `C0` status TLV every Manage Session response carries.
+    fn take_status_tlv(data: &[u8], idx: &mut usize, context: &str) -> Result<()> {
+        let value = Self::take_tlv_value(data, idx, context)?;
+        if value.len() != 3 {
+            return Err(DriverError::Other(format!(
+                "{context}: malformed status TLV"
+            )));
+        }
+        if value != [0x00, 0x90, 0x00] {
+            return Err(Self::status_error(value));
+        }
+        Ok(())
+    }
+
+    /// Skips a vendor specific TLV. Returns `false` when the sub tag is unknown,
+    /// in which case the rest of the response is not parsed any further.
+    fn skip_vendor_tlv(data: &[u8], idx: &mut usize, context: &str) -> Result<bool> {
+        let Some(&subtag) = data.get(*idx) else {
+            debug!("{context}: truncated vendor TLV");
+            return Ok(false);
+        };
+        *idx += 1;
+        if subtag != VENDOR_TAG_RESPONSE {
+            warn!("{context}: unexpected vendor tag {subtag:02X}");
+            return Ok(false);
+        }
+        let value = Self::take_tlv_value(data, idx, context)?;
+        if value.len() != 3 && value.len() != 6 {
+            return Err(DriverError::Other(format!(
+                "{context}: malformed vendor TLV"
+            )));
+        }
+        Ok(true)
+    }
+
+    fn parse_manage_session_response(data: &[u8]) -> Result<()> {
+        const CONTEXT: &str = "manageSession";
         let mut idx = 0;
         while idx + 1 < data.len() {
             let tag = data[idx];
             idx += 1;
             match tag {
-                0xC0 => {
-                    if idx >= data.len() {
-                        return Err(DriverError::Other("status TLV truncated".into()));
-                    }
-                    let len = data[idx] as usize;
-                    idx += 1;
-                    if idx + len > data.len() {
-                        return Err(DriverError::Other("status TLV length out of range".into()));
-                    }
-                    let value = &data[idx..idx + len];
-                    idx += len;
-                    if value != [0x00, 0x90, 0x00] {
-                        return Err(Self::status_error(value));
-                    }
-                }
-                VENDOR_SPECIFIC_TAG => {
-                    if idx >= data.len() {
-                        return Err(DriverError::Other("vendor TLV truncated".into()));
-                    }
-                    let subtag = data[idx];
-                    idx += 1;
-                    if subtag == VENDOR_TAG_RESPONSE {
-                        if idx >= data.len() {
-                            return Err(DriverError::Other("vendor TLV length missing".into()));
-                        }
-                        let len = data[idx] as usize;
-                        idx += 1;
-                        if idx + len > data.len() {
-                            return Err(DriverError::Other(
-                                "vendor TLV length out of range".into(),
-                            ));
-                        }
-                        idx += len;
-                    } else {
+                STATUS_TLV_TAG => Self::take_status_tlv(data, &mut idx, CONTEXT)?,
+                DEVICE_STATE_TLV_TAG => {
+                    let value = Self::take_tlv_value(data, &mut idx, CONTEXT)?;
+                    if value.len() != 3 {
                         return Err(DriverError::Other(format!(
-                            "unexpected vendor tag {:02X}",
-                            subtag
+                            "{CONTEXT}: malformed device state TLV"
                         )));
                     }
                 }
+                VENDOR_SPECIFIC_TAG => {
+                    if !Self::skip_vendor_tlv(data, &mut idx, CONTEXT)? {
+                        break;
+                    }
+                }
                 _ => {
-                    return Err(DriverError::Other(format!(
-                        "unexpected TLV tag {:02X}",
-                        tag
-                    )));
+                    warn!("{CONTEXT}: unexpected TAG {tag:02X}");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_switch_protocol_response(data: &[u8]) -> Result<()> {
+        const CONTEXT: &str = "switchProtocol";
+        let mut idx = 0;
+        while idx + 1 < data.len() {
+            let tag = data[idx];
+            idx += 1;
+            match tag {
+                STATUS_TLV_TAG => Self::take_status_tlv(data, &mut idx, CONTEXT)?,
+                SWITCH_PROTOCOL_METADATA_TAG => {
+                    let value = Self::take_tlv_value(data, &mut idx, CONTEXT)?;
+                    if value.len() != 1 && value.len() != 3 {
+                        return Err(DriverError::Other(format!(
+                            "{CONTEXT}: malformed protocol TLV"
+                        )));
+                    }
+                }
+                EXTENDED_TAG_PREFIX => {
+                    // The reader reports the card's ATR as a 5F51 TLV.
+                    let subtag = data.get(idx).copied();
+                    idx += 1;
+                    if subtag != Some(ATR_TLV_TAG) {
+                        return Err(DriverError::Other(format!("{CONTEXT}: ATR error")));
+                    }
+                    Self::take_tlv_value(data, &mut idx, CONTEXT)?;
+                }
+                VENDOR_SPECIFIC_TAG => {
+                    if !Self::skip_vendor_tlv(data, &mut idx, CONTEXT)? {
+                        break;
+                    }
+                }
+                _ => {
+                    warn!("{CONTEXT}: unexpected TAG {tag:02X}");
+                    break;
                 }
             }
         }
@@ -690,95 +880,54 @@ impl<T: Transport> Pcsc<T> {
     }
 
     fn parse_transparent_response(data: &[u8]) -> Result<TransparentExchangeResult> {
+        const CONTEXT: &str = "transparentExchange";
         let mut idx = 0;
         let mut result = TransparentExchangeResult::default();
-        while idx < data.len() {
+        while idx + 1 < data.len() {
             let tag = data[idx];
             idx += 1;
             match tag {
-                0xC0 => {
-                    if idx >= data.len() {
-                        return Err(DriverError::Other("status TLV truncated".into()));
-                    }
-                    let len = data[idx] as usize;
-                    idx += 1;
-                    if idx + len > data.len() {
-                        return Err(DriverError::Other("status TLV length out of range".into()));
-                    }
-                    let value = &data[idx..idx + len];
-                    idx += len;
-                    if value != [0x00, 0x90, 0x00] {
-                        return Err(Self::status_error(value));
-                    }
-                }
+                STATUS_TLV_TAG => Self::take_status_tlv(data, &mut idx, CONTEXT)?,
                 RESPONSE_BIT_FRAMING_TAG => {
-                    if idx >= data.len() {
-                        return Err(DriverError::Other("bit framing TLV truncated".into()));
-                    }
-                    let len = data[idx] as usize;
-                    idx += 1;
-                    if len != 1 || idx + len > data.len() {
-                        return Err(DriverError::Other(
-                            "bit framing TLV length out of range".into(),
-                        ));
-                    }
-                    let mut bits = data[idx];
-                    if bits == 0 {
-                        bits = 8;
-                    }
-                    result.valid_bits = Some(bits);
-                    idx += len;
+                    let value = Self::take_tlv_value(data, &mut idx, CONTEXT)?;
+                    let [bits] = value else {
+                        return Err(DriverError::Other(format!(
+                            "{CONTEXT}: Reception Bit Framing error"
+                        )));
+                    };
+                    // Zero valid bits stands for a complete byte.
+                    result.valid_bits = Some(if *bits == 0 { 8 } else { *bits });
                 }
                 RESPONSE_STATUS_TAG => {
-                    if idx >= data.len() {
-                        return Err(DriverError::Other("response status TLV truncated".into()));
-                    }
-                    let len = data[idx] as usize;
-                    idx += 1;
-                    if len != 2 || idx + len > data.len() {
-                        return Err(DriverError::Other(
-                            "response status TLV length out of range".into(),
-                        ));
-                    }
-                    result.rf_status = Some(data[idx]);
-                    idx += len;
+                    let value = Self::take_tlv_value(data, &mut idx, CONTEXT)?;
+                    let [status, _] = value else {
+                        return Err(DriverError::Other(format!(
+                            "{CONTEXT}: Response Status error"
+                        )));
+                    };
+                    result.rf_status = Some(*status);
                 }
                 RESPONSE_DATA_TAG => {
-                    if idx >= data.len() {
-                        return Err(DriverError::Other("data TLV truncated".into()));
-                    }
-                    let (len, consumed) = Self::parse_length(&data[idx..])?;
+                    let (len, consumed) = Self::parse_length(&data[idx..]).map_err(|_| {
+                        DriverError::Other(format!("{CONTEXT}: Response Data error"))
+                    })?;
                     idx += consumed;
                     if idx + len > data.len() {
-                        return Err(DriverError::Other("data TLV length out of range".into()));
+                        return Err(DriverError::Other(format!(
+                            "{CONTEXT}: Response Data out of range"
+                        )));
                     }
                     result.payload.extend_from_slice(&data[idx..idx + len]);
                     idx += len;
                 }
                 VENDOR_SPECIFIC_TAG => {
-                    if idx + 1 >= data.len() {
-                        return Err(DriverError::Other("vendor TLV truncated".into()));
-                    }
-                    let subtag = data[idx];
-                    idx += 1;
-                    let len = data[idx] as usize;
-                    idx += 1;
-                    idx += len;
-                    if idx > data.len() {
-                        return Err(DriverError::Other("vendor TLV length out of range".into()));
-                    }
-                    if subtag != VENDOR_TAG_RESPONSE {
-                        return Err(DriverError::Other(format!(
-                            "unexpected vendor tag {:02X}",
-                            subtag
-                        )));
+                    if !Self::skip_vendor_tlv(data, &mut idx, CONTEXT)? {
+                        break;
                     }
                 }
                 _ => {
-                    return Err(DriverError::Other(format!(
-                        "unexpected TLV tag {:02X}",
-                        tag
-                    )));
+                    warn!("{CONTEXT}: unexpected TAG {tag:02X}");
+                    break;
                 }
             }
         }
@@ -813,14 +962,29 @@ impl<T: Transport> Pcsc<T> {
         }
     }
 
+    /// Maps the status word of a `C0` TLV onto a driver error, keeping the
+    /// distinctions the reference library draws between a card that did not
+    /// answer, a card that answered with an unexpected status, and a reader that
+    /// is owned by another application.
     fn status_error(value: &[u8]) -> DriverError {
+        let sw1 = value.get(1).copied().unwrap_or_default();
+        let sw2 = value.get(2).copied().unwrap_or_default();
         let text = format!(
             "status {:02X}{:02X}{:02X}",
             value.first().copied().unwrap_or_default(),
-            value.get(1).copied().unwrap_or_default(),
-            value.get(2).copied().unwrap_or_default()
+            sw1,
+            sw2
         );
-        DriverError::Other(text)
+        match (sw1, sw2) {
+            (0x64, 0x00 | 0x01) => DriverError::Communication(CommunicationError::Timeout(
+                format!("{text} (no response packet received)"),
+            )),
+            (0x63, 0x01) => DriverError::Communication(CommunicationError::Protocol(format!(
+                "{text} (invalid status)"
+            ))),
+            (0x69, 0x8A) => DriverError::Other(format!("{text} (failed to get access authority)")),
+            _ => DriverError::Other(text),
+        }
     }
 }
 
@@ -864,10 +1028,22 @@ impl<T: Transport> CcidTransport<T> {
                 let header = self.read_exact(10, timeout - elapsed)?;
                 let (response, status) = CcidResponse::parse(&header, seq)?;
                 if status == CommandStatus::SequenceMismatch {
+                    seq_retry -= 1;
                     if seq_retry == 0 {
                         return Err(DriverError::Other("CCID sequence mismatch".into()));
                     }
-                    seq_retry -= 1;
+                    // The body of the stale response still has to be drained,
+                    // otherwise it would be mistaken for the next header.
+                    if response.length > 0 {
+                        let elapsed = start.elapsed();
+                        if elapsed >= timeout {
+                            return Err(DriverError::Io(Error::new(
+                                ErrorKind::TimedOut,
+                                "CCID escape timeout",
+                            )));
+                        }
+                        self.read_exact(response.length, timeout - elapsed)?;
+                    }
                     continue;
                 }
                 let elapsed = start.elapsed();
@@ -945,7 +1121,7 @@ impl<T: Transport> CcidTransport<T> {
         frame.push(0x6B);
         let len = payload.len() as u32;
         frame.extend_from_slice(&len.to_le_bytes());
-        frame.push(0);
+        frame.push(CCID_SLOT_NUMBER);
         frame.push(seq);
         frame.push(0);
         frame.push(0);
@@ -989,9 +1165,13 @@ impl CcidResponse {
             return Err(DriverError::Other("invalid CCID message".into()));
         }
         let length = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        if data[5] != CCID_SLOT_NUMBER {
+            return Err(DriverError::Other("invalid CCID slot number".into()));
+        }
         let seq = data[6];
         if seq != expected_seq {
-            return Ok((Self { length: 0 }, CommandStatus::SequenceMismatch));
+            // The length is reported so the caller can drain the stale response.
+            return Ok((Self { length }, CommandStatus::SequenceMismatch));
         }
         let status_byte = data[7];
         let error = data[8];
@@ -1145,6 +1325,150 @@ mod tests {
         }
     }
 
+    /// Wraps `data` in the CCID header a reader would answer an escape with.
+    fn ccid_escape_response(seq: u8, data: &[u8]) -> Vec<u8> {
+        let mut response = vec![0x83];
+        response.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        response.extend_from_slice(&[CCID_SLOT_NUMBER, seq, 0x00, 0x00, 0x00]);
+        response.extend_from_slice(data);
+        response
+    }
+
+    /// A transparent exchange answering with an empty payload and status 9000.
+    fn empty_transparent_response(seq: u8) -> Vec<u8> {
+        ccid_escape_response(seq, &[STATUS_TLV_TAG, 0x03, 0x00, 0x90, 0x00, 0x90, 0x00])
+    }
+
+    /// Returns the transmission bit framing value of a written escape frame.
+    fn written_bit_framing(frame: &[u8]) -> Option<u8> {
+        frame
+            .windows(3)
+            .find(|window| window[0] == TRANSMISSION_BIT_FRAMING_TAG && window[1] == 0x01)
+            .map(|window| window[2])
+    }
+
+    #[test]
+    fn transceive_resets_the_bit_framing_after_a_short_frame() {
+        let transport = DummyTransport::with_reads(vec![
+            Ok(empty_transparent_response(1)),
+            Ok(empty_transparent_response(2)),
+            Ok(empty_transparent_response(3)),
+        ]);
+        let mut pcsc = Pcsc::new(transport);
+        let mut flags = TransmissionFlags::iso14443_type_a();
+
+        flags.tx_valid_bits = Some(7);
+        pcsc.transceive(&[0x26], Duration::from_millis(10), &flags)
+            .expect("REQA should be sent");
+        flags.tx_valid_bits = None;
+        pcsc.transceive(&[0x93, 0x20], Duration::from_millis(10), &flags)
+            .expect("anticollision should be sent");
+        pcsc.transceive(&[0x93, 0x70], Duration::from_millis(10), &flags)
+            .expect("select should be sent");
+
+        let writes = &pcsc.ccid.transport.writes;
+        assert_eq!(writes.len(), 3);
+        assert_eq!(written_bit_framing(&writes[0]), Some(7));
+        // The short frame has to be undone explicitly ...
+        assert_eq!(written_bit_framing(&writes[1]), Some(0));
+        // ... but only once, since the reader now uses full bytes again.
+        assert_eq!(written_bit_framing(&writes[2]), None);
+    }
+
+    #[test]
+    fn transceive_always_states_the_transmission_flags() {
+        let transport = DummyTransport::with_reads(vec![Ok(empty_transparent_response(1))]);
+        let mut pcsc = Pcsc::new(transport);
+        let all_enabled = TransmissionFlags {
+            append_crc: true,
+            discard_crc: true,
+            insert_parity: true,
+            expect_parity: true,
+            append_protocol_prologue: true,
+            tx_valid_bits: None,
+        };
+        pcsc.transceive(&[0x00], Duration::from_millis(10), &all_enabled)
+            .expect("command should be sent");
+
+        // The reader keeps the previous flags, so an all zero mask is still sent.
+        let frame = &pcsc.ccid.transport.writes[0];
+        assert!(
+            frame
+                .windows(4)
+                .any(|window| window == [TRANSMISSION_AND_RECEPTION_FLAG_TAG, 0x02, 0x00, 0x00]),
+            "expected a zero flag mask in {frame:02X?}"
+        );
+    }
+
+    #[test]
+    fn transceive_rejects_an_out_of_range_valid_bit_count() {
+        let mut pcsc = Pcsc::new(DummyTransport::default());
+        let mut flags = TransmissionFlags::iso14443_type_a();
+        flags.tx_valid_bits = Some(0);
+        assert_driver_error_contains(
+            pcsc.transceive(&[0x26], Duration::from_millis(10), &flags),
+            "invalid TX number of valid bits",
+        );
+        flags.tx_valid_bits = Some(9);
+        assert_driver_error_contains(
+            pcsc.transceive(&[0x26], Duration::from_millis(10), &flags),
+            "invalid TX number of valid bits",
+        );
+    }
+
+    #[test]
+    fn set_comm_speed_nests_the_vendor_parameter() {
+        let transport = DummyTransport::with_reads(vec![Ok(ccid_escape_response(
+            1,
+            &[STATUS_TLV_TAG, 0x03, 0x00, 0x90, 0x00, 0x90, 0x00],
+        ))]);
+        let mut pcsc = Pcsc::new(transport);
+        pcsc.set_comm_speed(0x09).expect("speed should be set");
+        assert_eq!(
+            pcsc.ccid.transport.writes[0][10..],
+            [
+                0xFF,
+                MANAGE_SESSION_INS,
+                0x00,
+                0x00,
+                0x06,
+                VENDOR_SPECIFIC_TAG,
+                0x6E,
+                0x03,
+                0x05,
+                0x01,
+                0x09,
+                0x00
+            ]
+        );
+    }
+
+    #[test]
+    fn rffe_parameter_categories_and_selectors_are_validated() {
+        let mut pcsc = Pcsc::new(DummyTransport::default());
+        assert_driver_error_contains(
+            pcsc.read_rffe_parameter(RFFE_PARAM_EEPROM, 0x01, &[0x00]),
+            "EEPROM parameters use selector 0",
+        );
+        assert_driver_error_contains(
+            pcsc.read_rffe_parameter(RFFE_PARAM_PD_SC_DPC, 0x04, &[]),
+            "unsupported PD/SC/DPC parameter selector",
+        );
+        assert_driver_error_contains(
+            pcsc.read_rffe_parameter(0x04, 0x00, &[]),
+            "unsupported RFFE parameter category",
+        );
+        // Production data can be read but not written.
+        assert!(
+            Pcsc::<DummyTransport>::ensure_pd_sc_dpc_selector(RFFE_PARAM_PRODUCTION_DATA, false)
+                .is_ok()
+        );
+        assert_driver_error_contains(
+            pcsc.write_rffe_parameter(RFFE_PARAM_PD_SC_DPC, RFFE_PARAM_PRODUCTION_DATA, &[0x00]),
+            "unsupported PD/SC/DPC parameter selector",
+        );
+    }
+
     #[test]
     fn build_flag_mask_reflects_disabled_bits() {
         let all_true = TransmissionFlags {
@@ -1229,51 +1553,150 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_block_accepts_valid_tlvs() {
-        Pcsc::<DummyTransport>::parse_status_block(&[0xC0, 0x03, 0x00, 0x90, 0x00])
-            .expect("status TLV should parse");
-        Pcsc::<DummyTransport>::parse_status_block(&[
-            VENDOR_SPECIFIC_TAG,
-            VENDOR_TAG_RESPONSE,
-            0x02,
-            0xAA,
-            0xBB,
-            0xC0,
+    fn parse_manage_session_response_accepts_valid_tlvs() {
+        Pcsc::<DummyTransport>::parse_manage_session_response(&[
+            STATUS_TLV_TAG,
             0x03,
             0x00,
             0x90,
             0x00,
         ])
-        .expect("vendor + status TLV should parse");
+        .expect("status TLV should parse");
+        Pcsc::<DummyTransport>::parse_manage_session_response(&[
+            VENDOR_SPECIFIC_TAG,
+            VENDOR_TAG_RESPONSE,
+            0x03,
+            0xAA,
+            0xBB,
+            0xCC,
+            DEVICE_STATE_TLV_TAG,
+            0x03,
+            0x01,
+            0x02,
+            0x03,
+            STATUS_TLV_TAG,
+            0x03,
+            0x00,
+            0x90,
+            0x00,
+        ])
+        .expect("vendor + device state + status TLV should parse");
     }
 
     #[test]
-    fn parse_status_block_reports_invalid_inputs() {
+    fn parse_manage_session_response_reports_invalid_inputs() {
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_status_block(&[0xC0, 0x04, 0x00, 0x90, 0x00]),
-            "status TLV length out of range",
+            Pcsc::<DummyTransport>::parse_manage_session_response(&[
+                STATUS_TLV_TAG,
+                0x04,
+                0x00,
+                0x90,
+                0x00,
+            ]),
+            "TLV length out of range",
         );
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_status_block(&[0xC0, 0x03, 0x01, 0x90, 0x00]),
+            Pcsc::<DummyTransport>::parse_manage_session_response(&[
+                STATUS_TLV_TAG,
+                0x03,
+                0x01,
+                0x90,
+                0x00,
+            ]),
             "status 019000",
         );
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_status_block(&[
+            Pcsc::<DummyTransport>::parse_manage_session_response(&[
                 VENDOR_SPECIFIC_TAG,
                 VENDOR_TAG_RESPONSE,
                 0x02,
                 0xAA,
+                0xBB,
             ]),
-            "vendor TLV length out of range",
+            "malformed vendor TLV",
+        );
+    }
+
+    #[test]
+    fn parse_manage_session_response_stops_at_unknown_tags() {
+        // Both an unknown top level tag and an unknown vendor sub tag end the
+        // parse without failing the command, the way NFCPortLib does.
+        Pcsc::<DummyTransport>::parse_manage_session_response(&[0x01, 0x00, 0x02, 0x00])
+            .expect("unknown tag should stop the parse");
+        Pcsc::<DummyTransport>::parse_manage_session_response(&[VENDOR_SPECIFIC_TAG, 0x10, 0x00])
+            .expect("unknown vendor tag should stop the parse");
+    }
+
+    #[test]
+    fn parse_switch_protocol_response_accepts_metadata_and_atr() {
+        Pcsc::<DummyTransport>::parse_switch_protocol_response(&[
+            STATUS_TLV_TAG,
+            0x03,
+            0x00,
+            0x90,
+            0x00,
+            SWITCH_PROTOCOL_METADATA_TAG,
+            0x03,
+            0x01,
+            0x02,
+            0x03,
+            EXTENDED_TAG_PREFIX,
+            ATR_TLV_TAG,
+            0x02,
+            0x3B,
+            0x8F,
+        ])
+        .expect("switch protocol response should parse");
+        Pcsc::<DummyTransport>::parse_switch_protocol_response(&[
+            SWITCH_PROTOCOL_METADATA_TAG,
+            0x01,
+            0x04,
+        ])
+        .expect("single byte protocol TLV should parse");
+    }
+
+    #[test]
+    fn parse_switch_protocol_response_reports_invalid_inputs() {
+        assert_driver_error_contains(
+            Pcsc::<DummyTransport>::parse_switch_protocol_response(&[
+                SWITCH_PROTOCOL_METADATA_TAG,
+                0x02,
+                0x01,
+                0x02,
+            ]),
+            "malformed protocol TLV",
         );
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_status_block(&[VENDOR_SPECIFIC_TAG, 0x10]),
-            "unexpected vendor tag 10",
+            Pcsc::<DummyTransport>::parse_switch_protocol_response(&[
+                EXTENDED_TAG_PREFIX,
+                0x46,
+                0x01,
+                0x00,
+            ]),
+            "ATR error",
         );
-        assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_status_block(&[0x01, 0x00]),
-            "unexpected TLV tag 01",
-        );
+    }
+
+    #[test]
+    fn status_error_maps_reader_status_words() {
+        match Pcsc::<DummyTransport>::status_error(&[0x00, 0x64, 0x01]) {
+            DriverError::Communication(CommunicationError::Timeout(message)) => {
+                assert!(message.contains("006401"), "unexpected message: {message}");
+            }
+            other => panic!("expected a timeout error, got {other}"),
+        }
+        match Pcsc::<DummyTransport>::status_error(&[0x00, 0x63, 0x01]) {
+            DriverError::Communication(CommunicationError::Protocol(message)) => {
+                assert!(message.contains("006301"), "unexpected message: {message}");
+            }
+            other => panic!("expected a protocol error, got {other}"),
+        }
+        match Pcsc::<DummyTransport>::status_error(&[0x00, 0x69, 0x8A]) {
+            DriverError::Other(message) => {
+                assert!(message.contains("access authority"), "got {message}");
+            }
+            other => panic!("expected an access authority error, got {other}"),
+        }
     }
 
     #[test]
@@ -1298,8 +1721,10 @@ mod tests {
             0xCC,
             VENDOR_SPECIFIC_TAG,
             VENDOR_TAG_RESPONSE,
-            0x01,
+            0x03,
             0x99,
+            0x88,
+            0x77,
         ])
         .expect("transparent response should parse");
         assert_eq!(parsed.payload, vec![0xAA, 0xBB, 0xCC]);
@@ -1329,42 +1754,42 @@ mod tests {
     #[test]
     fn parse_transparent_response_reports_invalid_inputs() {
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_BIT_FRAMING_TAG]),
-            "bit framing TLV truncated",
-        );
-        assert_driver_error_contains(
             Pcsc::<DummyTransport>::parse_transparent_response(&[
                 RESPONSE_BIT_FRAMING_TAG,
                 0x02,
                 0x01,
                 0x02,
             ]),
-            "bit framing TLV length out of range",
+            "Reception Bit Framing error",
         );
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_STATUS_TAG, 0x01, 0x00]),
-            "response status TLV length out of range",
+            Pcsc::<DummyTransport>::parse_transparent_response(&[
+                RESPONSE_STATUS_TAG,
+                0x01,
+                0x00,
+                0x00,
+            ]),
+            "Response Status error",
         );
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_DATA_TAG]),
-            "data TLV truncated",
+            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_DATA_TAG, 0x03, 0xAA]),
+            "Response Data",
         );
         assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_DATA_TAG, 0x02, 0xAA]),
-            "data TLV length out of range",
+            Pcsc::<DummyTransport>::parse_transparent_response(&[RESPONSE_DATA_TAG, 0x85, 0x00]),
+            "Response Data error",
         );
-        assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[VENDOR_SPECIFIC_TAG]),
-            "vendor TLV truncated",
-        );
-        assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[VENDOR_SPECIFIC_TAG, 0x01, 0x00]),
-            "unexpected vendor tag 01",
-        );
-        assert_driver_error_contains(
-            Pcsc::<DummyTransport>::parse_transparent_response(&[0x01, 0x00]),
-            "unexpected TLV tag 01",
-        );
+    }
+
+    #[test]
+    fn parse_transparent_response_stops_at_unknown_tags() {
+        let parsed = Pcsc::<DummyTransport>::parse_transparent_response(&[0x01, 0x00, 0x02, 0x00])
+            .expect("unknown tag should stop the parse");
+        assert!(parsed.payload.is_empty());
+        let parsed =
+            Pcsc::<DummyTransport>::parse_transparent_response(&[VENDOR_SPECIFIC_TAG, 0x01, 0x00])
+                .expect("unknown vendor tag should stop the parse");
+        assert!(parsed.payload.is_empty());
     }
 
     #[test]
@@ -1399,8 +1824,15 @@ mod tests {
         header[6] = 0x11;
         let (seq, seq_status) =
             CcidResponse::parse(&header, 0x10).expect("seq mismatch should parse");
-        assert_eq!(seq.length, 0);
+        // The announced body length is kept so the stale response can be drained.
+        assert_eq!(seq.length, 4);
         assert_eq!(seq_status, CommandStatus::SequenceMismatch);
+
+        header[5] = 0x01;
+        assert_driver_error_contains(
+            CcidResponse::parse(&header, 0x10),
+            "invalid CCID slot number",
+        );
     }
 
     #[test]

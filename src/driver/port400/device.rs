@@ -20,8 +20,16 @@ use std::time::Duration;
 
 const PORT400_PIDS: &[u16] = &[0x0DC8, 0x0DC9, 0x0D8F];
 const MAX_THROUGH_PAYLOAD: usize = 290;
+/// Shortest frame waiting time the reader accepts for a through command; shorter
+/// requests are raised to it.
+const MIN_THROUGH_TIMEOUT_MS: u16 = 400;
+/// Frame waiting time used while polling for a Type-F card.
+const FELICA_DETECT_TIMEOUT_MS: u64 = 100;
 const TYPE_A_CMD_TIMEOUT_MS: u16 = 30;
 const TYPE_B_CMD_TIMEOUT_MS: u16 = 30;
+/// Offsets into the Get Firmware Version response that report whether the
+/// reader booted into firmware update mode.
+const FW_VER_UPDATE_STATE: std::ops::Range<usize> = 14..16;
 const PROPERTY_HARDWARE_VERSION: u8 = 1;
 const PROPERTY_MODEL_ID: u8 = 2;
 const PROPERTY_SERIAL_NO: u8 = 3;
@@ -31,12 +39,17 @@ const RFFE_PARAM_PD_SC_DPC: u8 = 0x02;
 const RFFE_PARAM_PROTOCOL_CONFIGURATION: u8 = 0x03;
 const DIAG_COMMUNICATION_LINE_SIZE_MAX: usize = 500;
 const DIAG_POLLING_COUNT_MIN: u8 = 1;
+/// Polling request codes (SENSF_REQ RC).
+const FELICA_POLLING_OPTION_NONE: u8 = 0;
+const FELICA_POLLING_OPTION_REQ_BAUDRATE: u8 = 2;
 
 pub struct Device<T: Transport> {
     pcsc: Pcsc<T>,
     meta: DeviceMetadata,
     iso_dep_session: Option<IsoDepSession>,
     iso_dep_protocol: Option<ThroughProtocol>,
+    /// Whether the reader is running the firmware update boot loader.
+    update_mode: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -189,18 +202,22 @@ impl<T: Transport> Device<T> {
         let product_name = transport.product_name().map(|s| s.to_string());
         let mut pcsc = Pcsc::new(transport);
         pcsc.set_receive_timeout(Duration::from_millis(1_500));
-        pcsc.start_transparent_session(false)?;
-        pcsc.switch_protocol_type_f(false)?;
-        let firmware = pcsc
-            .get_firmware_version()
-            .ok()
-            .and_then(|bytes| format_firmware(&bytes));
-        if let Ok(Some(rate)) = pcsc.card_baudrate() {
-            debug!("Port-400 target baud rate {} kbps", rate);
-        }
-        let chipset_name = firmware
+        // The firmware version is read before any session is opened: a reader
+        // running the boot loader answers this command but nothing else.
+        let version = pcsc.get_firmware_version()?;
+        let update_mode = !is_firmware_update_state_normal(&version);
+        let chipset_name = format_firmware(&version)
             .map(|fw| format!("NFC Port-400 {fw}"))
             .unwrap_or_else(|| "NFC Port-400".to_string());
+        if update_mode {
+            warn!("Port-400 is in firmware update mode; card operations are unavailable");
+        } else {
+            pcsc.start_transparent_session(false)?;
+            pcsc.switch_protocol_type_f(false)?;
+            if let Ok(Some(rate)) = pcsc.card_baudrate() {
+                debug!("Port-400 target baud rate {} kbps", rate);
+            }
+        }
         Ok(Self {
             pcsc,
             meta: DeviceMetadata {
@@ -210,16 +227,34 @@ impl<T: Transport> Device<T> {
             },
             iso_dep_session: None,
             iso_dep_protocol: None,
+            update_mode,
         })
     }
 
+    /// Whether the reader booted into firmware update mode, in which case only
+    /// [`Self::prepare_firmware_update`], [`Self::update_firmware`] and
+    /// [`Self::reset_device`] can be used.
+    pub fn is_update_mode(&self) -> bool {
+        self.update_mode
+    }
+
     pub fn close(&mut self) -> Result<()> {
-        let _ = self.pcsc.end_transparent_session();
+        if !self.update_mode {
+            let _ = self.pcsc.end_transparent_session();
+        }
         self.pcsc.close()
     }
 
     pub fn mute(&mut self) -> Result<()> {
         self.pcsc.turn_off_rf()
+    }
+
+    /// Bitrate in kbps the reader reports for the currently activated card, as
+    /// the reference library's `targetCardBaudRate` does.
+    ///
+    /// `None` means the reader answered with a speed code it does not define.
+    pub fn card_baudrate(&mut self) -> Result<Option<u32>> {
+        self.pcsc.card_baudrate()
     }
 
     pub fn get_max_send_data_size(&self, _target: &RemoteTarget) -> usize {
@@ -238,12 +273,28 @@ impl<T: Transport> Device<T> {
         time_slots: u8,
     ) -> Result<Type3TagPollingResult> {
         let bitrate = target.bitrate();
-        if bitrate != "212F" && bitrate != "424F" {
-            return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-                format!("unsupported bitrate {bitrate}"),
-            )));
-        }
-        debug!("polling for NFC-F using Port-400");
+        let auto_baud = match bitrate {
+            "212F" => false,
+            "424F" => true,
+            _ => {
+                return Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
+                    format!("unsupported bitrate {bitrate}"),
+                )));
+            }
+        };
+        // Every Type-F detection starts from the fixed-speed protocol, so that a
+        // previous detection left on auto baud rate does not carry over.
+        self.set_type_f_auto_baud(false)?;
+        // Raising the speed is a negotiation: the reader can only switch up if the
+        // card was asked for its supported bitrates, which is what request code
+        // REQ_BAUDRATE does. Polling with request code NONE and then asking for a
+        // higher speed leaves the link at 212 kbps.
+        let request_code = if auto_baud && request_code == FELICA_POLLING_OPTION_NONE {
+            FELICA_POLLING_OPTION_REQ_BAUDRATE
+        } else {
+            request_code
+        };
+        debug!("polling for NFC-F using Port-400 at {bitrate}");
         let command = FelicaStandardCommand::Polling {
             system_code,
             request_code,
@@ -252,13 +303,26 @@ impl<T: Transport> Device<T> {
         let frame = command
             .to_frame()
             .map_err(|err| DriverError::Other(format!("failed to build SENSF_REQ: {err}")))?;
-        let timeout_ms = ((0.003625_f32 + time_slots as f32 * 0.001208_f32) * 1000.0).ceil() as u64;
         let flags = TransmissionFlags::felica();
-        let response = self
-            .pcsc
-            .transceive(&frame, Duration::from_millis(timeout_ms), &flags)?;
+        let response = self.pcsc.transceive(
+            &frame,
+            Duration::from_millis(FELICA_DETECT_TIMEOUT_MS),
+            &flags,
+        )?;
         match FelicaStandardResponse::from_bytes(&response) {
             Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {
+                if auto_baud {
+                    self.set_type_f_auto_baud(true)?;
+                }
+                if let Ok(Some(rate)) = self.pcsc.card_baudrate() {
+                    debug!("Port-400 Type-F card baud rate {rate} kbps");
+                    if auto_baud && rate < 424 {
+                        warn!(
+                            "requested {bitrate} but the Type-F link settled at {rate} kbps; \
+                             treat the link as {rate} kbps rather than as {bitrate}"
+                        );
+                    }
+                }
                 Ok(Type3TagPollingResult {
                     idm: idm.to_vec(),
                     pmm: pmm.to_vec(),
@@ -280,7 +344,8 @@ impl<T: Transport> Device<T> {
         data: &[u8],
         timeout_ms: Option<u16>,
     ) -> Result<Vec<u8>> {
-        let timeout = duration_from_timeout(timeout_ms);
+        let timeout = through_timeout(timeout_ms);
+        ensure_through_command(data)?;
         let flags = TransmissionFlags::felica();
         debug!("Port-400 transceive TX (FeliCa): {}", encode(data));
         let response = self.pcsc.transceive(data, timeout, &flags)?;
@@ -295,7 +360,8 @@ impl<T: Transport> Device<T> {
         options: Option<ThroughOptions>,
     ) -> Result<Vec<u8>> {
         let opts = options.unwrap_or_default();
-        let timeout = duration_from_timeout(timeout_ms);
+        let timeout = through_timeout(timeout_ms);
+        ensure_through_command(data)?;
         let flags = opts.flags();
         debug!(
             "Port-400 through TX ({:?}): {}",
@@ -388,18 +454,14 @@ impl<T: Transport> Device<T> {
         self.pcsc.set_detection_target(selector)
     }
 
-    pub fn set_rf_speed(
-        &mut self,
-        reader_to_card: u8,
-        card_to_reader: u8,
-        option: u8,
-    ) -> Result<()> {
-        self.pcsc
-            .set_rf_speed(reader_to_card, card_to_reader, option)
+    /// Sets the RF speed used for `protocol` (0: Type A, 1: Type B, 2: Type F).
+    pub fn set_rf_speed(&mut self, protocol: u8, rw_to_card: u8, card_to_rw: u8) -> Result<()> {
+        self.pcsc.set_rf_speed(protocol, rw_to_card, card_to_rw)
     }
 
-    pub fn get_rf_speed(&mut self, selector: u8) -> Result<Vec<u8>> {
-        self.pcsc.get_rf_speed(selector)
+    /// Reads the RF speed configured for `protocol`.
+    pub fn get_rf_speed(&mut self, protocol: u8) -> Result<Vec<u8>> {
+        self.pcsc.get_rf_speed(protocol)
     }
 
     pub fn set_comm_speed(&mut self, speed: u8) -> Result<()> {
@@ -649,9 +711,14 @@ impl<T: Transport> Device<T> {
         self.pcsc.end_rffe_parameter_mode()
     }
 
-    pub fn read_rffe_parameter(&mut self, category: u8, selector: u8) -> Result<Vec<u8>> {
+    pub fn read_rffe_parameter(
+        &mut self,
+        category: u8,
+        selector: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>> {
         ensure_rffe_category(category)?;
-        self.pcsc.read_rffe_parameter(category, selector)
+        self.pcsc.read_rffe_parameter(category, selector, data)
     }
 
     pub fn write_rffe_parameter(
@@ -754,8 +821,17 @@ impl<T: Transport> Device<T> {
         Ok(())
     }
 
+    /// Switches the Type-F protocol between fixed speed and auto baud rate.
+    ///
+    /// The command is sent even when the reader is already in the wanted mode:
+    /// switching the protocol re-activates the card, and the reference library
+    /// relies on that fresh activation before every polling.
+    fn set_type_f_auto_baud(&mut self, auto_baud: bool) -> Result<()> {
+        self.pcsc.switch_protocol_type_f(auto_baud)
+    }
+
     fn refresh_card_baudrate(&mut self) -> Result<()> {
-        let _ = self.pcsc.card_baudrate()?;
+        let _ = self.card_baudrate()?;
         Ok(())
     }
 
@@ -1095,10 +1171,33 @@ impl<T: Transport> DeviceInfo for Device<T> {
 
 impl_reader_device!(Device);
 
-fn duration_from_timeout(timeout_ms: Option<u16>) -> Duration {
-    timeout_ms
-        .map(|ms| Duration::from_millis(ms as u64))
-        .unwrap_or_else(|| Duration::from_millis(0))
+/// Frame waiting time of a through command. Requests below the reader's minimum
+/// are raised to it, and a missing timeout falls back to that same minimum.
+fn through_timeout(timeout_ms: Option<u16>) -> Duration {
+    let ms = timeout_ms
+        .unwrap_or(MIN_THROUGH_TIMEOUT_MS)
+        .max(MIN_THROUGH_TIMEOUT_MS);
+    Duration::from_millis(ms as u64)
+}
+
+fn ensure_through_command(data: &[u8]) -> Result<()> {
+    if data.is_empty() {
+        return Err(DriverError::Other("through command is empty".into()));
+    }
+    if data.len() > MAX_THROUGH_PAYLOAD {
+        return Err(DriverError::Other(format!(
+            "through command is {} bytes, the maximum is {MAX_THROUGH_PAYLOAD}",
+            data.len()
+        )));
+    }
+    Ok(())
+}
+
+/// A reader running its regular firmware reports `FF FF` as the update state.
+fn is_firmware_update_state_normal(version: &[u8]) -> bool {
+    version
+        .get(FW_VER_UPDATE_STATE)
+        .is_some_and(|state| state == [0xFF, 0xFF])
 }
 
 fn data_rate_symbols(config: &IsoDepConfig) -> (u8, u8) {
@@ -1265,10 +1364,37 @@ mod tests {
     }
 
     #[test]
-    fn duration_from_timeout_and_data_rate_symbols_behave_as_expected() {
-        assert_eq!(duration_from_timeout(None), Duration::from_millis(0));
-        assert_eq!(duration_from_timeout(Some(123)), Duration::from_millis(123));
+    fn through_timeout_applies_the_reader_minimum() {
+        let minimum = Duration::from_millis(MIN_THROUGH_TIMEOUT_MS as u64);
+        assert_eq!(through_timeout(None), minimum);
+        assert_eq!(through_timeout(Some(123)), minimum);
+        assert_eq!(through_timeout(Some(1_000)), Duration::from_millis(1_000));
+    }
 
+    #[test]
+    fn ensure_through_command_checks_the_command_size() {
+        assert!(ensure_through_command(&[0x06, 0x00]).is_ok());
+        assert!(ensure_through_command(&vec![0x00; MAX_THROUGH_PAYLOAD]).is_ok());
+        assert_driver_error_contains(ensure_through_command(&[]), "through command is empty");
+        assert_driver_error_contains(
+            ensure_through_command(&vec![0x00; MAX_THROUGH_PAYLOAD + 1]),
+            "the maximum is",
+        );
+    }
+
+    #[test]
+    fn is_firmware_update_state_normal_requires_the_update_state_bytes() {
+        let mut version = vec![0x00; 18];
+        version[14] = 0xFF;
+        version[15] = 0xFF;
+        assert!(is_firmware_update_state_normal(&version));
+        version[15] = 0x00;
+        assert!(!is_firmware_update_state_normal(&version));
+        assert!(!is_firmware_update_state_normal(&[0xFF; 4]));
+    }
+
+    #[test]
+    fn data_rate_symbols_clamps_to_two_bits() {
         let mut config = IsoDepConfig::type_a_defaults();
         config.dr = IsoDepDataRate::Kbps848;
         config.ds = IsoDepDataRate::Kbps424;
