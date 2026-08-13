@@ -42,6 +42,22 @@ const DIAG_POLLING_COUNT_MIN: u8 = 1;
 /// Polling request codes (SENSF_REQ RC).
 const FELICA_POLLING_OPTION_NONE: u8 = 0;
 const FELICA_POLLING_OPTION_REQ_BAUDRATE: u8 = 2;
+/// Protocol slots the reader keeps a frontend RF speed for: Type A, Type B and
+/// Type F, in that order.
+const RF_SPEED_PROTOCOLS: usize = 3;
+/// Speeds the reference library pins each protocol to while it runs without
+/// automatic baud rate selection: 106 kbps for Type A and Type B, 212 kbps for
+/// Type F.
+const RF_SPEED_FIXED_VALUE: [[u8; 2]; RF_SPEED_PROTOCOLS] = [[1, 1], [1, 1], [2, 2]];
+/// Byte of the group number property that reports where the reader is fitted.
+const GROUP_NO_DEVICE_TYPE_OFFSET: usize = 4;
+/// Interval at which the reference library repeats its keep-alive command while
+/// a session is open; see [`Device::keep_alive`].
+pub const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(2);
+/// MIFARE Classic key length.
+pub const MIFARE_KEY_LEN: usize = 6;
+const MIFARE_KEY_TYPE_A: u8 = 0x60;
+const MIFARE_KEY_TYPE_B: u8 = 0x61;
 
 pub struct Device<T: Transport> {
     pcsc: Pcsc<T>,
@@ -50,6 +66,57 @@ pub struct Device<T: Transport> {
     iso_dep_protocol: Option<ThroughProtocol>,
     /// Whether the reader is running the firmware update boot loader.
     update_mode: bool,
+    /// Whether a transparent session is currently open.
+    session_open: bool,
+    /// Per protocol RF speed found in the reader before the driver changed it,
+    /// so [`Device::close`] can put it back.
+    original_rf_speed: [Option<[u8; 2]>; RF_SPEED_PROTOCOLS],
+    /// Where the reader reports it is fitted.
+    device_type: DeviceType,
+    /// Serial number string the reader reports.
+    serial_number: Option<String>,
+    /// Firmware version the reader reports.
+    firmware_version: Option<String>,
+}
+
+/// Where a reader is fitted, as its group number property reports it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DeviceType {
+    /// Built into a host machine.
+    Internal,
+    /// Attached externally.
+    External,
+    /// The reader did not report a value this driver knows.
+    #[default]
+    Unknown,
+}
+
+/// Which of a MIFARE Classic sector's two keys to authenticate with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MifareKeyType {
+    A,
+    B,
+}
+
+impl MifareKeyType {
+    fn code(self) -> u8 {
+        match self {
+            MifareKeyType::A => MIFARE_KEY_TYPE_A,
+            MifareKeyType::B => MIFARE_KEY_TYPE_B,
+        }
+    }
+}
+
+/// Parameters of a MIFARE Classic authentication.
+#[derive(Clone, Debug)]
+pub struct MifareAuthentication {
+    pub key: [u8; MIFARE_KEY_LEN],
+    pub key_type: MifareKeyType,
+    pub block_number: u8,
+    /// UID of the card to authenticate against. The Port-400 uses the card it
+    /// activated rather than this value, but the reference library requires
+    /// callers to supply it and other readers do transmit it.
+    pub uid: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -209,11 +276,23 @@ impl<T: Transport> Device<T> {
         let chipset_name = format_firmware(&version)
             .map(|fw| format!("NFC Port-400 {fw}"))
             .unwrap_or_else(|| "NFC Port-400".to_string());
+        let mut session_open = false;
+        let mut device_type = DeviceType::Unknown;
+        let mut serial_number = None;
         if update_mode {
             warn!("Port-400 is in firmware update mode; card operations are unavailable");
         } else {
             pcsc.start_transparent_session(false)?;
+            session_open = true;
             pcsc.switch_protocol_type_f(false)?;
+            device_type = pcsc
+                .get_property(PROPERTY_GROUP_NO)
+                .map(|group| device_type_from_group_number(&group))
+                .unwrap_or_default();
+            serial_number = pcsc
+                .get_property(PROPERTY_SERIAL_NO)
+                .ok()
+                .map(|bytes| bytes.iter().map(|&byte| byte as char).collect::<String>());
             if let Ok(Some(rate)) = pcsc.card_baudrate() {
                 debug!("Port-400 target baud rate {} kbps", rate);
             }
@@ -228,7 +307,27 @@ impl<T: Transport> Device<T> {
             iso_dep_session: None,
             iso_dep_protocol: None,
             update_mode,
+            session_open,
+            original_rf_speed: [None; RF_SPEED_PROTOCOLS],
+            device_type,
+            serial_number,
+            firmware_version: format_firmware(&version),
         })
+    }
+
+    /// Where the reader reports it is fitted, from its group number property.
+    pub fn device_type(&self) -> DeviceType {
+        self.device_type
+    }
+
+    /// Serial number string the reader reported when it was opened.
+    pub fn serial_number(&self) -> Option<&str> {
+        self.serial_number.as_deref()
+    }
+
+    /// Firmware version the reader reported when it was opened.
+    pub fn firmware_version(&self) -> Option<&str> {
+        self.firmware_version.as_deref()
     }
 
     /// Whether the reader booted into firmware update mode, in which case only
@@ -239,10 +338,50 @@ impl<T: Transport> Device<T> {
     }
 
     pub fn close(&mut self) -> Result<()> {
-        if !self.update_mode {
+        if self.session_open {
             let _ = self.pcsc.end_transparent_session();
+            self.session_open = false;
         }
+        // The frontend RF speeds outlive the session, so hand the reader back the
+        // way it was found.
+        self.reset_rf_speed();
         self.pcsc.close()
+    }
+
+    /// Turns the RF field on or off, as the reference library's `switchRF` does.
+    pub fn switch_rf(&mut self, on: bool) -> Result<()> {
+        if on {
+            self.pcsc.turn_on_rf()
+        } else {
+            self.pcsc.turn_off_rf()
+        }
+    }
+
+    /// Sends the command that keeps an idle transparent session from being
+    /// dropped by the reader.
+    ///
+    /// The reference library runs this on a timer every
+    /// [`KEEP_ALIVE_INTERVAL`] for as long as a session is open. This driver
+    /// owns no thread of its own, so an application that keeps a session idle
+    /// for that long has to call this itself.
+    pub fn keep_alive(&mut self) -> Result<()> {
+        self.pcsc.keep_alive()
+    }
+
+    /// Authenticates a MIFARE Classic block, as the reference library's
+    /// `typea_mifareAuth` does.
+    ///
+    /// The card has to be activated as ISO 14443-3 Type A first (see
+    /// [`Self::detect_type_a`] without an ISO-DEP configuration).
+    pub fn mifare_authenticate(&mut self, auth: &MifareAuthentication) -> Result<()> {
+        if auth.uid.is_empty() {
+            return Err(DriverError::Other(
+                "MIFARE authentication requires the card's UID".into(),
+            ));
+        }
+        self.pcsc.load_keys(&auth.key)?;
+        self.pcsc
+            .general_authenticate(auth.block_number, auth.key_type.code())
     }
 
     pub fn mute(&mut self) -> Result<()> {
@@ -455,13 +594,82 @@ impl<T: Transport> Device<T> {
     }
 
     /// Sets the RF speed used for `protocol` (0: Type A, 1: Type B, 2: Type F).
+    ///
+    /// The setting persists in the reader across sessions.
     pub fn set_rf_speed(&mut self, protocol: u8, rw_to_card: u8, card_to_rw: u8) -> Result<()> {
-        self.pcsc.set_rf_speed(protocol, rw_to_card, card_to_rw)
+        self.without_transparent_session(|pcsc| pcsc.set_rf_speed(protocol, rw_to_card, card_to_rw))
     }
 
-    /// Reads the RF speed configured for `protocol`.
+    /// Reads the RF speed configured for `protocol`, reader-to-card code first.
     pub fn get_rf_speed(&mut self, protocol: u8) -> Result<Vec<u8>> {
-        self.pcsc.get_rf_speed(protocol)
+        self.without_transparent_session(|pcsc| pcsc.get_rf_speed(protocol))
+    }
+
+    /// Pins every protocol's frontend to a fixed RF speed, as the reference
+    /// library does for a session that does not use automatic baud rate
+    /// selection.
+    ///
+    /// The speed in place beforehand is remembered and put back by
+    /// [`Self::reset_rf_speed`], which [`Self::close`] also calls. A protocol
+    /// whose speed cannot be read or written is left alone.
+    pub fn set_fixed_rf_speed(&mut self) {
+        for (protocol, fixed) in RF_SPEED_FIXED_VALUE.iter().enumerate() {
+            if let Err(err) = self.pin_rf_speed(protocol as u8, fixed[0], fixed[1]) {
+                warn!("get/set RFSpeed failed for protocol {protocol}: {err}");
+                self.original_rf_speed[protocol] = None;
+            }
+        }
+    }
+
+    /// Restores every RF speed [`Self::set_fixed_rf_speed`] changed.
+    pub fn reset_rf_speed(&mut self) {
+        for protocol in 0..RF_SPEED_PROTOCOLS {
+            let Some([rw_to_card, card_to_rw]) = self.original_rf_speed[protocol].take() else {
+                continue;
+            };
+            if let Err(err) = self.set_rf_speed(protocol as u8, rw_to_card, card_to_rw) {
+                warn!("setRFSpeed failed for protocol {protocol}: {err}");
+            }
+        }
+    }
+
+    /// Records the current RF speed of `protocol` and writes the new one.
+    fn pin_rf_speed(&mut self, protocol: u8, rw_to_card: u8, card_to_rw: u8) -> Result<()> {
+        let slot = protocol as usize;
+        if self.original_rf_speed[slot].is_none() {
+            let current = self.get_rf_speed(protocol)?;
+            let [before_rw, before_cr, ..] = current[..] else {
+                return Err(DriverError::Other(
+                    "reader reported a malformed RF speed".into(),
+                ));
+            };
+            self.original_rf_speed[slot] = Some([before_rw, before_cr]);
+        }
+        self.set_rf_speed(protocol, rw_to_card, card_to_rw)
+    }
+
+    /// Runs `f` with the transparent session suspended.
+    ///
+    /// The reader rejects the RF speed commands with `6985` (conditions of use
+    /// not satisfied) while a transparent session is open, which is why the
+    /// reference library reads and writes them in `open()` before the session is
+    /// started and in `close()` after it ended. Re-opening the session power
+    /// cycles the RF field, so a card that was activated has to be polled again.
+    fn without_transparent_session<R>(
+        &mut self,
+        f: impl FnOnce(&mut Pcsc<T>) -> Result<R>,
+    ) -> Result<R> {
+        if !self.session_open {
+            return f(&mut self.pcsc);
+        }
+        self.pcsc.end_transparent_session()?;
+        self.session_open = false;
+        let result = f(&mut self.pcsc);
+        self.pcsc.start_transparent_session(false)?;
+        self.session_open = true;
+        self.pcsc.switch_protocol_type_f(false)?;
+        self.end_iso_dep_session();
+        result
     }
 
     pub fn set_comm_speed(&mut self, speed: u8) -> Result<()> {
@@ -704,11 +912,15 @@ impl<T: Transport> Device<T> {
     }
 
     pub fn start_rffe_parameter_mode(&mut self) -> Result<()> {
-        self.pcsc.start_rffe_parameter_mode()
+        self.pcsc.start_rffe_parameter_mode()?;
+        self.session_open = false;
+        Ok(())
     }
 
     pub fn end_rffe_parameter_mode(&mut self) -> Result<()> {
-        self.pcsc.end_rffe_parameter_mode()
+        self.pcsc.end_rffe_parameter_mode()?;
+        self.session_open = true;
+        Ok(())
     }
 
     pub fn read_rffe_parameter(
@@ -763,16 +975,40 @@ impl<T: Transport> Device<T> {
         self.pcsc.get_property(PROPERTY_GROUP_NO)
     }
 
-    pub fn prepare_firmware_update(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        self.pcsc.prepare_firmware_update(data)
+    /// Prepares a firmware update, returning the status the reader reports.
+    pub fn prepare_firmware_update(&mut self, data: &[u8]) -> Result<u8> {
+        let response = self.pcsc.prepare_firmware_update(data)?;
+        response
+            .first()
+            .copied()
+            .ok_or_else(|| DriverError::Other("prepareUpdateFirmware returned no status".into()))
     }
 
-    pub fn update_firmware(&mut self, sequence: u16, data: &[u8]) -> Result<Vec<u8>> {
-        self.pcsc.update_firmware(sequence, data)
+    /// Sends one firmware packet, returning the packet number the reader expects
+    /// next.
+    pub fn update_firmware(&mut self, sequence: u16, data: &[u8]) -> Result<u16> {
+        let response = self.pcsc.update_firmware(sequence, data)?;
+        let [low, high, ..] = response[..] else {
+            return Err(DriverError::Other(
+                "updateFirmware returned no packet number".into(),
+            ));
+        };
+        Ok(u16::from_le_bytes([low, high]))
     }
 
+    /// Resets the reader after `delay_ms`.
+    ///
+    /// A reader in firmware update mode resets without answering, so the error
+    /// that follows is ignored there, as the reference library does.
     pub fn reset_device(&mut self, delay_ms: u16) -> Result<Vec<u8>> {
-        self.pcsc.reset_device(delay_ms)
+        match self.pcsc.reset_device(delay_ms) {
+            Ok(response) => Ok(response),
+            Err(err) if self.update_mode => {
+                debug!("resetDevice reported {err} while in update mode; ignoring it");
+                Ok(Vec::new())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn self_diagnose(&mut self, command: DiagnoseCommand) -> Result<DiagnoseResult> {
@@ -1193,6 +1429,18 @@ fn ensure_through_command(data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Reads where the reader is fitted out of its group number property.
+fn device_type_from_group_number(group: &[u8]) -> DeviceType {
+    match group.get(GROUP_NO_DEVICE_TYPE_OFFSET) {
+        Some(1) => DeviceType::Internal,
+        Some(2) => DeviceType::External,
+        _ => {
+            debug!("Port-400 did not report a device type");
+            DeviceType::Unknown
+        }
+    }
+}
+
 /// A reader running its regular firmware reports `FF FF` as the update state.
 fn is_firmware_update_state_normal(version: &[u8]) -> bool {
     version
@@ -1483,6 +1731,30 @@ mod tests {
         assert_eq!(DiagnosePollingProtocol::Iso14443TypeA.code(), 0x00);
         assert_eq!(DiagnosePollingProtocol::Iso14443TypeB.code(), 0x01);
         assert_eq!(DiagnosePollingProtocol::Iso15693.code(), 0x03);
+    }
+
+    #[test]
+    fn device_type_from_group_number_reads_the_fifth_byte() {
+        assert_eq!(
+            device_type_from_group_number(&[0, 0, 0, 0, 1]),
+            DeviceType::Internal
+        );
+        assert_eq!(
+            device_type_from_group_number(&[0, 0, 0, 0, 2]),
+            DeviceType::External
+        );
+        assert_eq!(
+            device_type_from_group_number(&[0, 0, 0, 0, 9]),
+            DeviceType::Unknown
+        );
+        // A property too short to hold the byte reports Unknown rather than panicking.
+        assert_eq!(device_type_from_group_number(&[0, 0]), DeviceType::Unknown);
+    }
+
+    #[test]
+    fn mifare_key_type_maps_to_the_reader_codes() {
+        assert_eq!(MifareKeyType::A.code(), 0x60);
+        assert_eq!(MifareKeyType::B.code(), 0x61);
     }
 
     #[test]

@@ -47,6 +47,8 @@ const DIAG_TEST_COMMUNICATION_LINE: u8 = 0x00;
 const DIAG_TEST_ROM: u8 = 0x01;
 const DIAG_TEST_RAM: u8 = 0x02;
 const DIAG_TEST_POLLING: u8 = 0x03;
+const LOAD_KEYS_INS: u8 = 0x82;
+const GENERAL_AUTHENTICATE_INS: u8 = 0x86;
 const READ_RFFE_PARAMETER_INS: u8 = 0x61;
 const WRITE_RFFE_PARAMETER_INS: u8 = 0x62;
 const RFFE_PARAM_EEPROM: u8 = 0x01;
@@ -57,6 +59,8 @@ const RFFE_PARAM_SYSTEM_CONFIGURATION: u8 = 0x02;
 const RFFE_PARAM_DPC: u8 = 0x03;
 
 const DEFAULT_RECEIVE_TIMEOUT: Duration = Duration::from_millis(1_500);
+/// Timeout of the keep-alive exchange, which only has to reach the reader.
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_millis(100);
 const SLOT_BUSY_WAIT_TIME: Duration = Duration::from_millis(50);
 const TIME_EXTENSION_WAIT: Duration = Duration::from_millis(20);
 const RF_ON_GUARD_TIME: Duration = Duration::from_millis(21);
@@ -137,6 +141,8 @@ pub struct Pcsc<T: Transport> {
     /// command that shortened the frame has to be followed by an explicit reset
     /// before the next full-byte command.
     modified_bit_framing: bool,
+    /// Reader key slot used for MIFARE Classic authentication.
+    mifare_auth_key_number: u8,
 }
 
 impl<T: Transport> Pcsc<T> {
@@ -145,6 +151,7 @@ impl<T: Transport> Pcsc<T> {
             ccid: CcidTransport::new(transport),
             receive_timeout: DEFAULT_RECEIVE_TIMEOUT,
             modified_bit_framing: false,
+            mifare_auth_key_number: 0,
         }
     }
 
@@ -536,6 +543,52 @@ impl<T: Transport> Pcsc<T> {
                 "unsupported PD/SC/DPC parameter selector {selector}"
             )))
         }
+    }
+
+    /// Loads a MIFARE Classic key into the reader's key slot.
+    pub fn load_keys(&mut self, key: &[u8]) -> Result<()> {
+        let mut frame = vec![0xFF, LOAD_KEYS_INS, 0x00, self.mifare_auth_key_number];
+        frame.push(key.len() as u8);
+        frame.extend_from_slice(key);
+        let response = self
+            .ccid
+            .escape(&frame, self.receive_timeout, SLOT_BUSY_RETRY_COUNT)?;
+        Self::verify_status(&response)
+            .map_err(|err| DriverError::Other(format!("loadKeys failed: {err}")))
+    }
+
+    /// Authenticates a MIFARE Classic block with the key loaded by
+    /// [`Self::load_keys`], where `key_type` is `60h` for key A or `61h` for key B.
+    pub fn general_authenticate(&mut self, block_number: u8, key_type: u8) -> Result<()> {
+        let frame = [
+            0xFF,
+            GENERAL_AUTHENTICATE_INS,
+            0x00,
+            0x00,
+            0x05,
+            0x00,
+            // The block number is sent as a big endian 16 bit address.
+            0x00,
+            block_number,
+            key_type,
+            self.mifare_auth_key_number,
+        ];
+        let response = self
+            .ccid
+            .escape(&frame, self.receive_timeout, SLOT_BUSY_RETRY_COUNT)?;
+        Self::verify_status(&response)
+            .map_err(|err| DriverError::Other(format!("generateAutheticate failed: {err}")))
+    }
+
+    /// Sends the command the reference library repeats while a transparent
+    /// session is open so the reader does not drop it for inactivity.
+    ///
+    /// The response is not inspected: reaching the reader is the whole point.
+    pub fn keep_alive(&mut self) -> Result<()> {
+        let frame = [0xFF, GET_FIRMWARE_VERSION_INS, 0x00, 0x00, 0x00];
+        self.ccid
+            .escape(&frame, KEEP_ALIVE_TIMEOUT, SLOT_BUSY_RETRY_COUNT)?;
+        Ok(())
     }
 
     pub fn turn_off_rf(&mut self) -> Result<()> {
