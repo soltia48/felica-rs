@@ -27,6 +27,16 @@ const STATUS_UNSUPPORTED_SF2: u8 = 0xC2;
 
 const SYSTEM_NODE_CODE: u16 = 0xFFFF;
 
+/// A node named by one entry of an Authentication1 service code list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServiceListNode {
+    /// A node that contributes a key to the derivation chain: an
+    /// authentication-required service, an area, or the system node.
+    Keyed([u8; 8]),
+    /// An authentication-free service, which names data but adds no key layer.
+    KeyFree,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SystemMode {
     Mode0,
@@ -283,11 +293,10 @@ impl EmulatedSystem {
         if node_code.raw() == 0xFFFF {
             return self.system_key_version;
         }
+        // 0xFFFF means "no such node". An authentication-free service is a node
+        // like any other and reports its own key version.
         if let Some(service) = self.find_service(node_code) {
-            if service.service_code().requires_key() {
-                return service.key_version();
-            }
-            return 0xFFFF;
+            return service.key_version();
         }
         if let Some(area) = self.find_area(node_code.raw()) {
             return area.key_version();
@@ -307,19 +316,45 @@ impl EmulatedSystem {
             .all(|&code| code == SYSTEM_NODE_CODE || self.find_area(code).is_some())
     }
 
-    fn service_list_well_formed(services: &[u16]) -> bool {
+    /// Resolves one service code list entry to the node it names.
+    ///
+    /// The list is not restricted to services: it may equally name an area or
+    /// the system node, and the card folds that node's key into the derivation
+    /// chain. Returns `None` for a code that names nothing in this system.
+    fn resolve_service_list_node(&self, raw: u16) -> Option<ServiceListNode> {
+        // The system node (0xFFFF) is authentication-required even though its
+        // low bit reads as key-free.
+        if raw == SYSTEM_NODE_CODE {
+            return Some(ServiceListNode::Keyed(self.system_key));
+        }
+        let code = ServiceCode::new(raw);
+        if let Some(service) = self.find_service(code) {
+            return Some(if code.requires_key() {
+                ServiceListNode::Keyed(*service.key())
+            } else {
+                ServiceListNode::KeyFree
+            });
+        }
+        // An area attribute (000000b / 000001b) is never a valid service
+        // attribute, so an area code can only ever resolve to an area. Both
+        // attributes carry a key, so an area named here is always key-bearing.
+        self.find_area(raw)
+            .map(|area| ServiceListNode::Keyed(*area.key()))
+    }
+
+    fn service_list_well_formed(&self, services: &[u16]) -> bool {
         let mut has_auth_required = false;
         let mut seen_auth_free = false;
         for &raw in services {
-            // The system code (0xFFFF) may appear in the service code list; it is an
-            // authentication-required node even though its low bit reads as key-free.
-            if raw == SYSTEM_NODE_CODE || ServiceCode::new(raw).requires_key() {
-                if seen_auth_free {
-                    return false;
+            match self.resolve_service_list_node(raw) {
+                Some(ServiceListNode::Keyed(_)) => {
+                    if seen_auth_free {
+                        return false;
+                    }
+                    has_auth_required = true;
                 }
-                has_auth_required = true;
-            } else {
-                seen_auth_free = true;
+                Some(ServiceListNode::KeyFree) => seen_auth_free = true,
+                None => return false,
             }
         }
         has_auth_required
@@ -332,7 +367,7 @@ impl EmulatedSystem {
         services: &[u16],
         challenge_1a: [u8; 8],
     ) -> Option<Vec<u8>> {
-        if !self.area_list_well_formed(areas) || !Self::service_list_well_formed(services) {
+        if !self.area_list_well_formed(areas) || !self.service_list_well_formed(services) {
             return None;
         }
 
@@ -352,17 +387,10 @@ impl EmulatedSystem {
             area_keys.push(*area.key());
         }
         for &raw in services {
-            let code = ServiceCode::new(raw);
-            if raw == SYSTEM_NODE_CODE {
-                service_keys.push(system_key);
-                service_codes.push(code);
-                continue;
+            if let ServiceListNode::Keyed(key) = self.resolve_service_list_node(raw)? {
+                service_keys.push(key);
             }
-            let service = self.find_service(code)?;
-            if code.requires_key() {
-                service_keys.push(*service.key());
-            }
-            service_codes.push(code);
+            service_codes.push(ServiceCode::new(raw));
         }
 
         let (group_key, user_key) =
@@ -1000,6 +1028,65 @@ mod tests {
         assert_eq!(
             actual_c1b, expected_c1b,
             "services=[0xFFFF] must derive USK = E_system(GSK)"
+        );
+    }
+
+    #[test]
+    fn authentication1_accepts_area_code_in_service_list() {
+        let mut system = auth1_test_system();
+        // An area is a node like any other: naming it in the service code list is
+        // accepted, and it counts as authentication-required.
+        assert!(
+            system
+                .handle_authentication1(IDM, &[0x1000], &[0x1000], CHALLENGE)
+                .is_some()
+        );
+        // The root area too.
+        assert!(
+            system
+                .handle_authentication1(IDM, &[0x1000], &[ROOT_AREA_CODE], CHALLENGE)
+                .is_some()
+        );
+        // An auth-free service before an area still violates the order rule.
+        assert!(
+            system
+                .handle_authentication1(IDM, &[0x1000], &[NO_AUTH_SERVICE, 0x1000], CHALLENGE)
+                .is_none()
+        );
+        // A code that names neither a service nor an area draws no response.
+        assert!(
+            system
+                .handle_authentication1(IDM, &[0x1000], &[0x2000], CHALLENGE)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn area_service_node_adds_an_area_key_layer() {
+        let mut system = auth1_test_system();
+        let challenge = [0x5Au8; 8];
+        let frame = system
+            .handle_authentication1(IDM, &[0x1000], &[0x1000], challenge)
+            .expect("Authentication1 with an area as service must be accepted");
+
+        // Response frame: [len][code][idm(8)][challenge_1b(8)][challenge_2a(8)].
+        let mut actual_c1b = [0u8; 8];
+        actual_c1b.copy_from_slice(&frame[10..18]);
+
+        // Naming the area in the service list adds an E_area layer on top of the
+        // group key the same area already produced, so USK = E_area(GSK).
+        let system_key = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let area_key = [0x20u8; 8];
+        let (group_key, user_key) =
+            generate_service_keys_des(&system_key, &[area_key], &[area_key]);
+        assert_ne!(group_key, user_key, "the area must add a user-key layer");
+
+        let context = AuthenticationContext::new(&IDM, &group_key, &user_key);
+        let random_1 = context.decrypt_challenge1a(&challenge);
+        let expected_c1b = context.encrypt_challenge1b(&random_1);
+        assert_eq!(
+            actual_c1b, expected_c1b,
+            "services=[area] must derive USK = E_area(GSK)"
         );
     }
 

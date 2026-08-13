@@ -386,13 +386,12 @@ pub struct EmulatedService {
 }
 
 impl EmulatedService {
+    /// A service starts with key version `0x0000`, whether or not its attribute
+    /// requires authentication. `0xFFFF` is the "no such node" marker of Request
+    /// Service, not a marker for an authentication-free service: real cards
+    /// report a genuine key version for those too (verified against two cards).
     pub fn new(service_code: ServiceCode, block_count: usize) -> Self {
-        let key_version = if service_code.requires_key() {
-            0x0000
-        } else {
-            0xFFFF
-        };
-        Self::with_key_version(service_code, key_version, block_count)
+        Self::with_key_version(service_code, 0x0000, block_count)
     }
 
     pub fn with_key_version(
@@ -552,13 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn emulated_service_default_key_version_depends_on_service_attributes() {
+    fn emulated_service_default_key_version_is_independent_of_the_attribute() {
         let with_key = EmulatedService::new(ServiceCode::new((0x10 << 6) | 0b001010), 2);
         assert_eq!(with_key.key_version(), 0x0000);
         assert_eq!(with_key.blocks().len(), 2);
 
+        // 0xFFFF is reserved for "no such node", so an authentication-free
+        // service defaults to a real key version like any other.
         let without_key = EmulatedService::new(ServiceCode::new((0x10 << 6) | 0b001011), 1);
-        assert_eq!(without_key.key_version(), 0xFFFF);
+        assert_eq!(without_key.key_version(), 0x0000);
         assert_eq!(without_key.blocks().len(), 1);
     }
 
