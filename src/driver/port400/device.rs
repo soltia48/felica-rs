@@ -45,6 +45,11 @@ const FELICA_POLLING_OPTION_REQ_BAUDRATE: u8 = 2;
 /// Protocol slots the reader keeps a frontend RF speed for: Type A, Type B and
 /// Type F, in that order.
 const RF_SPEED_PROTOCOLS: usize = 3;
+/// Protocol slot of the Type-F frontend.
+const RF_SPEED_PROTOCOL_TYPE_F: u8 = 2;
+/// RF speed code for 424 kbps, in the same encoding Get Data reports for the
+/// activated card.
+const RF_SPEED_CODE_424K: u8 = 3;
 /// Speeds the reference library pins each protocol to while it runs without
 /// automatic baud rate selection: 106 kbps for Type A and Type B, 212 kbps for
 /// Type F.
@@ -71,6 +76,9 @@ pub struct Device<T: Transport> {
     /// Per protocol RF speed found in the reader before the driver changed it,
     /// so [`Device::close`] can put it back.
     original_rf_speed: [Option<[u8; 2]>; RF_SPEED_PROTOCOLS],
+    /// Speed code the Type-F frontend is known to be set to in both directions,
+    /// so a detection does not rewrite a setting that already fits.
+    type_f_rf_speed: Option<u8>,
     /// Where the reader reports it is fitted.
     device_type: DeviceType,
     /// Serial number string the reader reports.
@@ -309,6 +317,7 @@ impl<T: Transport> Device<T> {
             update_mode,
             session_open,
             original_rf_speed: [None; RF_SPEED_PROTOCOLS],
+            type_f_rf_speed: None,
             device_type,
             serial_number,
             firmware_version: format_firmware(&version),
@@ -421,6 +430,12 @@ impl<T: Transport> Device<T> {
                 )));
             }
         };
+        // The frontend has to be allowed to run at 424 kbps before the auto baud
+        // rate switch can negotiate it. Changing it cycles the session, so it has
+        // to happen before the card is activated.
+        if auto_baud {
+            self.ensure_type_f_rf_speed(RF_SPEED_CODE_424K)?;
+        }
         // Every Type-F detection starts from the fixed-speed protocol, so that a
         // previous detection left on auto baud rate does not carry over.
         self.set_type_f_auto_baud(false)?;
@@ -597,7 +612,13 @@ impl<T: Transport> Device<T> {
     ///
     /// The setting persists in the reader across sessions.
     pub fn set_rf_speed(&mut self, protocol: u8, rw_to_card: u8, card_to_rw: u8) -> Result<()> {
-        self.without_transparent_session(|pcsc| pcsc.set_rf_speed(protocol, rw_to_card, card_to_rw))
+        self.without_transparent_session(|pcsc| {
+            pcsc.set_rf_speed(protocol, rw_to_card, card_to_rw)
+        })?;
+        if protocol == RF_SPEED_PROTOCOL_TYPE_F {
+            self.type_f_rf_speed = (rw_to_card == card_to_rw).then_some(rw_to_card);
+        }
+        Ok(())
     }
 
     /// Reads the RF speed configured for `protocol`, reader-to-card code first.
@@ -1055,6 +1076,41 @@ impl<T: Transport> Device<T> {
         self.pcsc.switch_protocol_iso14443_3a()?;
         self.end_iso_dep_session();
         Ok(())
+    }
+
+    /// Lets the Type-F frontend run at `speed_code` in both directions.
+    ///
+    /// The reader negotiates no faster than the RF speed its frontend is set to,
+    /// so a frontend sitting at its 212 kbps default keeps the auto baud rate
+    /// switch at 212 kbps however much the card advertises. The setting outlives
+    /// the session, so the value found beforehand is remembered and put back by
+    /// [`Self::close`], the same save and restore the reference library performs
+    /// around a fixed-speed session.
+    fn ensure_type_f_rf_speed(&mut self, speed_code: u8) -> Result<()> {
+        if self.type_f_rf_speed == Some(speed_code) {
+            return Ok(());
+        }
+        let slot = RF_SPEED_PROTOCOL_TYPE_F as usize;
+        if self.original_rf_speed[slot].is_none() {
+            let current = self.get_rf_speed(RF_SPEED_PROTOCOL_TYPE_F)?;
+            let [rw_to_card, card_to_rw, ..] = current[..] else {
+                return Err(DriverError::Other(
+                    "reader reported a malformed Type-F RF speed".into(),
+                ));
+            };
+            // A frontend that already allows the speed needs no write, and leaves
+            // close() nothing to restore.
+            if rw_to_card == speed_code && card_to_rw == speed_code {
+                self.type_f_rf_speed = Some(speed_code);
+                return Ok(());
+            }
+            debug!(
+                "raising the Type-F RF speed from {rw_to_card},{card_to_rw} to {speed_code} \
+                 so the link can negotiate 424 kbps"
+            );
+            self.original_rf_speed[slot] = Some([rw_to_card, card_to_rw]);
+        }
+        self.set_rf_speed(RF_SPEED_PROTOCOL_TYPE_F, speed_code, speed_code)
     }
 
     /// Switches the Type-F protocol between fixed speed and auto baud rate.
