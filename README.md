@@ -4,7 +4,14 @@
 [![crates.io](https://img.shields.io/crates/v/felica.svg)](https://crates.io/crates/felica)
 [![docs.rs](https://docs.rs/felica/badge.svg)](https://docs.rs/felica)
 
-A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380), Port-400 (RC-S300), RC-S320, and RC-S330/RC-S360/RC-S370 PaSoRi readers.
+An implementation of the FeliCa protocol in Rust: mutual authentication and
+encrypted block access on Standard cards, a card emulator, and drivers for
+Sony's PaSoRi readers.
+
+The reader drivers sit behind the default `usb` feature. Turned off, the crate
+has no USB dependency at all and leaves the protocol, the emulator and a TCP
+driver — which is what a server driving authentication over a relay needs
+rather than a reader of its own.
 
 ## Features
 
