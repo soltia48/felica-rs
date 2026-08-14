@@ -97,6 +97,6 @@ jobs:
     steps:
       # The crate has no binary targets — the examples all need a reader
       # attached — so there is nothing to attach here beyond the notes.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
