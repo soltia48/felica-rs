@@ -193,49 +193,8 @@ impl_reader_device!(Device);
 mod tests {
     use super::*;
     use crate::driver::rcs320::frame::{ACK_BYTES, Frame};
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
+    use crate::driver::testing::{DummyTransport, WriteLog};
     use std::io;
-    use std::rc::Rc;
-
-    struct DummyTransport {
-        reads: VecDeque<io::Result<Vec<u8>>>,
-        writes: Rc<RefCell<Vec<Vec<u8>>>>,
-    }
-
-    impl DummyTransport {
-        fn new(reads: Vec<io::Result<Vec<u8>>>, writes: Rc<RefCell<Vec<Vec<u8>>>>) -> Self {
-            Self {
-                reads: reads.into(),
-                writes,
-            }
-        }
-    }
-
-    impl Transport for DummyTransport {
-        fn write(&mut self, data: &[u8]) -> io::Result<()> {
-            self.writes.borrow_mut().push(data.to_vec());
-            Ok(())
-        }
-
-        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
-            self.reads
-                .pop_front()
-                .unwrap_or_else(|| Err(io::Error::new(io::ErrorKind::TimedOut, "no more reads")))
-        }
-
-        fn close(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn manufacturer_name(&self) -> Option<&str> {
-            Some("Sony")
-        }
-
-        fn product_name(&self) -> Option<&str> {
-            Some("RC-S320")
-        }
-    }
 
     fn init_read_sequence(extra_reads: Vec<io::Result<Vec<u8>>>) -> Vec<io::Result<Vec<u8>>> {
         let mut reads = Vec::new();
@@ -254,11 +213,11 @@ mod tests {
         reads
     }
 
-    fn build_device(
-        extra_reads: Vec<io::Result<Vec<u8>>>,
-    ) -> (Device<DummyTransport>, Rc<RefCell<Vec<Vec<u8>>>>) {
-        let writes = Rc::new(RefCell::new(Vec::new()));
-        let transport = DummyTransport::new(init_read_sequence(extra_reads), Rc::clone(&writes));
+    fn build_device(extra_reads: Vec<io::Result<Vec<u8>>>) -> (Device<DummyTransport>, WriteLog) {
+        let transport = DummyTransport::with_reads(init_read_sequence(extra_reads))
+            .with_metadata("Sony", "RC-S320")
+            .timing_out_when_exhausted();
+        let writes = transport.writes();
         let chipset = Chipset::new(transport).expect("chipset should initialize");
         (
             Device::new(chipset).expect("device should be constructed"),
@@ -299,14 +258,14 @@ mod tests {
     #[test]
     fn transceive_rejects_empty_payload_before_touching_chipset_exchange() {
         let (mut device, writes) = build_device(Vec::new());
-        let writes_before = writes.borrow().len();
+        let writes_before = writes.len();
         let target = target();
         match device.transceive(&target, &[], None) {
             Err(DriverError::Other(message)) => assert_eq!(message, "empty transceive data"),
             Err(other) => panic!("expected DriverError::Other, got {other}"),
             Ok(data) => panic!("expected error, got {data:?}"),
         }
-        assert_eq!(writes.borrow().len(), writes_before);
+        assert_eq!(writes.len(), writes_before);
     }
 
     #[test]
@@ -323,11 +282,7 @@ mod tests {
             .expect("transceive should succeed");
         assert_eq!(result, vec![0x04, 0xAA, 0xBB, 0xCC]);
 
-        let writes = writes.borrow();
-        let last_write = writes
-            .last()
-            .expect("at least one write should be recorded")
-            .clone();
+        let last_write = writes.last();
         let command_payload = Frame::parse(&last_write)
             .and_then(|frame| frame.into_payload())
             .expect("written frame should contain payload");
@@ -358,11 +313,7 @@ mod tests {
         );
         assert_eq!(result.optional, vec![0xA1, 0xB2]);
 
-        let writes = writes.borrow();
-        let last_write = writes
-            .last()
-            .expect("polling command should be written")
-            .clone();
+        let last_write = writes.last();
         let command_payload = Frame::parse(&last_write)
             .and_then(|frame| frame.into_payload())
             .expect("written frame should contain payload");

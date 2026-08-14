@@ -1,7 +1,7 @@
 use crate::driver::errors::{
     ChipsetError, CommunicationFault, DriverError, Result, ensure_status_ok,
 };
-use crate::driver::io::{recover_after_error, remaining_until, take_from_buffer, timeout_error};
+use crate::driver::io;
 use crate::driver::port100::frame::{self, Frame, FrameType};
 use crate::transport::Transport;
 use log::debug;
@@ -504,20 +504,7 @@ impl<T: Transport> Chipset<T> {
     }
 
     fn read_exact(&mut self, len: usize, deadline: Instant) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(len);
-        while out.len() < len {
-            take_from_buffer(&mut self.read_buffer, &mut out, len);
-            if out.len() == len {
-                break;
-            }
-            let remaining =
-                remaining_until(deadline).ok_or_else(|| DriverError::Io(timeout_error()))?;
-            let chunk = self.transport.read(remaining)?;
-            if !chunk.is_empty() {
-                self.read_buffer.extend(chunk);
-            }
-        }
-        Ok(out)
+        io::read_exact(&mut self.transport, &mut self.read_buffer, len, deadline)
     }
 
     fn read_command_response(&mut self, code: u8) -> Result<Vec<u8>> {
@@ -559,18 +546,14 @@ impl<T: Transport> Chipset<T> {
         drain_buffer: bool,
         action: impl FnOnce(&mut Self) -> Result<R>,
     ) -> Result<R> {
-        match action(self) {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                recover_after_error(
-                    &mut self.transport,
-                    &mut self.read_buffer,
-                    &Self::ACK,
-                    drain_buffer,
-                );
-                Err(err)
-            }
-        }
+        let result = action(self);
+        io::recover_on_error(
+            result,
+            &mut self.transport,
+            &mut self.read_buffer,
+            &Self::ACK,
+            drain_buffer,
+        )
     }
 }
 
@@ -650,42 +633,8 @@ fn target_param_index(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::Transport;
+    use crate::driver::testing::DummyTransport;
     use std::io::{self, ErrorKind};
-
-    #[derive(Default)]
-    struct DummyTransport {
-        reads: VecDeque<io::Result<Vec<u8>>>,
-        writes: Vec<Vec<u8>>,
-        closed: bool,
-    }
-
-    impl DummyTransport {
-        fn with_reads(reads: Vec<io::Result<Vec<u8>>>) -> Self {
-            Self {
-                reads: reads.into_iter().collect(),
-                ..Self::default()
-            }
-        }
-    }
-
-    impl Transport for DummyTransport {
-        fn write(&mut self, data: &[u8]) -> io::Result<()> {
-            self.writes.push(data.to_vec());
-            Ok(())
-        }
-
-        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
-            self.reads
-                .pop_front()
-                .unwrap_or_else(|| Err(io::Error::new(ErrorKind::TimedOut, "no queued read")))
-        }
-
-        fn close(&mut self) -> io::Result<()> {
-            self.closed = true;
-            Ok(())
-        }
-    }
 
     fn new_chipset(transport: DummyTransport) -> Chipset<DummyTransport> {
         Chipset {
@@ -707,7 +656,8 @@ mod tests {
     fn written_payloads(chipset: &Chipset<DummyTransport>) -> Vec<Vec<u8>> {
         chipset
             .transport
-            .writes
+            .writes()
+            .frames()
             .iter()
             .filter_map(|bytes| Frame::parse(bytes).and_then(Frame::into_payload))
             .collect()
@@ -767,7 +717,7 @@ mod tests {
             .set_initiator_rf("106A", None)
             .expect("repeated RF setup should be skipped");
         assert_eq!(chipset.initiator_bitrate(), Some(("106A", "106A")));
-        assert_eq!(chipset.transport.writes.len(), 2);
+        assert_eq!(chipset.transport.writes().len(), 2);
 
         // A different bitrate is written, and invalidates the protocol cache so
         // the settings that go with it are established again.
@@ -777,7 +727,7 @@ mod tests {
         chipset
             .configure_initiator(&[("add_crc", 1)])
             .expect("protocol write should be repeated after the RF change");
-        assert_eq!(chipset.transport.writes.len(), 4);
+        assert_eq!(chipset.transport.writes().len(), 4);
     }
 
     #[test]

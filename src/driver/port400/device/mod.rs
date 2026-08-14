@@ -1,12 +1,11 @@
+mod activation;
+mod iso_dep;
+
 use crate::clf::errors::UnsupportedTargetError;
 use crate::clf::targets::RemoteTarget;
 use crate::driver::common::{self, DeviceInfo, DeviceMetadata, impl_reader_device};
 use crate::driver::errors::{DriverError, Result};
-use crate::driver::port400::iso14443::{
-    ISO_DEP_S_DESELECT, ISO_DEP_S_IFS, ISO_DEP_S_WTX, IsoDepBlockType, IsoDepConfig, IsoDepIFrame,
-    IsoDepSession, IsoDepState, build_iso_dep_r_block, build_iso_dep_s_block, extend_timeout,
-    next_iso_dep_i_frame, parse_iso_dep_response, wtx_multiplier,
-};
+use crate::driver::port400::iso14443::{IsoDepConfig, IsoDepSession};
 use crate::driver::port400::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
 use crate::felica_standard::{
     FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult, polling_timeout_ms,
@@ -15,7 +14,6 @@ use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
 use hex::encode;
 use log::{debug, warn};
-use std::thread::sleep;
 use std::time::Duration;
 
 const PORT400_PIDS: &[u16] = &[0x0DC8, 0x0DC9, 0x0D8F];
@@ -540,54 +538,6 @@ impl<T: Transport> Device<T> {
         Ok(info.pupi.to_vec())
     }
 
-    pub fn detect_type_a_low_level(&mut self) -> Result<TypeACardInfo> {
-        self.prepare_type_a_polling()?;
-        let atqa_bytes = self.send_type_a_frame(&[0x26], Some(7), false, false)?;
-        if atqa_bytes.len() != 2 {
-            return Err(DriverError::Other("invalid ATQA length".into()));
-        }
-        let atqa = [atqa_bytes[0], atqa_bytes[1]];
-        let (uid, final_sak) = self.perform_type_a_anticollision()?;
-        let mut config = IsoDepConfig::type_a_defaults();
-        let rats_param = ((config.fsdi & 0x0F) << 4) | (config.cid & 0x0F);
-        let rats_cmd = [0xE0, rats_param];
-        let ats = self.send_type_a_frame(&rats_cmd, None, true, true)?;
-        apply_ats_config(&mut config, &ats);
-        sleep(config.sfgt_duration());
-        self.send_type_a_pps(&config)?;
-        Ok(TypeACardInfo {
-            atqa,
-            sak: final_sak,
-            uid,
-            ats,
-            iso_dep_config: config,
-        })
-    }
-
-    pub fn detect_type_b_low_level(
-        &mut self,
-        options: Option<TypeBDetectOptions>,
-    ) -> Result<TypeBCardInfo> {
-        let opts = options.unwrap_or_default();
-        let mut config = opts.iso_dep.unwrap_or_else(IsoDepConfig::type_b_defaults);
-        let info = self.prepare_type_b_link(&mut config, &opts)?;
-        let (dri, dsi) = data_rate_symbols(&config);
-        let attrib_cmd = build_type_b_attrib_command(&info, &config, dri, dsi);
-        let attrib_response =
-            self.send_type_b_frame(&attrib_cmd, true, true, TYPE_B_CMD_TIMEOUT_MS)?;
-        if attrib_response.is_empty() {
-            return Err(DriverError::Other("invalid ATTRIB response".into()));
-        }
-        self.apply_comm_speed(dri, dsi)?;
-        sleep(config.sfgt_duration());
-        Ok(TypeBCardInfo {
-            pupi: info.pupi,
-            application_data: info.application_data,
-            protocol_info: info.protocol_info,
-            attrib_response,
-        })
-    }
-
     pub fn detect_type_v(&mut self) -> Result<Vec<u8>> {
         self.pcsc.switch_protocol_iso15693()?;
         self.pcsc.get_uid()
@@ -727,198 +677,6 @@ impl<T: Transport> Device<T> {
         self.iso_dep_session
             .take()
             .ok_or_else(|| DriverError::Other("ISO-DEP session is not active".into()))
-    }
-
-    fn ensure_iso_dep_link_parameters(&mut self, session: &mut IsoDepSession) -> Result<()> {
-        if !session.needs_ifs_request() {
-            return Ok(());
-        }
-        let protocol = self.iso_dep_protocol_or_default();
-        let desired_ifs = session.config().max_inf_len_pcd().min(0xFE) as u8;
-        let response = self.send_s_block_ifs(session.state(), desired_ifs, protocol)?;
-        let parsed = parse_iso_dep_response(session.state(), &response)?;
-        match parsed.block_type {
-            IsoDepBlockType::R { ack } if ack => {
-                session.mark_ifs_negotiated();
-                Ok(())
-            }
-            _ => Err(DriverError::Other(
-                "unexpected response to S(IFS) request".into(),
-            )),
-        }
-    }
-
-    pub fn iso_dep_exchange(&mut self, payload: &[u8], chaining: bool) -> Result<Vec<u8>> {
-        let mut session = self.take_iso_dep_session()?;
-        self.ensure_iso_dep_link_parameters(&mut session)?;
-        let protocol = self.iso_dep_protocol_or_default();
-        let mut state = IsoDepExchangeState::new(&session, payload, chaining)?;
-        let result = self.run_iso_dep_loop(&mut session, &mut state, protocol);
-        if self.iso_dep_protocol.is_some() {
-            self.iso_dep_session = Some(session);
-        }
-        result
-    }
-
-    fn run_iso_dep_loop(
-        &mut self,
-        session: &mut IsoDepSession,
-        state: &mut IsoDepExchangeState,
-        protocol: ThroughProtocol,
-    ) -> Result<Vec<u8>> {
-        loop {
-            let response_bytes = state.next_response(self, protocol)?;
-            let response = parse_iso_dep_response(session.state(), &response_bytes)?;
-            let outcome = match response.block_type {
-                IsoDepBlockType::I {
-                    payload: picc_payload,
-                } => self.handle_iso_dep_i_block(
-                    session,
-                    state,
-                    response.block_number,
-                    &picc_payload,
-                    response.chaining,
-                    protocol,
-                ),
-                IsoDepBlockType::R { ack } => {
-                    self.handle_iso_dep_r_block(session, state, ack, response.block_number)
-                }
-                IsoDepBlockType::S { code, payload } => {
-                    self.handle_iso_dep_s_block(session, state, code, &payload, protocol)
-                }
-                IsoDepBlockType::Unknown(code) => Err(DriverError::Other(format!(
-                    "Unknown ISO-DEP block type {:02X}",
-                    code
-                ))),
-            }?;
-
-            if let IsoDepOutcome::Finished(data) = outcome {
-                return Ok(data);
-            }
-        }
-    }
-
-    fn handle_iso_dep_i_block(
-        &mut self,
-        session: &mut IsoDepSession,
-        state: &mut IsoDepExchangeState,
-        block_number: u8,
-        payload: &[u8],
-        chaining: bool,
-        protocol: ThroughProtocol,
-    ) -> Result<IsoDepOutcome> {
-        let expected = session.state().expected_picc_block();
-        if block_number != expected {
-            let duplicate = expected ^ 0x01;
-            if block_number == duplicate {
-                self.send_iso_dep_ack(state, session.state(), protocol)?;
-                return Ok(IsoDepOutcome::Continue);
-            }
-            return Err(DriverError::Other(
-                "ISO-DEP PICC block number mismatch".into(),
-            ));
-        }
-
-        state.validate_picc_payload(payload)?;
-        state.accumulate_payload(payload);
-        session.state_mut().advance_picc_block();
-        state.reset_progress();
-
-        if chaining {
-            self.send_iso_dep_ack(state, session.state(), protocol)?;
-            return Ok(IsoDepOutcome::Continue);
-        }
-        session.state_mut().next_tx_block();
-        Ok(IsoDepOutcome::Finished(state.take_aggregated()))
-    }
-
-    fn handle_iso_dep_r_block(
-        &mut self,
-        session: &mut IsoDepSession,
-        state: &mut IsoDepExchangeState,
-        ack: bool,
-        block_number: u8,
-    ) -> Result<IsoDepOutcome> {
-        state.reset_progress();
-        let expected_nr = session.state().current_tx_block() ^ 0x01;
-        if block_number != expected_nr {
-            return Err(DriverError::Other("ISO-DEP R-Block NR mismatch".into()));
-        }
-        if ack {
-            session.state_mut().next_tx_block();
-            if let Some(next_frame) = state.next_frame(session) {
-                state.update_frame(next_frame);
-                return Ok(IsoDepOutcome::Continue);
-            }
-            if state.last_frame_chaining() {
-                return Ok(IsoDepOutcome::Finished(Vec::new()));
-            }
-            return Err(DriverError::Other(
-                "ISO-DEP unexpected ACK without pending data".into(),
-            ));
-        }
-        state.retry_after_nak()?;
-        Ok(IsoDepOutcome::Continue)
-    }
-
-    fn handle_iso_dep_s_block(
-        &mut self,
-        session: &mut IsoDepSession,
-        state: &mut IsoDepExchangeState,
-        code: u8,
-        payload: &[u8],
-        protocol: ThroughProtocol,
-    ) -> Result<IsoDepOutcome> {
-        match code {
-            ISO_DEP_S_WTX => {
-                let wtxm = payload
-                    .first()
-                    .copied()
-                    .ok_or_else(|| DriverError::Other("Invalid WTX block".into()))?;
-                state.record_wtx_attempt(session.config().max_try_s_wtx)?;
-                let multiplier = wtx_multiplier(wtxm);
-                let timeout = state.extend_timeout(multiplier);
-                let state_snapshot = *session.state();
-                let next_response =
-                    self.send_s_block_wtx(&state_snapshot, wtxm, protocol, timeout)?;
-                state.schedule_pending(next_response);
-                Ok(IsoDepOutcome::Continue)
-            }
-            ISO_DEP_S_IFS => {
-                let new_ifs = payload
-                    .first()
-                    .copied()
-                    .ok_or_else(|| DriverError::Other("Invalid IFS block".into()))?;
-                session.config_mut().update_pcd_ifs(new_ifs);
-                session.mark_ifs_negotiated();
-                let state_snapshot = *session.state();
-                self.send_s_block_ifs(&state_snapshot, new_ifs, protocol)?;
-                Ok(IsoDepOutcome::Continue)
-            }
-            ISO_DEP_S_DESELECT => {
-                let state_snapshot = *session.state();
-                self.send_s_block_deselect(&state_snapshot, protocol)?;
-                self.end_iso_dep_session();
-                Err(DriverError::Other("ISO-DEP deselected by PICC".into()))
-            }
-            _ => Err(DriverError::Other(format!(
-                "ISO-DEP S-Block {:02X} handling not implemented",
-                code
-            ))),
-        }
-    }
-
-    fn send_iso_dep_ack(
-        &mut self,
-        state: &mut IsoDepExchangeState,
-        iso_state: &IsoDepState,
-        protocol: ThroughProtocol,
-    ) -> Result<()> {
-        let ack_frame = build_iso_dep_r_block(iso_state, true);
-        let ack_response =
-            self.iso_dep_transceive(&ack_frame, protocol, state.current_timeout())?;
-        state.schedule_pending(ack_response);
-        Ok(())
     }
 
     pub fn start_rffe_parameter_mode(&mut self) -> Result<()> {
@@ -1149,157 +907,6 @@ impl<T: Transport> Device<T> {
         apply_type_b_protocol_details(config, &info.protocol_info);
         Ok(info)
     }
-
-    fn iso_dep_transceive(
-        &mut self,
-        frame: &[u8],
-        protocol: ThroughProtocol,
-        timeout: Duration,
-    ) -> Result<Vec<u8>> {
-        let flags = protocol.iso_dep_flags();
-        debug!("Port-400 ISO-DEP TX ({protocol:?}): {}", encode(frame));
-        let response = self.pcsc.transceive(frame, timeout, &flags)?;
-        debug!("Port-400 ISO-DEP RX ({protocol:?}): {}", encode(&response));
-        Ok(response)
-    }
-
-    fn send_s_block_wtx(
-        &mut self,
-        state: &IsoDepState,
-        wtxm: u8,
-        protocol: ThroughProtocol,
-        timeout: Duration,
-    ) -> Result<Vec<u8>> {
-        let payload = [wtxm];
-        let frame = build_iso_dep_s_block(state, ISO_DEP_S_WTX, true, &payload);
-        self.iso_dep_transceive(&frame, protocol, timeout)
-    }
-
-    fn send_s_block_ifs(
-        &mut self,
-        state: &IsoDepState,
-        ifs: u8,
-        protocol: ThroughProtocol,
-    ) -> Result<Vec<u8>> {
-        let payload = [ifs];
-        let frame = build_iso_dep_s_block(state, ISO_DEP_S_IFS, false, &payload);
-        self.iso_dep_transceive(&frame, protocol, Duration::from_millis(10))
-    }
-
-    fn send_s_block_deselect(
-        &mut self,
-        state: &IsoDepState,
-        protocol: ThroughProtocol,
-    ) -> Result<Vec<u8>> {
-        let frame = build_iso_dep_s_block(state, ISO_DEP_S_DESELECT, false, &[]);
-        self.iso_dep_transceive(&frame, protocol, Duration::from_millis(10))
-    }
-
-    fn send_type_a_frame(
-        &mut self,
-        payload: &[u8],
-        tx_valid_bits: Option<u8>,
-        append_crc: bool,
-        discard_crc: bool,
-    ) -> Result<Vec<u8>> {
-        let options = ThroughOptions {
-            protocol: ThroughProtocol::Iso14443TypeA,
-            append_crc: Some(append_crc),
-            discard_crc: Some(discard_crc),
-            insert_parity: Some(true),
-            expect_parity: Some(true),
-            append_protocol_prologue: Some(false),
-            tx_valid_bits,
-        };
-        self.communicate_thru(payload, Some(TYPE_A_CMD_TIMEOUT_MS), Some(options))
-    }
-
-    fn perform_type_a_anticollision(&mut self) -> Result<(Vec<u8>, u8)> {
-        let mut sel_code = 0x93;
-        let mut uid = Vec::new();
-        loop {
-            let anticollision = self.send_type_a_frame(&[sel_code, 0x20], None, false, false)?;
-            let block = anticollision
-                .get(..5)
-                .ok_or_else(|| DriverError::Other("invalid anticollision response".into()))?;
-            let (uid_block, bcc) = block.split_at(4);
-            let bcc = *bcc
-                .first()
-                .ok_or_else(|| DriverError::Other("invalid anticollision response".into()))?;
-            validate_bcc(uid_block, bcc)?;
-            let sak = self.send_type_a_select(sel_code, &anticollision)?;
-            append_uid_block(&mut uid, uid_block);
-            if (sak & 0x04) == 0 {
-                return Ok((uid, sak));
-            }
-            sel_code = next_cascade_code(sel_code)?;
-            uid.clear();
-        }
-    }
-
-    fn send_type_a_select(&mut self, sel_code: u8, anticollision: &[u8]) -> Result<u8> {
-        let mut select = Vec::with_capacity(7);
-        select.extend_from_slice(&[sel_code, 0x70]);
-        select.extend_from_slice(&anticollision[..5]);
-        let sak_resp = self.send_type_a_frame(&select, None, true, true)?;
-        sak_resp
-            .first()
-            .copied()
-            .ok_or_else(|| DriverError::Other("missing SAK".into()))
-    }
-
-    fn send_type_a_pps(&mut self, config: &IsoDepConfig) -> Result<()> {
-        let (dri, dsi) = data_rate_symbols(config);
-        if dri == 0 && dsi == 0 {
-            return Ok(());
-        }
-        let ppss = 0xD0 | (config.cid & 0x0F);
-        let pps0 = 0x11;
-        let pps1 = ((dsi & 0x03) << 2) | (dri & 0x03);
-        let frame = [ppss, pps0, pps1];
-        let response = self.send_type_a_frame(&frame, None, true, true)?;
-        if response.first().copied() != Some(ppss) {
-            return Err(DriverError::Other("PPS response mismatch".into()));
-        }
-        self.apply_comm_speed(dri, dsi)
-    }
-
-    fn send_type_b_frame(
-        &mut self,
-        payload: &[u8],
-        append_crc: bool,
-        discard_crc: bool,
-        timeout_ms: u16,
-    ) -> Result<Vec<u8>> {
-        let options = ThroughOptions {
-            protocol: ThroughProtocol::Iso14443TypeB,
-            append_crc: Some(append_crc),
-            discard_crc: Some(discard_crc),
-            insert_parity: Some(false),
-            expect_parity: Some(false),
-            append_protocol_prologue: Some(false),
-            tx_valid_bits: None,
-        };
-        self.communicate_thru(payload, Some(timeout_ms), Some(options))
-    }
-}
-
-fn build_type_b_attrib_command(
-    info: &TypeBInfo,
-    config: &IsoDepConfig,
-    dri: u8,
-    dsi: u8,
-) -> Vec<u8> {
-    let param2 = ((dsi & 0x03) << 6) | ((dri & 0x03) << 4) | (config.fsdi & 0x0F);
-    let param3 = info.protocol_info.get(1).copied().unwrap_or(0x02) & 0x0F;
-    let mut frame = Vec::with_capacity(9);
-    frame.push(0x1D);
-    frame.extend_from_slice(&info.pupi);
-    frame.push(0x00);
-    frame.push(param2);
-    frame.push(param3);
-    frame.push(config.cid & 0x0F);
-    frame
 }
 
 fn ensure_rffe_category(category: u8) -> Result<()> {
@@ -1308,151 +915,6 @@ fn ensure_rffe_category(category: u8) -> Result<()> {
         _ => Err(DriverError::Other(format!(
             "unsupported RFFE parameter category {category}"
         ))),
-    }
-}
-
-enum IsoDepOutcome {
-    Continue,
-    Finished(Vec<u8>),
-}
-
-struct IsoDepExchangeState<'a> {
-    pcd_payload: &'a [u8],
-    chaining: bool,
-    tx_offset: usize,
-    sent_empty_frame: bool,
-    pending_response: Option<Vec<u8>>,
-    aggregated_response: Vec<u8>,
-    current_frame: IsoDepIFrame,
-    last_frame_chaining: bool,
-    base_timeout: Duration,
-    current_timeout: Duration,
-    wtx_attempts: u8,
-    nak_retries: i32,
-    max_picc_inf: usize,
-}
-
-impl<'a> IsoDepExchangeState<'a> {
-    fn new(session: &IsoDepSession, payload: &'a [u8], chaining: bool) -> Result<Self> {
-        let mut tx_offset = 0usize;
-        let mut sent_empty_frame = false;
-        let current_frame = next_iso_dep_i_frame(
-            session.state(),
-            payload,
-            &mut tx_offset,
-            session.config().max_inf_len_pcd(),
-            chaining,
-            &mut sent_empty_frame,
-        )
-        .ok_or_else(|| DriverError::Other("ISO-DEP empty frame generation failed".into()))?;
-        let base_timeout = session.config().fwt_duration();
-        Ok(Self {
-            pcd_payload: payload,
-            chaining,
-            tx_offset,
-            sent_empty_frame,
-            pending_response: None,
-            aggregated_response: Vec::new(),
-            last_frame_chaining: current_frame.chaining,
-            current_frame,
-            base_timeout,
-            current_timeout: base_timeout,
-            wtx_attempts: 0,
-            nak_retries: session.config().max_retry_r_nak.max(1) as i32,
-            max_picc_inf: session.config().max_inf_len_picc(),
-        })
-    }
-
-    fn current_frame(&self) -> &[u8] {
-        &self.current_frame.frame
-    }
-
-    fn next_response<T: Transport>(
-        &mut self,
-        device: &mut Device<T>,
-        protocol: ThroughProtocol,
-    ) -> Result<Vec<u8>> {
-        if let Some(bytes) = self.pending_response.take() {
-            return Ok(bytes);
-        }
-        device.iso_dep_transceive(self.current_frame(), protocol, self.current_timeout)
-    }
-
-    fn validate_picc_payload(&self, payload: &[u8]) -> Result<()> {
-        if payload.len() > self.max_picc_inf {
-            return Err(DriverError::Other(
-                "ISO-DEP PICC payload exceeds FSC".into(),
-            ));
-        }
-        if self.aggregated_response.len() + payload.len() > MAX_THROUGH_PAYLOAD {
-            return Err(DriverError::Other(
-                "ISO-DEP response exceeds receive buffer".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn accumulate_payload(&mut self, payload: &[u8]) {
-        self.aggregated_response.extend_from_slice(payload);
-    }
-
-    fn reset_progress(&mut self) {
-        self.wtx_attempts = 0;
-        self.current_timeout = self.base_timeout;
-    }
-
-    fn take_aggregated(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.aggregated_response)
-    }
-
-    fn next_frame(&mut self, session: &IsoDepSession) -> Option<IsoDepIFrame> {
-        next_iso_dep_i_frame(
-            session.state(),
-            self.pcd_payload,
-            &mut self.tx_offset,
-            session.config().max_inf_len_pcd(),
-            self.chaining,
-            &mut self.sent_empty_frame,
-        )
-    }
-
-    fn update_frame(&mut self, frame: IsoDepIFrame) {
-        self.last_frame_chaining = frame.chaining;
-        self.current_frame = frame;
-    }
-
-    fn last_frame_chaining(&self) -> bool {
-        self.last_frame_chaining
-    }
-
-    fn retry_after_nak(&mut self) -> Result<()> {
-        if self.nak_retries == 0 {
-            return Err(DriverError::Other("ISO-DEP retry limit reached".into()));
-        }
-        self.nak_retries -= 1;
-        Ok(())
-    }
-
-    fn record_wtx_attempt(&mut self, max_attempts: u8) -> Result<()> {
-        self.wtx_attempts = self.wtx_attempts.saturating_add(1);
-        if self.wtx_attempts > max_attempts {
-            return Err(DriverError::Other("ISO-DEP WTX retry limit reached".into()));
-        }
-        Ok(())
-    }
-
-    fn extend_timeout(&mut self, multiplier: u8) -> Duration {
-        let timeout = extend_timeout(self.base_timeout, multiplier);
-        self.current_timeout = timeout;
-        timeout
-    }
-
-    fn schedule_pending(&mut self, response: Vec<u8>) {
-        self.pending_response = Some(response);
-    }
-
-    fn current_timeout(&self) -> Duration {
-        self.current_timeout
     }
 }
 
@@ -1545,33 +1007,6 @@ fn apply_type_b_protocol_details(config: &mut IsoDepConfig, info: &[u8]) {
     }
 }
 
-fn validate_bcc(block: &[u8], bcc: u8) -> Result<()> {
-    let computed_bcc = block.iter().fold(0u8, |acc, b| acc ^ b);
-    if bcc == computed_bcc {
-        Ok(())
-    } else {
-        Err(DriverError::Other("UID BCC mismatch".into()))
-    }
-}
-
-fn next_cascade_code(sel_code: u8) -> Result<u8> {
-    match sel_code {
-        0x93 => Ok(0x95),
-        0x95 => Ok(0x97),
-        _ => Err(DriverError::Other(
-            "unsupported Type-A cascade level".into(),
-        )),
-    }
-}
-
-fn append_uid_block(uid: &mut Vec<u8>, block: &[u8]) {
-    if block.first() == Some(&0x88) && block.len() >= 4 {
-        uid.extend_from_slice(&block[1..4]);
-    } else {
-        uid.extend_from_slice(block);
-    }
-}
-
 fn build_speed_code(dri: u8, dsi: u8) -> u8 {
     ((dri & 0x07) << 3) | (dsi & 0x07)
 }
@@ -1579,22 +1014,9 @@ fn build_speed_code(dri: u8, dsi: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::errors::DriverError;
     use crate::driver::port400::iso14443::IsoDepDataRate;
+    use crate::driver::testing::assert_driver_error_contains;
     use std::time::Duration;
-
-    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
-        match result {
-            Err(DriverError::Other(message)) => {
-                assert!(
-                    message.contains(expected),
-                    "unexpected driver error message: {message}"
-                );
-            }
-            Err(other) => panic!("expected DriverError::Other, got {other}"),
-            Ok(_) => panic!("expected DriverError::Other, got Ok"),
-        }
-    }
 
     #[test]
     fn through_protocol_flag_defaults_match_protocol() {
@@ -1637,36 +1059,6 @@ mod tests {
         assert!(flags.append_protocol_prologue);
         assert_eq!(flags.tx_valid_bits, Some(7));
     }
-
-    #[test]
-    fn build_type_b_attrib_command_packs_parameters() {
-        let info = TypeBInfo {
-            pupi: [0x11, 0x22, 0x33, 0x44],
-            application_data: [0; 4],
-            protocol_info: vec![0x00, 0xF2],
-        };
-        let mut config = IsoDepConfig::type_b_defaults();
-        config.fsdi = 0x1A;
-        config.cid = 0x2F;
-        let frame = build_type_b_attrib_command(&info, &config, 0x03, 0x02);
-        assert_eq!(
-            frame,
-            vec![0x1D, 0x11, 0x22, 0x33, 0x44, 0x00, 0xBA, 0x02, 0x0F]
-        );
-    }
-
-    #[test]
-    fn build_type_b_attrib_command_uses_default_param3_when_info_is_short() {
-        let info = TypeBInfo {
-            pupi: [1, 2, 3, 4],
-            application_data: [0; 4],
-            protocol_info: vec![0xA0],
-        };
-        let config = IsoDepConfig::type_b_defaults();
-        let frame = build_type_b_attrib_command(&info, &config, 1, 1);
-        assert_eq!(frame, vec![0x1D, 1, 2, 3, 4, 0x00, 0x58, 0x02, 0x02]);
-    }
-
     #[test]
     fn ensure_rffe_category_accepts_known_categories_and_rejects_unknown() {
         assert!(ensure_rffe_category(RFFE_PARAM_EEPROM).is_ok());
@@ -1759,36 +1151,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_bcc_checks_xor_of_uid_block() {
-        let block = [0x04, 0x25, 0x85, 0x93];
-        let bcc = block.iter().fold(0u8, |acc, b| acc ^ b);
-        assert!(validate_bcc(&block, bcc).is_ok());
-        assert_driver_error_contains(validate_bcc(&block, bcc ^ 0x01), "UID BCC mismatch");
-    }
-
-    #[test]
-    fn next_cascade_code_maps_known_levels_and_rejects_invalid_level() {
-        assert_eq!(next_cascade_code(0x93).expect("cascade level 1"), 0x95);
-        assert_eq!(next_cascade_code(0x95).expect("cascade level 2"), 0x97);
-        assert_driver_error_contains(next_cascade_code(0x97), "unsupported Type-A cascade level");
-    }
-
-    #[test]
-    fn append_uid_block_strips_ct_prefix_only_for_complete_blocks() {
-        let mut uid = vec![0xAA];
-        append_uid_block(&mut uid, &[0x88, 0x11, 0x22, 0x33, 0x44]);
-        assert_eq!(uid, vec![0xAA, 0x11, 0x22, 0x33]);
-
-        let mut normal = Vec::new();
-        append_uid_block(&mut normal, &[0x01, 0x02, 0x03, 0x04]);
-        assert_eq!(normal, vec![0x01, 0x02, 0x03, 0x04]);
-
-        let mut short_ct = Vec::new();
-        append_uid_block(&mut short_ct, &[0x88, 0x99]);
-        assert_eq!(short_ct, vec![0x88, 0x99]);
-    }
-
-    #[test]
     fn build_speed_code_masks_upper_bits() {
         assert_eq!(build_speed_code(0x03, 0x05), 0x1D);
         assert_eq!(build_speed_code(0xFF, 0xAA), 0x3A);
@@ -1825,51 +1187,5 @@ mod tests {
     fn mifare_key_type_maps_to_the_reader_codes() {
         assert_eq!(MifareKeyType::A.code(), 0x60);
         assert_eq!(MifareKeyType::B.code(), 0x61);
-    }
-
-    #[test]
-    fn iso_dep_exchange_state_retries_and_bounds_validation() {
-        let mut config = IsoDepConfig::type_a_defaults();
-        config.max_retry_r_nak = 1;
-        config.max_try_s_wtx = 1;
-        let session = IsoDepSession::new(config);
-        let payload = [0x10, 0x20, 0x30];
-        let mut state =
-            IsoDepExchangeState::new(&session, &payload, false).expect("state should initialize");
-
-        let too_large = vec![0x00; session.config().max_inf_len_picc() + 1];
-        assert_driver_error_contains(state.validate_picc_payload(&too_large), "exceeds FSC");
-
-        state.accumulate_payload(&vec![0xAA; MAX_THROUGH_PAYLOAD - 1]);
-        assert_driver_error_contains(
-            state.validate_picc_payload(&[0xBB, 0xCC]),
-            "exceeds receive buffer",
-        );
-
-        state.retry_after_nak().expect("first retry should pass");
-        assert_driver_error_contains(state.retry_after_nak(), "retry limit reached");
-
-        state
-            .record_wtx_attempt(session.config().max_try_s_wtx)
-            .expect("first WTX should pass");
-        assert_driver_error_contains(
-            state.record_wtx_attempt(session.config().max_try_s_wtx),
-            "WTX retry limit reached",
-        );
-    }
-
-    #[test]
-    fn iso_dep_exchange_state_timeout_extension_and_reset_progress() {
-        let session = IsoDepSession::new(IsoDepConfig::type_a_defaults());
-        let mut state =
-            IsoDepExchangeState::new(&session, &[0x10], false).expect("state should initialize");
-
-        let base = state.current_timeout();
-        let extended = state.extend_timeout(4);
-        assert!(extended >= base);
-        assert_eq!(state.current_timeout(), extended);
-
-        state.reset_progress();
-        assert_eq!(state.current_timeout(), base);
     }
 }

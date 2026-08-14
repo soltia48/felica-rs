@@ -242,23 +242,7 @@ impl<T: Transport> Device<T> {
 mod tests {
     use super::*;
     use crate::driver::errors::CommunicationFault;
-    use std::time::Duration;
-
-    struct DummyTransport;
-
-    impl Transport for DummyTransport {
-        fn write(&mut self, _data: &[u8]) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn read(&mut self, _timeout: Duration) -> std::io::Result<Vec<u8>> {
-            Ok(Vec::new())
-        }
-
-        fn close(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+    use crate::driver::testing::DummyTransport;
 
     fn make_target(bitrate: &str, sel_res: Option<Vec<u8>>) -> RemoteTarget {
         let mut target = RemoteTarget::new(bitrate).expect("target should be created");

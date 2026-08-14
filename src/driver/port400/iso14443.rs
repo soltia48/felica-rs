@@ -568,19 +568,7 @@ fn bytes_to_fdsi(value: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
-        match result {
-            Err(DriverError::Other(message)) => {
-                assert!(
-                    message.contains(expected),
-                    "unexpected driver error message: {message}"
-                );
-            }
-            Err(other) => panic!("expected DriverError::Other, got {other}"),
-            Ok(_) => panic!("expected DriverError::Other, got Ok"),
-        }
-    }
+    use crate::driver::testing::assert_driver_error_contains;
 
     #[test]
     fn update_pcd_ifs_clamps_and_maps_fdsi() {

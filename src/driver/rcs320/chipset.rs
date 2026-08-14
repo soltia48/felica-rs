@@ -5,12 +5,11 @@
 //! RC-S330 and later devices.
 
 use crate::driver::errors::{DriverError, Result};
-use crate::driver::io::{remaining_until, take_from_buffer, timeout_error};
+use crate::driver::io;
 use crate::driver::rcs320::frame::{ACK_BYTES, Frame, FrameType, SOF};
 use crate::transport::Transport;
 use log::debug;
 use std::collections::VecDeque;
-use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 
 /// Maximum data size for RC-S320 frames.
@@ -344,72 +343,16 @@ impl<T: Transport> Chipset<T> {
 
     /// Reads exactly `len` bytes from the buffer/transport.
     fn read_exact(&mut self, len: usize, deadline: Instant) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(len);
-
-        while out.len() < len {
-            take_from_buffer(&mut self.read_buffer, &mut out, len);
-            if out.len() == len {
-                break;
-            }
-
-            let remaining =
-                remaining_until(deadline).ok_or_else(|| DriverError::Io(timeout_error()))?;
-
-            match self.transport.read(remaining) {
-                Ok(chunk) => {
-                    if !chunk.is_empty() {
-                        self.read_buffer.extend(chunk);
-                    }
-                }
-                Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    return Err(DriverError::Io(timeout_error()));
-                }
-                Err(e) => return Err(DriverError::Io(e)),
-            }
-        }
-
-        Ok(out)
+        io::read_exact(&mut self.transport, &mut self.read_buffer, len, deadline)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::testing::{DummyTransport, assert_driver_error_contains};
     use std::collections::VecDeque;
-    use std::io;
-
-    #[derive(Default)]
-    struct DummyTransport {
-        reads: VecDeque<io::Result<Vec<u8>>>,
-        writes: Vec<Vec<u8>>,
-    }
-
-    impl DummyTransport {
-        fn with_reads(reads: Vec<io::Result<Vec<u8>>>) -> Self {
-            Self {
-                reads: reads.into(),
-                writes: Vec::new(),
-            }
-        }
-    }
-
-    impl Transport for DummyTransport {
-        fn write(&mut self, data: &[u8]) -> io::Result<()> {
-            self.writes.push(data.to_vec());
-            Ok(())
-        }
-
-        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
-            match self.reads.pop_front() {
-                Some(chunk) => chunk,
-                None => Ok(Vec::new()),
-            }
-        }
-
-        fn close(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
+    use std::io::{self, ErrorKind};
 
     fn new_chipset(transport: DummyTransport) -> Chipset<DummyTransport> {
         Chipset {
@@ -417,17 +360,6 @@ mod tests {
             firmware_version: (0, 0),
             read_buffer: VecDeque::new(),
             timeout: Duration::from_millis(100),
-        }
-    }
-
-    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
-        match result {
-            Err(DriverError::Other(message)) => assert!(
-                message.contains(expected),
-                "unexpected DriverError::Other message: {message}"
-            ),
-            Err(other) => panic!("expected DriverError::Other, got {other}"),
-            Ok(_) => panic!("expected DriverError::Other, got Ok"),
         }
     }
 
@@ -546,12 +478,8 @@ mod tests {
             .expect("firmware version should parse");
         assert_eq!(version, (0x01, 0x02));
 
-        let command_frame = chipset
-            .transport
-            .writes
-            .first()
-            .expect("command frame should be written");
-        let payload = Frame::parse(command_frame)
+        let command_frame = chipset.transport.writes().frame(0);
+        let payload = Frame::parse(&command_frame)
             .and_then(|frame| frame.into_payload())
             .expect("command frame should have payload");
         assert_eq!(payload, vec![cmd::GET_FIRMWARE_VERSION]);
@@ -576,12 +504,8 @@ mod tests {
             .send_to_card(&[0xDE, 0xAD])
             .expect("send_to_card should write a command");
 
-        let written = chipset
-            .transport
-            .writes
-            .first()
-            .expect("at least one frame should be written");
-        let payload = Frame::parse(written)
+        let written = chipset.transport.writes().frame(0);
+        let payload = Frame::parse(&written)
             .and_then(|frame| frame.into_payload())
             .expect("written frame should have payload");
         assert_eq!(payload, vec![cmd::SEND_PACKET, 0x03, 0xDE, 0xAD]);

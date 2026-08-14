@@ -1,11 +1,14 @@
-//! Buffered transport-read primitives shared by the SOF-based chipset drivers
-//! (Port-100, RC-S320, RC-S956).
+//! Buffered transport-read primitives shared by every chipset driver.
 //!
-//! These readers buffer raw bytes from the transport in a [`VecDeque`] and pull
-//! exact-length slices out of it while honouring a deadline. The deadline and
-//! buffer bookkeeping are identical across drivers, so they live here as the
-//! single source of truth.
+//! A USB transport hands back whole packets, but a driver reads a frame header
+//! and then its body, so the bytes it did not ask for have to be kept. All of
+//! them do this the same way: buffer the surplus in a [`VecDeque`], pull
+//! exact-length slices out of it, and give up at a deadline. The SOF-framed
+//! drivers (Port-100, RC-S320, RC-S956) additionally share one recovery
+//! sequence after a failed exchange. Both live here as the single source of
+//! truth; the Port-400's CCID transport uses the read side.
 
+use crate::driver::errors::{DriverError, Result};
 use crate::transport::Transport;
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind};
@@ -33,6 +36,56 @@ pub(crate) fn take_from_buffer(buffer: &mut VecDeque<u8>, out: &mut Vec<u8>, len
             None => break,
         }
     }
+}
+
+/// Reads exactly `len` bytes, topping `buffer` up from `transport` until they
+/// have all arrived or `deadline` passes.
+///
+/// Whatever the transport hands back beyond `len` stays in `buffer` for the next
+/// read, which is what lets a driver read a frame header and then its body out
+/// of a transport that delivers whole packets.
+pub(crate) fn read_exact<T: Transport>(
+    transport: &mut T,
+    buffer: &mut VecDeque<u8>,
+    len: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        take_from_buffer(buffer, &mut out, len);
+        if out.len() == len {
+            break;
+        }
+        let remaining =
+            remaining_until(deadline).ok_or_else(|| DriverError::Io(timeout_error()))?;
+        match transport.read(remaining) {
+            Ok(chunk) => buffer.extend(chunk),
+            // A transport timeout and an elapsed deadline are the same failure
+            // to the caller, so both are reported as the canonical one.
+            Err(err) if err.kind() == ErrorKind::TimedOut => {
+                return Err(DriverError::Io(timeout_error()));
+            }
+            Err(err) => return Err(DriverError::Io(err)),
+        }
+    }
+    Ok(out)
+}
+
+/// Passes `result` through, recovering the chipset first if it failed.
+///
+/// Recovery is [`recover_after_error`]: the chipset is left able to accept the
+/// next command rather than holding a half-finished exchange.
+pub(crate) fn recover_on_error<T: Transport, R>(
+    result: Result<R>,
+    transport: &mut T,
+    buffer: &mut VecDeque<u8>,
+    ack: &[u8],
+    drain_buffer: bool,
+) -> Result<R> {
+    if result.is_err() {
+        recover_after_error(transport, buffer, ack, drain_buffer);
+    }
+    result
 }
 
 /// How long [`recover_after_error`] spends draining stale input.

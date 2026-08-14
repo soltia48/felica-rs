@@ -3,7 +3,7 @@
 //! This module provides low-level communication with the RC-S956 chipset.
 
 use crate::driver::errors::{ChipsetError, DriverError, Result};
-use crate::driver::io::{recover_after_error, remaining_until, timeout_error};
+use crate::driver::io::{self, recover_after_error, remaining_until, timeout_error};
 use crate::driver::rcs956::frame::{self, CONTROLLER_TO_HOST, Frame};
 use crate::transport::Transport;
 use log::{debug, warn};
@@ -224,7 +224,7 @@ impl<T: Transport> Chipset<T> {
 
     /// Sends a command and receives the response.
     fn command(&mut self, cmd_code: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>> {
-        let frame = Frame::build_command(cmd_code, data);
+        let frame = frame::build_command(cmd_code, data);
         debug!("CMD {:02X} data={:?}", cmd_code, hex::encode(data));
         self.write_frame(&frame)?;
         self.read_command_response(cmd_code, timeout)
@@ -371,18 +371,14 @@ impl<T: Transport> Chipset<T> {
         drain_buffer: bool,
         action: impl FnOnce(&mut Self) -> Result<R>,
     ) -> Result<R> {
-        match action(self) {
-            Ok(value) => Ok(value),
-            Err(err) => {
-                recover_after_error(
-                    &mut self.transport,
-                    &mut self.read_buffer,
-                    &Self::ACK,
-                    drain_buffer,
-                );
-                Err(err)
-            }
-        }
+        let result = action(self);
+        io::recover_on_error(
+            result,
+            &mut self.transport,
+            &mut self.read_buffer,
+            &Self::ACK,
+            drain_buffer,
+        )
     }
 
     // ========================================================================
@@ -646,58 +642,15 @@ impl<T: Transport> Chipset<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::testing::{DummyTransport, assert_driver_error_contains};
     use std::collections::VecDeque;
-    use std::io::{self, ErrorKind};
-
-    #[derive(Default)]
-    struct DummyTransport {
-        reads: VecDeque<io::Result<Vec<u8>>>,
-        writes: Vec<Vec<u8>>,
-    }
-
-    impl DummyTransport {
-        fn with_reads(reads: Vec<io::Result<Vec<u8>>>) -> Self {
-            Self {
-                reads: reads.into(),
-                writes: Vec::new(),
-            }
-        }
-    }
-
-    impl Transport for DummyTransport {
-        fn write(&mut self, data: &[u8]) -> io::Result<()> {
-            self.writes.push(data.to_vec());
-            Ok(())
-        }
-
-        fn read(&mut self, _timeout: Duration) -> io::Result<Vec<u8>> {
-            match self.reads.pop_front() {
-                Some(chunk) => chunk,
-                None => Ok(Vec::new()),
-            }
-        }
-
-        fn close(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
+    use std::io::ErrorKind;
 
     fn new_chipset(transport: DummyTransport) -> Chipset<DummyTransport> {
         Chipset {
             transport,
             firmware_version: (0, 0, 0),
             read_buffer: VecDeque::new(),
-        }
-    }
-
-    fn assert_driver_error_contains<T>(result: Result<T>, expected: &str) {
-        match result {
-            Err(DriverError::Other(message)) => assert!(
-                message.contains(expected),
-                "unexpected DriverError::Other message: {message}"
-            ),
-            Err(other) => panic!("expected DriverError::Other, got {other}"),
-            Ok(_) => panic!("expected DriverError::Other, got Ok"),
         }
     }
 

@@ -1,280 +1,24 @@
+//! Card emulation: the reader acts as the NFC target.
+//!
+//! Each `listen_*` method configures the RF for one technology and then answers
+//! an initiator's commands from the [`LocalTarget`] the caller supplied, up to
+//! the point where the exchange becomes the caller's to drive. `listen_dep`
+//! carries on through the ATR, PSL and DEP request sequence that activates a
+//! peer-to-peer link.
+
+use super::{SensfRequest, ensure_supported_bitrate};
 use crate::clf::errors::UnsupportedTargetError;
-use crate::clf::targets::{LocalTarget, RemoteTarget};
+use crate::clf::targets::LocalTarget;
 use crate::driver::errors::{ChipsetError, DriverError, Result};
 use crate::driver::port100::device::Device;
-use crate::felica_standard::{
-    FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult, polling_timeout_ms,
-};
+use crate::felica_standard::Type3TagPollingResult;
 use crate::transport::Transport;
 use log::{debug, warn};
-use std::time::{Duration, Instant};
 
+/// RATS response used when the caller's target does not carry one.
 const DEFAULT_RATS_RESPONSE: [u8; 5] = [0x05, 0x78, 0x80, 0x70, 0x02];
 
-#[derive(Debug, Clone)]
-pub struct SensfRequest {
-    pub system_code: u16,
-    pub request_code: u8,
-    pub time_slots: u8,
-    pub raw: Vec<u8>,
-}
-
-impl SensfRequest {
-    fn from_frame(frame: &[u8]) -> Option<Self> {
-        if frame.len() < 6 || frame.get(1) != Some(&0x00) {
-            return None;
-        }
-        Some(Self {
-            system_code: u16::from_be_bytes([frame[2], frame[3]]),
-            request_code: frame[4],
-            time_slots: frame[5],
-            raw: frame.to_vec(),
-        })
-    }
-}
-
 impl<T: Transport> Device<T> {
-    pub fn detect_type_a(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
-        let bitrate = target.bitrate();
-        ensure_supported_bitrate(bitrate, &["106A", "212A", "424A"], "unsupported bitrate ")?;
-
-        debug!("polling for NFC-A technology");
-
-        self.configure_initiator_for_poll(
-            bitrate,
-            &[
-                ("initial_guard_time", 6),
-                ("add_crc", 0),
-                ("check_crc", 0),
-                ("check_parity", 1),
-                ("last_byte_bit_count", 7),
-            ],
-        )?;
-
-        let sens_req = target.data.sens_req.clone().unwrap_or_else(|| vec![0x26]);
-        let Some(sens_res) = self.initiator_exchange_optional(&sens_req, 30, "SENS_REQ", false)?
-        else {
-            return Ok(None);
-        };
-
-        if sens_res.len() != 2 {
-            return Ok(None);
-        }
-
-        debug!("received SENS_RES {}", hex::encode(&sens_res));
-
-        if is_type1_atqa(&sens_res) {
-            return self.handle_type1_activation(bitrate, sens_res);
-        }
-
-        self.chipset
-            .configure_initiator(&[("last_byte_bit_count", 8), ("add_parity", 1)])?;
-
-        match self.perform_type_a_anticollision(target)? {
-            Some((sel_res, uid_value))
-                if !sel_res.is_empty() && (sel_res[0] & 0b0000_0100) == 0 =>
-            {
-                let mut found = RemoteTarget::new(bitrate)?;
-                found.data.sens_res = Some(sens_res);
-                found.data.sel_res = Some(sel_res);
-                found.data.sdd_res = Some(uid_value);
-                Ok(Some(found))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn handle_type1_activation(
-        &mut self,
-        bitrate: &str,
-        sens_res: Vec<u8>,
-    ) -> Result<Option<RemoteTarget>> {
-        self.chipset.configure_initiator(&[
-            ("last_byte_bit_count", 8),
-            ("add_crc", 2),
-            ("check_crc", 2),
-            ("type_1_tag_rrdd", 2),
-        ])?;
-        let mut found = RemoteTarget::new(bitrate)?;
-        found.data.sens_res = Some(sens_res.clone());
-        if sens_res[1] & 0x0F == 0b1100 {
-            let rid_cmd = vec![0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-            debug!("send RID_CMD {}", hex::encode(&rid_cmd));
-            let Some(rid_res) = self.initiator_exchange_optional(&rid_cmd, 30, "RID_CMD", true)?
-            else {
-                return Ok(None);
-            };
-            found.data.rid_res = Some(rid_res);
-        }
-        Ok(Some(found))
-    }
-
-    fn perform_type_a_anticollision(
-        &mut self,
-        target: &RemoteTarget,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        if let Some(uid) = target.data.sel_req.clone() {
-            let sel_res = self.select_known_uid(&uid)?;
-            return Ok(sel_res.map(|res| (res, uid)));
-        }
-        self.discover_uid()
-    }
-
-    fn select_known_uid(&mut self, uid: &[u8]) -> Result<Option<Vec<u8>>> {
-        let cascade_uid = cascade_uid(uid);
-        self.chipset
-            .configure_initiator(&[("add_crc", 1), ("check_crc", 1)])?;
-        let mut sel_res = Vec::new();
-        for (sel_cmd, start) in [0x93u8, 0x95, 0x97]
-            .iter()
-            .zip((0..cascade_uid.len()).step_by(4))
-        {
-            let slice_end = (start + 4).min(cascade_uid.len());
-            let mut sel_req = vec![*sel_cmd, 0x70];
-            sel_req.extend_from_slice(&cascade_uid[start..slice_end]);
-            let bcc = sel_req[2..6.min(sel_req.len())]
-                .iter()
-                .fold(0, |acc, b| acc ^ b);
-            sel_req.push(bcc);
-            debug!("send SEL_REQ {}", hex::encode(&sel_req));
-            let Some(res) = self.initiator_exchange_optional(&sel_req, 30, "SEL_REQ", true)? else {
-                return Ok(None);
-            };
-            sel_res = res;
-            debug!("received SEL_RES {}", hex::encode(&sel_res));
-        }
-        Ok(Some(sel_res))
-    }
-
-    fn discover_uid(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        let mut sel_res = Vec::new();
-        let mut uid = Vec::new();
-        for sel_cmd in [0x93u8, 0x95, 0x97] {
-            self.chipset
-                .configure_initiator(&[("add_crc", 0), ("check_crc", 0)])?;
-            let sdd_req = vec![sel_cmd, 0x20];
-            debug!("send SDD_REQ {}", hex::encode(&sdd_req));
-            let Some(sdd_res) = self.initiator_exchange_optional(&sdd_req, 30, "SDD_REQ", true)?
-            else {
-                return Ok(None);
-            };
-            debug!("received SDD_RES {}", hex::encode(&sdd_res));
-            self.chipset
-                .configure_initiator(&[("add_crc", 1), ("check_crc", 1)])?;
-            let mut sel_req = vec![sel_cmd, 0x70];
-            sel_req.extend_from_slice(&sdd_res);
-            debug!("send SEL_REQ {}", hex::encode(&sel_req));
-            let Some(res) = self.initiator_exchange_optional(&sel_req, 30, "SEL_REQ", true)? else {
-                return Ok(None);
-            };
-            sel_res = res.clone();
-            debug!("received SEL_RES {}", hex::encode(&sel_res));
-            if !sel_res.is_empty() && (sel_res[0] & 0b0000_0100) != 0 {
-                if sdd_res.len() >= 4 {
-                    uid.extend_from_slice(&sdd_res[1..4]);
-                }
-            } else {
-                let take = sdd_res.len().min(4);
-                uid.extend_from_slice(&sdd_res[0..take]);
-                break;
-            }
-        }
-        Ok(Some((sel_res, uid)))
-    }
-
-    pub fn detect_type_b(&mut self, target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
-        let bitrate = target.bitrate();
-        ensure_supported_bitrate(bitrate, &["106B", "212B", "424B"], "unsupported bitrate ")?;
-
-        debug!("polling for NFC-B technology");
-
-        self.configure_initiator_for_poll(
-            bitrate,
-            &[
-                ("initial_guard_time", 20),
-                ("add_sof", 1),
-                ("check_sof", 1),
-                ("add_eof", 1),
-                ("check_eof", 1),
-            ],
-        )?;
-
-        let sensb_req = target
-            .data
-            .sensb_req
-            .clone()
-            .unwrap_or_else(|| vec![0x05, 0x00, 0x10]);
-        debug!("send SENSB_REQ {}", hex::encode(&sensb_req));
-
-        let sensb_res =
-            match self.initiator_exchange_optional(&sensb_req, 30, "SENSB_REQ", false)? {
-                Some(data) => data,
-                None => return Ok(None),
-            };
-
-        if sensb_res.len() >= 12 && sensb_res[0] == 0x50 {
-            debug!("received SENSB_RES {}", hex::encode(&sensb_res));
-            let mut found = RemoteTarget::new(bitrate)?;
-            found.data.sensb_res = Some(sensb_res);
-            return Ok(Some(found));
-        }
-
-        Ok(None)
-    }
-
-    pub fn detect_type_f(
-        &mut self,
-        target: &RemoteTarget,
-        system_code: u16,
-        request_code: u8,
-        time_slots: u8,
-    ) -> Result<Type3TagPollingResult> {
-        let bitrate = target.bitrate();
-        ensure_supported_bitrate(bitrate, &["212F", "424F"], "unsupported bitrate ")?;
-
-        debug!("polling for NFC-F technology");
-
-        self.configure_initiator_for_poll(bitrate, &[("initial_guard_time", 24)])?;
-
-        let command = FelicaStandardCommand::Polling {
-            system_code,
-            request_code,
-            time_slots,
-        };
-        let frame = command
-            .to_frame()
-            .map_err(|err| DriverError::Other(format!("failed to build SENSF_REQ: {err}")))?;
-        debug!("send SENSF_REQ {}", hex::encode(&frame));
-        let response = self
-            .chipset
-            .initiator_exchange_rf(&frame, polling_timeout_ms(time_slots))?;
-
-        match FelicaStandardResponse::from_bytes(&response) {
-            Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {
-                debug!("received SENSF_RES {}", hex::encode(idm));
-                Ok(Type3TagPollingResult {
-                    idm: idm.to_vec(),
-                    pmm: pmm.to_vec(),
-                    optional,
-                })
-            }
-            Ok(other) => {
-                debug!("unexpected Felica response {:?}", other);
-                Err(DriverError::Other("unexpected Felica response".into()))
-            }
-            Err(err) => {
-                debug!("failed to parse Felica response: {}", err);
-                Err(DriverError::Other("failed to parse Felica response".into()))
-            }
-        }
-    }
-
-    pub fn detect_dep_passive(&mut self, _target: &RemoteTarget) -> Result<Option<RemoteTarget>> {
-        Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-            "device does not support active DEP detect".into(),
-        )))
-    }
-
     pub fn listen_type_a(
         &mut self,
         target: &LocalTarget,
@@ -642,78 +386,6 @@ impl<T: Transport> Device<T> {
         self.handle_dep_activation(target, activation_bitrate, frame, nfca_params, nfcf_params)
     }
 
-    fn configure_initiator_for_poll(&mut self, bitrate: &str, params: &[(&str, u8)]) -> Result<()> {
-        self.chipset.set_initiator_rf(bitrate, None)?;
-        self.chipset.apply_initiator_defaults()?;
-        if !params.is_empty() {
-            self.chipset.configure_initiator(params)?;
-        }
-        Ok(())
-    }
-
-    fn configure_target_for_listen(&mut self, bitrate: &str) -> Result<()> {
-        self.chipset.set_target_rf(bitrate)?;
-        self.chipset.apply_target_defaults()?;
-        self.chipset.configure_target(&[("rf_off_error", 0)])
-    }
-
-    fn run_timeout_loop<R, F>(&mut self, timeout: f32, mut step: F) -> Result<Option<R>>
-    where
-        F: FnMut(&mut Self, u16, Instant) -> Result<Option<R>>,
-    {
-        let Some(mut window) = TimeoutWindow::new(timeout) else {
-            return Ok(None);
-        };
-        while window.active() {
-            if let Some(outcome) = step(self, window.remaining(), window.deadline())? {
-                return Ok(Some(outcome));
-            }
-            window.refresh();
-        }
-        Ok(None)
-    }
-
-    fn target_exchange_default(
-        &mut self,
-        mdaa: bool,
-        nfca_params: &[u8],
-        nfcf_params: &[u8],
-        timeout: u16,
-        payload: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
-        self.chipset.target_exchange_rf(
-            0,
-            0xFFFF,
-            mdaa,
-            nfca_params,
-            nfcf_params,
-            false,
-            false,
-            timeout,
-            payload,
-        )
-    }
-
-    fn initiator_exchange_optional(
-        &mut self,
-        payload: &[u8],
-        timeout: u16,
-        context: &str,
-        log_timeouts: bool,
-    ) -> Result<Option<Vec<u8>>> {
-        match self.chipset.initiator_exchange_rf(payload, timeout) {
-            Ok(data) => Ok(Some(data)),
-            Err(DriverError::Chipset(ChipsetError::Fault(fault))) => {
-                let is_timeout = fault.matches("RECEIVE_TIMEOUT_ERROR");
-                if log_timeouts || !is_timeout {
-                    debug!("{}: {}", context, fault);
-                }
-                Ok(None)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
     fn await_dep_activation(
         &mut self,
         timeout: f32,
@@ -903,34 +575,6 @@ impl<T: Transport> Device<T> {
     }
 }
 
-fn ensure_supported_bitrate(bitrate: &str, allowed: &[&str], error_prefix: &str) -> Result<()> {
-    if allowed.contains(&bitrate) {
-        Ok(())
-    } else {
-        Err(DriverError::UnsupportedTarget(UnsupportedTargetError(
-            format!("{error_prefix}{bitrate}"),
-        )))
-    }
-}
-
-fn is_type1_atqa(sens_res: &[u8]) -> bool {
-    sens_res
-        .first()
-        .map(|byte| byte & 0x1F == 0)
-        .unwrap_or(false)
-}
-
-fn cascade_uid(uid: &[u8]) -> Vec<u8> {
-    let mut out = uid.to_vec();
-    if out.len() > 4 {
-        out.insert(0, 0x88);
-    }
-    if out.len() > 8 {
-        out.insert(4, 0x88);
-    }
-    out
-}
-
 #[allow(clippy::large_enum_variant)]
 enum Tt4Step {
     Continue,
@@ -1072,53 +716,6 @@ impl<'a> ExchangeView<'a> {
     }
 }
 
-struct TimeoutWindow {
-    deadline: Instant,
-    remaining_ms: u16,
-}
-
-impl TimeoutWindow {
-    fn new(timeout: f32) -> Option<Self> {
-        let remaining_ms = clamp_timeout(timeout);
-        if remaining_ms == 0 {
-            return None;
-        }
-        Some(Self {
-            deadline: Instant::now() + Duration::from_secs_f32(timeout.max(0.0)),
-            remaining_ms,
-        })
-    }
-
-    fn refresh(&mut self) {
-        self.remaining_ms = self
-            .deadline
-            .checked_duration_since(Instant::now())
-            .map(|remaining| remaining.as_millis().min(u16::MAX as u128) as u16)
-            .unwrap_or(0);
-    }
-
-    fn deadline(&self) -> Instant {
-        self.deadline
-    }
-
-    fn remaining(&self) -> u16 {
-        self.remaining_ms
-    }
-
-    fn active(&self) -> bool {
-        self.remaining_ms > 0
-    }
-}
-
-fn clamp_timeout(timeout: f32) -> u16 {
-    if timeout <= 0.0 {
-        0
-    } else {
-        let ms = (timeout * 1000.0).round() as i32;
-        ms.clamp(1, 0xFFFF) as u16
-    }
-}
-
 fn build_sensf_res_payload(
     res: &Type3TagPollingResult,
     request_code: u8,
@@ -1216,33 +813,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_supported_bitrate_accepts_allowed_values_and_rejects_others() {
-        assert!(ensure_supported_bitrate("106A", &["106A", "212F"], "unsupported ").is_ok());
-        match ensure_supported_bitrate("424A", &["106A", "212F"], "unsupported ") {
-            Err(DriverError::UnsupportedTarget(err)) => {
-                assert_eq!(err.0, "unsupported 424A");
-            }
-            Err(other) => panic!("expected UnsupportedTarget error, got {other}"),
-            Ok(_) => panic!("expected error for unsupported bitrate"),
-        }
-    }
-
-    #[test]
-    fn type1_atqa_and_cascade_uid_helpers_work() {
-        assert!(is_type1_atqa(&[0x00, 0x44]));
-        assert!(is_type1_atqa(&[0x20]));
-        assert!(!is_type1_atqa(&[0x1F]));
-        assert!(!is_type1_atqa(&[]));
-
-        assert_eq!(cascade_uid(&[1, 2, 3, 4]), vec![1, 2, 3, 4]);
-        assert_eq!(cascade_uid(&[1, 2, 3, 4, 5]), vec![0x88, 1, 2, 3, 4, 5]);
-        assert_eq!(
-            cascade_uid(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
-            vec![0x88, 1, 2, 3, 0x88, 4, 5, 6, 7, 8, 9, 10]
-        );
-    }
-
-    #[test]
     fn tt4_session_tracks_pending_and_rats_data() {
         let mut session = Tt4Session::new();
         assert!(!session.has_session());
@@ -1284,25 +854,6 @@ mod tests {
         assert_eq!(unknown.bitrate(), Bitrate::Unknown(0xFF));
         assert!(!unknown.is_activation_frame());
         assert!(!unknown.len_matches_len_byte());
-    }
-
-    #[test]
-    fn timeout_window_and_clamp_timeout_cover_edge_cases() {
-        assert_eq!(clamp_timeout(-1.0), 0);
-        assert_eq!(clamp_timeout(0.0), 0);
-        assert_eq!(clamp_timeout(0.0006), 1);
-        assert_eq!(clamp_timeout(1.5), 1500);
-        assert_eq!(clamp_timeout(100_000.0), 0xFFFF);
-
-        assert!(TimeoutWindow::new(0.0).is_none());
-        let mut window = TimeoutWindow::new(0.05).expect("positive timeout should create window");
-        assert!(window.active());
-        assert!(window.remaining() > 0);
-        let _ = window.deadline();
-        window.deadline = Instant::now();
-        window.refresh();
-        assert!(!window.active());
-        assert_eq!(window.remaining(), 0);
     }
 
     #[test]
