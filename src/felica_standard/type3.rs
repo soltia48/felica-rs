@@ -1,3 +1,19 @@
+/// Time a card takes to answer in the first time slot of a Polling command.
+const POLLING_FIRST_SLOT_SECONDS: f32 = 0.003625;
+/// Length of each further time slot the command grants.
+const POLLING_SLOT_SECONDS: f32 = 0.001208;
+
+/// Time to wait for the answers to a Polling command, in milliseconds.
+///
+/// `time_slots` is the value sent in the command (`00h`, `01h`, `03h`, `07h` or
+/// `0Fh`), which grants the card one more slot than its own value. A card picks
+/// a slot at random, so the wait covers the response time of the first slot plus
+/// one slot period for every further one.
+pub fn polling_timeout_ms(time_slots: u8) -> u16 {
+    let seconds = POLLING_FIRST_SLOT_SECONDS + time_slots as f32 * POLLING_SLOT_SECONDS;
+    (seconds * 1000.0).ceil().clamp(0.0, u16::MAX as f32) as u16
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Type3TagPollingResult {
     pub idm: Vec<u8>,
@@ -283,6 +299,18 @@ mod tests {
             pmm,
             optional: Vec::new(),
         }
+    }
+
+    #[test]
+    fn polling_timeout_grows_with_the_granted_time_slots() {
+        // One slot: the first slot's response time alone, rounded up.
+        assert_eq!(polling_timeout_ms(0x00), 4);
+        assert_eq!(polling_timeout_ms(0x01), 5);
+        assert_eq!(polling_timeout_ms(0x03), 8);
+        assert_eq!(polling_timeout_ms(0x07), 13);
+        assert_eq!(polling_timeout_ms(0x0F), 22);
+        // Every value stays inside the range the drivers pass on as a u16.
+        assert_eq!(polling_timeout_ms(u8::MAX), 312);
     }
 
     #[test]

@@ -16,10 +16,46 @@ const IN_SET_PROTOCOL_DEFAULTS: [u8; 38] = [
 
 const TG_SET_PROTOCOL_DEFAULTS: [u8; 6] = [0x00, 0x01, 0x01, 0x01, 0x02, 0x07];
 
+/// Receive setting the reference library applies to the FeliCa RF configuration:
+/// register `1A`, mask `C0`, value `40`, which improves noise resistance.
+const RF_NOISE_RESISTANT_IMPROVEMENT: [u8; 3] = [0x1A, 0xC0, 0x40];
+/// Most register settings the reader accepts in one RCT block.
+const IN_SET_RCT_SETTING_NUM_MAX: usize = 16;
+/// Length of the LT-Info block that unlocks the RCT commands.
+const LT_INFO_LEN: usize = 16;
+/// Initiator protocol keys the reader defines, `00h` through `13h`.
+const INITIATOR_PROTOCOL_KEYS: usize = 0x14;
+
+/// Readers whose LT-Info the reference library knows.
+///
+/// Each row is the two identifying bytes of the property block, the two bytes of
+/// the PD data version, and then the reader's 16 byte LT-Info.
+const LT_INFO_TABLE: [[u8; 4 + LT_INFO_LEN]; 4] = [
+    [
+        0, 0, 1, 1, 139, 91, 9, 236, 122, 221, 197, 129, 0, 151, 75, 95, 164, 118, 161, 213,
+    ],
+    [
+        0, 1, 1, 0, 213, 159, 243, 133, 168, 199, 47, 105, 44, 65, 173, 1, 230, 180, 145, 103,
+    ],
+    [
+        0, 6, 1, 0, 106, 206, 150, 130, 181, 221, 246, 214, 152, 205, 55, 232, 219, 31, 152, 186,
+    ],
+    [
+        0, 8, 1, 0, 71, 212, 66, 85, 79, 225, 65, 241, 115, 21, 127, 202, 181, 114, 86, 210,
+    ],
+];
+
 pub struct Chipset<T: Transport> {
     pub(crate) transport: T,
     firmware_version: (u8, u8),
     read_buffer: VecDeque<u8>,
+    /// Bitrates the initiator RF was last configured for, send then receive.
+    initiator_bitrate: Option<(String, String)>,
+    /// Whether the FeliCa receive tuning has been attempted for this session.
+    noise_resistance_attempted: bool,
+    /// Initiator protocol values the reader is known to hold, indexed by key, so
+    /// a setting that is already in place is not written again.
+    initiator_protocol: [Option<u8>; INITIATOR_PROTOCOL_KEYS],
 }
 
 impl<T: Transport> Chipset<T> {
@@ -37,6 +73,9 @@ impl<T: Transport> Chipset<T> {
             transport,
             firmware_version: (0, 0),
             read_buffer: VecDeque::new(),
+            initiator_bitrate: None,
+            noise_resistance_attempted: false,
+            initiator_protocol: [None; INITIATOR_PROTOCOL_KEYS],
         };
         match chipset.set_command_type(1) {
             Ok(()) => {}
@@ -79,7 +118,9 @@ impl<T: Transport> Chipset<T> {
 
     pub fn set_command_type(&mut self, value: u8) -> Result<()> {
         let rsp = self.send_command(0x2A, &[value])?;
-        ensure_status_ok(rsp.first().copied())
+        ensure_status_ok(rsp.first().copied())?;
+        self.forget_initiator_settings();
+        Ok(())
     }
 
     pub fn get_firmware_version(&mut self, option: Option<u8>) -> Result<Vec<u8>> {
@@ -97,6 +138,7 @@ impl<T: Transport> Chipset<T> {
         self.transport.write(&Self::ACK)?;
         let delay_ms = startup_delay as u64 + 500;
         std::thread::sleep(Duration::from_millis(delay_ms));
+        self.forget_initiator_settings();
         Ok(())
     }
 
@@ -113,25 +155,59 @@ impl<T: Transport> Chipset<T> {
 
     pub fn switch_rf(&mut self, on: bool) -> Result<()> {
         let rsp = self.send_command(0x06, &[if on { 1 } else { 0 }])?;
-        ensure_status_ok(rsp.first().copied())
+        ensure_status_ok(rsp.first().copied())?;
+        self.forget_initiator_settings();
+        Ok(())
     }
 
     pub fn apply_initiator_defaults(&mut self) -> Result<()> {
-        self.in_set_protocol(Some(&IN_SET_PROTOCOL_DEFAULTS), &[])
+        let defaults: Vec<(u8, u8)> = IN_SET_PROTOCOL_DEFAULTS
+            .chunks_exact(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+        self.write_initiator_protocol(&defaults)
     }
 
     pub fn configure_initiator(&mut self, params: &[(&str, u8)]) -> Result<()> {
-        self.in_set_protocol(None, params)
+        let mut entries = Vec::with_capacity(params.len());
+        for (name, value) in params {
+            let key = initiator_param_index(name).ok_or_else(|| {
+                DriverError::Other(format!("invalid initiator protocol key {name}"))
+            })?;
+            entries.push((key, *value));
+        }
+        self.write_initiator_protocol(&entries)
     }
 
-    fn in_set_protocol(&mut self, data: Option<&[u8]>, params: &[(&str, u8)]) -> Result<()> {
-        self.configure_protocol(
-            0x02,
-            data,
-            params,
-            initiator_param_index,
-            "initiator protocol key",
-        )
+    /// Writes the initiator protocol keys whose value the reader does not hold
+    /// yet, and nothing at all when every one of them is already in place.
+    fn write_initiator_protocol(&mut self, entries: &[(u8, u8)]) -> Result<()> {
+        let mut payload = Vec::with_capacity(entries.len() * 2);
+        for &(key, value) in entries {
+            if self.initiator_protocol.get(key as usize).copied().flatten() == Some(value) {
+                continue;
+            }
+            payload.push(key);
+            payload.push(value);
+        }
+        if payload.is_empty() {
+            return Ok(());
+        }
+        let rsp = self.send_command(0x02, &payload)?;
+        ensure_status_ok(rsp.first().copied())?;
+        for pair in payload.chunks_exact(2) {
+            if let Some(slot) = self.initiator_protocol.get_mut(pair[0] as usize) {
+                *slot = Some(pair[1]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops what is known about the initiator configuration, so the next
+    /// exchange establishes it again.
+    fn forget_initiator_settings(&mut self) {
+        self.initiator_bitrate = None;
+        self.initiator_protocol = [None; INITIATOR_PROTOCOL_KEYS];
     }
 
     pub fn apply_target_defaults(&mut self) -> Result<()> {
@@ -166,6 +242,10 @@ impl<T: Transport> Chipset<T> {
         }
 
         let recv = bitrate_recv.unwrap_or(bitrate_send);
+        if self.initiator_bitrate() == Some((bitrate_send, recv)) {
+            // The RF already runs at these speeds, and nothing since has reset it.
+            return Ok(());
+        }
         let send_cfg = settings(bitrate_send)
             .ok_or_else(|| DriverError::Other(format!("unsupported bitrate {}", bitrate_send)))?;
         let recv_cfg = settings(recv)
@@ -173,6 +253,103 @@ impl<T: Transport> Chipset<T> {
 
         let params = vec![send_cfg.0, send_cfg.1, recv_cfg.2, recv_cfg.3];
         let rsp = self.send_command(0x00, &params)?;
+        ensure_status_ok(rsp.first().copied())?;
+        // Changing the RF re-initialises the protocol settings that go with it.
+        self.forget_initiator_settings();
+        self.initiator_bitrate = Some((bitrate_send.to_string(), recv.to_string()));
+        // The reference library tunes the receive registers whenever it sets the
+        // FeliCa RF speed; the setting is a register write that sticks, so one
+        // attempt per session is enough.
+        if bitrate_send.ends_with('F') {
+            self.apply_felica_noise_resistance();
+        }
+        Ok(())
+    }
+
+    /// Bitrates the initiator RF is configured for, send first, or `None` before
+    /// any RF configuration.
+    ///
+    /// The Port-100 has no query for the speed a card was activated at: the host
+    /// drives the RF itself, so this is the speed every exchange runs at.
+    pub fn initiator_bitrate(&self) -> Option<(&str, &str)> {
+        self.initiator_bitrate
+            .as_ref()
+            .map(|(send, recv)| (send.as_str(), recv.as_str()))
+    }
+
+    /// Applies the reference library's FeliCa receive tuning, ignoring failures.
+    ///
+    /// A reader whose LT-Info is not in [`LT_INFO_TABLE`] cannot be tuned, and
+    /// the reference library treats that and every transport failure here as
+    /// non-fatal, so this reports problems to the log and returns.
+    fn apply_felica_noise_resistance(&mut self) {
+        if self.noise_resistance_attempted {
+            return;
+        }
+        self.noise_resistance_attempted = true;
+        if let Err(err) = self.tune_felica_receive_settings() {
+            debug!("skipping the FeliCa receive tuning: {err}");
+        }
+    }
+
+    fn tune_felica_receive_settings(&mut self) -> Result<()> {
+        let lt_info = self.lt_info()?;
+        let (send_setting, mut receive_setting) = self.in_get_rct(&lt_info)?;
+        if !update_rct_setting(&mut receive_setting, RF_NOISE_RESISTANT_IMPROVEMENT) {
+            debug!("FeliCa receive tuning already in place");
+            return Ok(());
+        }
+        self.in_set_rct(&lt_info, &send_setting, &receive_setting)
+    }
+
+    /// Looks up the LT-Info that unlocks the RCT commands for this reader.
+    fn lt_info(&mut self) -> Result<[u8; LT_INFO_LEN]> {
+        let property = self.get_property()?;
+        let model = property
+            .get(14..16)
+            .ok_or_else(|| DriverError::Other("property block is too short".into()))?;
+        let version = self.get_pd_data_version()?;
+        // The reference library reads the version bytes back to front.
+        let version = match version[..] {
+            [low, high, ..] => [high, low],
+            _ => return Err(DriverError::Other("PD data version is too short".into())),
+        };
+        LT_INFO_TABLE
+            .iter()
+            .find(|entry| entry[..2] == *model && entry[2..4] == version)
+            .and_then(|entry| entry[4..].try_into().ok())
+            .ok_or_else(|| DriverError::Other("LT-Info unsupported reader/writer".into()))
+    }
+
+    pub fn get_property(&mut self) -> Result<Vec<u8>> {
+        self.send_command(0x24, &[])
+    }
+
+    /// Reads the reader's send and receive register settings.
+    fn in_get_rct(&mut self, lt_info: &[u8; LT_INFO_LEN]) -> Result<(Vec<u8>, Vec<u8>)> {
+        let rsp = self.send_command(0x32, lt_info)?;
+        ensure_status_ok(rsp.first().copied())?;
+        let body = &rsp[1..];
+        let send = take_rct_block(body, 0)?;
+        let receive = take_rct_block(body, 1 + send.len())?;
+        Ok((send, receive))
+    }
+
+    /// Writes both register setting blocks back.
+    fn in_set_rct(
+        &mut self,
+        lt_info: &[u8; LT_INFO_LEN],
+        send_setting: &[u8],
+        receive_setting: &[u8],
+    ) -> Result<()> {
+        let mut payload =
+            Vec::with_capacity(lt_info.len() + send_setting.len() + receive_setting.len() + 2);
+        payload.extend_from_slice(lt_info);
+        payload.push((send_setting.len() / 3) as u8);
+        payload.extend_from_slice(send_setting);
+        payload.push((receive_setting.len() / 3) as u8);
+        payload.extend_from_slice(receive_setting);
+        let rsp = self.send_command(0x30, &payload)?;
         ensure_status_ok(rsp.first().copied())
     }
 
@@ -204,7 +381,10 @@ impl<T: Transport> Chipset<T> {
         }
         .ok_or_else(|| DriverError::Other(format!("unsupported comm type {}", comm_type)))?;
         let rsp = self.send_command(0x40, &[params.0, params.1])?;
-        ensure_status_ok(rsp.first().copied())
+        ensure_status_ok(rsp.first().copied())?;
+        // Switching the reader into target mode drops the initiator setup.
+        self.forget_initiator_settings();
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -394,6 +574,44 @@ impl<T: Transport> Chipset<T> {
     }
 }
 
+/// Reads one length-prefixed block of three-byte register settings.
+///
+/// `body` is the RCT payload and `offset` points at the block's count byte.
+fn take_rct_block(body: &[u8], offset: usize) -> Result<Vec<u8>> {
+    let count = *body
+        .get(offset)
+        .ok_or_else(|| DriverError::Other("RCT block count is missing".into()))?
+        as usize;
+    let start = offset + 1;
+    let end = start + count * 3;
+    body.get(start..end)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| DriverError::Other("RCT block is truncated".into()))
+}
+
+/// Merges one three-byte register setting into `settings`, returning whether the
+/// block has to be written back.
+///
+/// A setting already carrying the wanted value needs no write; a register not
+/// listed yet is appended as long as there is room for it.
+fn update_rct_setting(settings: &mut Vec<u8>, entry: [u8; 3]) -> bool {
+    for existing in settings.chunks_exact_mut(3) {
+        if existing[0] != entry[0] || existing[1] != entry[1] {
+            continue;
+        }
+        if existing[2] == entry[2] {
+            return false;
+        }
+        existing[2] = entry[2];
+        return true;
+    }
+    if settings.len() / 3 >= IN_SET_RCT_SETTING_NUM_MAX {
+        return false;
+    }
+    settings.extend_from_slice(&entry);
+    true
+}
+
 fn initiator_param_index(name: &str) -> Option<u8> {
     match name {
         "initial_guard_time" => Some(0),
@@ -474,6 +692,136 @@ mod tests {
             transport,
             firmware_version: (0, 0),
             read_buffer: VecDeque::new(),
+            initiator_bitrate: None,
+            noise_resistance_attempted: false,
+            initiator_protocol: [None; INITIATOR_PROTOCOL_KEYS],
+        }
+    }
+
+    /// Queues a bare success response for one command, as the reader sends it.
+    fn ok_response(code: u8) -> Vec<u8> {
+        Frame::build(&[0xD7, code + 1, 0x00]).as_bytes().to_vec()
+    }
+
+    /// Command payloads of every frame the chipset wrote.
+    fn written_payloads(chipset: &Chipset<DummyTransport>) -> Vec<Vec<u8>> {
+        chipset
+            .transport
+            .writes
+            .iter()
+            .filter_map(|bytes| Frame::parse(bytes).and_then(Frame::into_payload))
+            .collect()
+    }
+
+    /// Queues an ACK followed by `count` command responses for `code`.
+    fn queue_command_responses(code: u8, count: usize) -> Vec<io::Result<Vec<u8>>> {
+        let mut reads = Vec::with_capacity(count * 2);
+        for _ in 0..count {
+            reads.push(Ok(frame::ACK_BYTES.to_vec()));
+            reads.push(Ok(ok_response(code)));
+        }
+        reads
+    }
+
+    #[test]
+    fn write_initiator_protocol_sends_only_what_changed() {
+        let mut chipset = new_chipset(DummyTransport::with_reads(queue_command_responses(0x02, 2)));
+
+        chipset
+            .configure_initiator(&[("add_crc", 1), ("check_crc", 1)])
+            .expect("first write should reach the reader");
+        // Repeating the same values needs no command at all.
+        chipset
+            .configure_initiator(&[("add_crc", 1), ("check_crc", 1)])
+            .expect("repeat should be skipped");
+        // Only the key that actually changes is sent.
+        chipset
+            .configure_initiator(&[("add_crc", 1), ("check_crc", 0)])
+            .expect("changed key should be written");
+
+        let payloads = written_payloads(&chipset);
+        assert_eq!(payloads.len(), 2, "expected two commands, got {payloads:?}");
+        // Both keys are new, so both are written.
+        assert_eq!(payloads[0], vec![0xD6, 0x02, 0x01, 0x01, 0x02, 0x01]);
+        // Only check_crc changed, so add_crc is left out.
+        assert_eq!(payloads[1], vec![0xD6, 0x02, 0x02, 0x00]);
+    }
+
+    #[test]
+    fn set_initiator_rf_skips_a_repeated_bitrate_and_resets_the_protocol_cache() {
+        // Type A and Type B avoid the FeliCa receive tuning, which would send
+        // commands of its own.
+        let mut reads = queue_command_responses(0x00, 1);
+        reads.extend(queue_command_responses(0x02, 1));
+        reads.extend(queue_command_responses(0x00, 1));
+        reads.extend(queue_command_responses(0x02, 1));
+        let mut chipset = new_chipset(DummyTransport::with_reads(reads));
+
+        chipset
+            .set_initiator_rf("106A", None)
+            .expect("first RF setup should reach the reader");
+        chipset
+            .configure_initiator(&[("add_crc", 1)])
+            .expect("protocol write should reach the reader");
+        chipset
+            .set_initiator_rf("106A", None)
+            .expect("repeated RF setup should be skipped");
+        assert_eq!(chipset.initiator_bitrate(), Some(("106A", "106A")));
+        assert_eq!(chipset.transport.writes.len(), 2);
+
+        // A different bitrate is written, and invalidates the protocol cache so
+        // the settings that go with it are established again.
+        chipset
+            .set_initiator_rf("106B", None)
+            .expect("new bitrate should reach the reader");
+        chipset
+            .configure_initiator(&[("add_crc", 1)])
+            .expect("protocol write should be repeated after the RF change");
+        assert_eq!(chipset.transport.writes.len(), 4);
+    }
+
+    #[test]
+    fn update_rct_setting_replaces_appends_and_reports_no_change() {
+        // A register already carrying the value needs no write.
+        let mut settings = vec![0x1A, 0xC0, 0x40];
+        assert!(!update_rct_setting(&mut settings, [0x1A, 0xC0, 0x40]));
+        assert_eq!(settings, vec![0x1A, 0xC0, 0x40]);
+
+        // A register listed with another value is replaced in place.
+        let mut settings = vec![0x01, 0x02, 0x03, 0x1A, 0xC0, 0x00];
+        assert!(update_rct_setting(&mut settings, [0x1A, 0xC0, 0x40]));
+        assert_eq!(settings, vec![0x01, 0x02, 0x03, 0x1A, 0xC0, 0x40]);
+
+        // A register not listed yet is appended.
+        let mut settings = vec![0x01, 0x02, 0x03];
+        assert!(update_rct_setting(&mut settings, [0x1A, 0xC0, 0x40]));
+        assert_eq!(settings, vec![0x01, 0x02, 0x03, 0x1A, 0xC0, 0x40]);
+
+        // A full block cannot take another register.
+        let mut settings = vec![0u8; IN_SET_RCT_SETTING_NUM_MAX * 3];
+        assert!(!update_rct_setting(&mut settings, [0x1A, 0xC0, 0x40]));
+        assert_eq!(settings.len(), IN_SET_RCT_SETTING_NUM_MAX * 3);
+    }
+
+    #[test]
+    fn take_rct_block_reads_length_prefixed_settings() {
+        let body = [
+            0x02, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x01, 0x1A, 0xC0, 0x40,
+        ];
+        let send = take_rct_block(&body, 0).expect("send block should parse");
+        assert_eq!(send, vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let receive = take_rct_block(&body, 1 + send.len()).expect("receive block should parse");
+        assert_eq!(receive, vec![0x1A, 0xC0, 0x40]);
+
+        assert!(take_rct_block(&body, body.len()).is_err());
+        assert!(take_rct_block(&[0x05, 0x00], 0).is_err());
+    }
+
+    #[test]
+    fn lt_info_table_rows_are_well_formed() {
+        // Every row is two property bytes, two version bytes and a 16 byte key.
+        for entry in LT_INFO_TABLE {
+            assert_eq!(entry.len(), 4 + LT_INFO_LEN);
         }
     }
 

@@ -53,6 +53,16 @@ impl<T: Transport> Device<T> {
         self.chipset.switch_rf(false)
     }
 
+    /// Bitrates the reader's RF is configured for, send first, or `None` before
+    /// the first detection.
+    ///
+    /// Unlike the Port-400, the Port-100 has no query for the speed a card was
+    /// activated at: the host sets the RF itself and the card either answers at
+    /// that speed or is not found, so this is the speed of the current link.
+    pub fn initiator_bitrate(&self) -> Option<(&str, &str)> {
+        self.chipset.initiator_bitrate()
+    }
+
     pub fn get_max_send_data_size(&self, _target: &RemoteTarget) -> usize {
         290
     }

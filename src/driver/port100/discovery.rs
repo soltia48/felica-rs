@@ -3,7 +3,7 @@ use crate::clf::targets::{LocalTarget, RemoteTarget};
 use crate::driver::errors::{ChipsetError, DriverError, Result};
 use crate::driver::port100::device::Device;
 use crate::felica_standard::{
-    FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult,
+    FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult, polling_timeout_ms,
 };
 use crate::transport::Transport;
 use log::{debug, warn};
@@ -236,7 +236,6 @@ impl<T: Transport> Device<T> {
 
         self.configure_initiator_for_poll(bitrate, &[("initial_guard_time", 24)])?;
 
-        let timeout_ms = ((0.003625_f32 + time_slots as f32 * 0.001208_f32) * 1000.0).ceil();
         let command = FelicaStandardCommand::Polling {
             system_code,
             request_code,
@@ -248,7 +247,7 @@ impl<T: Transport> Device<T> {
         debug!("send SENSF_REQ {}", hex::encode(&frame));
         let response = self
             .chipset
-            .initiator_exchange_rf(&frame, timeout_ms as u16)?;
+            .initiator_exchange_rf(&frame, polling_timeout_ms(time_slots))?;
 
         match FelicaStandardResponse::from_bytes(&response) {
             Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {

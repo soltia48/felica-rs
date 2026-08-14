@@ -9,7 +9,7 @@ use crate::driver::port400::iso14443::{
 };
 use crate::driver::port400::pcsc::{Pcsc, TransmissionFlags, TypeBInfo};
 use crate::felica_standard::{
-    FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult,
+    FelicaStandardCommand, FelicaStandardResponse, Type3TagPollingResult, polling_timeout_ms,
 };
 use crate::transport::Transport;
 use crate::transport::usb::UsbTransport;
@@ -20,11 +20,7 @@ use std::time::Duration;
 
 const PORT400_PIDS: &[u16] = &[0x0DC8, 0x0DC9, 0x0D8F];
 const MAX_THROUGH_PAYLOAD: usize = 290;
-/// Shortest frame waiting time the reader accepts for a through command; shorter
-/// requests are raised to it.
-const MIN_THROUGH_TIMEOUT_MS: u16 = 400;
-/// Frame waiting time used while polling for a Type-F card.
-const FELICA_DETECT_TIMEOUT_MS: u64 = 100;
+const DEFAULT_THROUGH_TIMEOUT_MS: u16 = 400;
 const TYPE_A_CMD_TIMEOUT_MS: u16 = 30;
 const TYPE_B_CMD_TIMEOUT_MS: u16 = 30;
 /// Offsets into the Get Firmware Version response that report whether the
@@ -458,11 +454,8 @@ impl<T: Transport> Device<T> {
             .to_frame()
             .map_err(|err| DriverError::Other(format!("failed to build SENSF_REQ: {err}")))?;
         let flags = TransmissionFlags::felica();
-        let response = self.pcsc.transceive(
-            &frame,
-            Duration::from_millis(FELICA_DETECT_TIMEOUT_MS),
-            &flags,
-        )?;
+        let timeout = Duration::from_millis(polling_timeout_ms(time_slots) as u64);
+        let response = self.pcsc.transceive(&frame, timeout, &flags)?;
         match FelicaStandardResponse::from_bytes(&response) {
             Ok(FelicaStandardResponse::Polling { idm, pmm, optional }) => {
                 if auto_baud {
@@ -1463,13 +1456,13 @@ impl<T: Transport> DeviceInfo for Device<T> {
 
 impl_reader_device!(Device);
 
-/// Frame waiting time of a through command. Requests below the reader's minimum
-/// are raised to it, and a missing timeout falls back to that same minimum.
+/// Frame waiting time of a through command.
+///
+/// The caller's value is used as it stands: the FeliCa layer works each command's
+/// timeout out from the card's PMm, and raising it to a floor would throw that
+/// away. Only a caller that supplies none falls back to a fixed default.
 fn through_timeout(timeout_ms: Option<u16>) -> Duration {
-    let ms = timeout_ms
-        .unwrap_or(MIN_THROUGH_TIMEOUT_MS)
-        .max(MIN_THROUGH_TIMEOUT_MS);
-    Duration::from_millis(ms as u64)
+    Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_THROUGH_TIMEOUT_MS) as u64)
 }
 
 fn ensure_through_command(data: &[u8]) -> Result<()> {
@@ -1668,10 +1661,13 @@ mod tests {
     }
 
     #[test]
-    fn through_timeout_applies_the_reader_minimum() {
-        let minimum = Duration::from_millis(MIN_THROUGH_TIMEOUT_MS as u64);
-        assert_eq!(through_timeout(None), minimum);
-        assert_eq!(through_timeout(Some(123)), minimum);
+    fn through_timeout_keeps_the_caller_value_and_defaults_when_absent() {
+        assert_eq!(
+            through_timeout(None),
+            Duration::from_millis(DEFAULT_THROUGH_TIMEOUT_MS as u64)
+        );
+        // A computed timeout is passed through untouched, however short.
+        assert_eq!(through_timeout(Some(2)), Duration::from_millis(2));
         assert_eq!(through_timeout(Some(1_000)), Duration::from_millis(1_000));
     }
 

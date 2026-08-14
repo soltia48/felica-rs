@@ -54,7 +54,7 @@ pub use secure::{
     SecureSessionCredentials, SecureSessionCredentialsRef, SecureSessionScheme,
     generate_group_key_v2_aes128, generate_service_keys_des,
 };
-pub use type3::Type3TagPollingResult;
+pub use type3::{Type3TagPollingResult, polling_timeout_ms};
 pub use types::{
     AreaCodeRange, BlockListElement, ChangeKeyParameters, ContainerInformation, ContainerProperty,
     GetAreaInformationResult, GetNodePropertyResult, GetSystemStatusResult,
