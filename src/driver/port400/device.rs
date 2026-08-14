@@ -286,7 +286,9 @@ impl<T: Transport> Device<T> {
         if update_mode {
             warn!("Port-400 is in firmware update mode; card operations are unavailable");
         } else {
-            pcsc.start_transparent_session(false)?;
+            // Taking priority ends a session another process left open, which is
+            // what makes a reader whose last user exited uncleanly usable again.
+            pcsc.start_transparent_session(true)?;
             session_open = true;
             pcsc.switch_protocol_type_f(false)?;
             device_type = pcsc
@@ -343,13 +345,7 @@ impl<T: Transport> Device<T> {
     }
 
     pub fn close(&mut self) -> Result<()> {
-        if self.session_open {
-            let _ = self.pcsc.end_transparent_session();
-            self.session_open = false;
-        }
-        // The frontend RF speeds outlive the session, so hand the reader back the
-        // way it was found.
-        self.reset_rf_speed();
+        self.release_reader();
         self.pcsc.close()
     }
 
@@ -937,6 +933,18 @@ impl<T: Transport> Device<T> {
         Ok(())
     }
 
+    /// Ends the transparent session and undoes the RF speeds this driver changed.
+    ///
+    /// Both live in the reader rather than in this process, so they have to be
+    /// given back whether the caller closes the device or just drops it.
+    fn release_reader(&mut self) {
+        if self.session_open {
+            let _ = self.pcsc.end_transparent_session();
+            self.session_open = false;
+        }
+        self.reset_rf_speed();
+    }
+
     pub fn read_rffe_parameter(
         &mut self,
         category: u8,
@@ -1445,6 +1453,16 @@ impl<'a> IsoDepExchangeState<'a> {
 
     fn current_timeout(&self) -> Duration {
         self.current_timeout
+    }
+}
+
+impl<T: Transport> Drop for Device<T> {
+    /// Releases the reader for callers that drop the device without closing it.
+    ///
+    /// The transparent session belongs to the reader and outlives the process, so
+    /// leaving it open locks the next run out with an access authority error.
+    fn drop(&mut self) {
+        self.release_reader();
     }
 }
 
