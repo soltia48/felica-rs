@@ -1,6 +1,6 @@
 # felica
 
-[![CI](https://github.com/soltia48/felica/actions/workflows/ci.yml/badge.svg)](https://github.com/soltia48/felica/actions/workflows/ci.yml)
+[![CI](https://github.com/soltia48/felica-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/soltia48/felica-rs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/felica.svg)](https://crates.io/crates/felica)
 [![docs.rs](https://docs.rs/felica/badge.svg)](https://docs.rs/felica)
 
