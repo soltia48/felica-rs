@@ -116,6 +116,7 @@ Available commands:
 |--------|-------------|
 | `clf` | Contactless Frontend utilities (CRC, errors, targets) |
 | `driver` | Hardware driver implementations for NFC readers |
+| `driver::framing` | Sony SOF frame envelope shared by the Port-100, RC-S320 and RC-S956 drivers |
 | `driver::port100` | Sony Port-100 (RC-S380) driver |
 | `driver::port400` | Sony Port-400 (RC-S300) driver |
 | `driver::rcs320` | Sony RC-S320 driver |
