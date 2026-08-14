@@ -21,11 +21,11 @@
 //! ```
 
 use encoding_rs::SHIFT_JIS;
-use felica_rs::felica_standard::{
+use felica::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, KeyStore,
     ResolvedNodeKeys, ServiceCode,
 };
-use felica_rs::{ReaderPreference, RemoteDriver, open_reader};
+use felica::{ReaderPreference, RemoteDriver, open_reader};
 use hex::encode;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -631,7 +631,7 @@ fn run_with_driver<D: FelicaDriver + ?Sized>(
     // Derive the DES/AES keys for the target nodes and authenticate in one call.
     let auth_result = felica.authenticate_node(&card_keys, &areas, &services, None)?;
     let idi_str = idi_bytes_to_str(&auth_result.issue_id);
-    let pmi_hex = encode(&auth_result.issue_parameter).to_uppercase();
+    let pmi_hex = encode(auth_result.issue_parameter).to_uppercase();
 
     print_item("IDi", &idi_str);
     print_item("PMi", &pmi_hex);

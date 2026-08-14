@@ -7,7 +7,7 @@
 //! - [`usb`] - USB communication via the `rusb` crate
 //!
 //! Setup shared by every USB-based transport (opening the device, claiming the
-//! interface, mapping `rusb` errors) lives in [`usb_common`].
+//! interface, mapping `rusb` errors) lives in the private `usb_common` module.
 
 #[cfg(feature = "usb")]
 pub mod usb;

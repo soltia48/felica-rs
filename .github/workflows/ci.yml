@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# `-D warnings` is applied in the lint job only.  Setting it globally would
+# make every job fail the day a new compiler release adds a lint, which is
+# noise: the lint job alone reports that, and the tests keep running.
+
+jobs:
+  lint:
+    name: Format, lints and docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # The crate compiles different code depending on `usb`, so both sides
+      # have to be linted.
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      # Several modules exist only with `usb`, and the crate docs link to them,
+      # so the documentation is built with everything on.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `rusb` builds libusb from its vendored copy when the system library is
+      # absent, so no platform needs anything installed.  The point of running
+      # elsewhere is that the protocol code is plain arithmetic and byte
+      # handling, and should behave the same everywhere.
+      - name: Test
+        run: cargo test --all-features
+
+  features:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "--all-features"
+          - "--no-default-features"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Cargo.toml states that turning `usb` off leaves a crate with no
+      # `rusb`/`libusb` dependency.  This is where that claim is checked.
+      - name: Test ${{ matrix.features }}
+        run: cargo test ${{ matrix.features }}
+
+      - name: Confirm rusb is absent without the usb feature
+        if: matrix.features == '--no-default-features'
+        run: |
+          set -euo pipefail
+          if cargo tree --no-default-features --prefix none | grep -q '^rusb'; then
+            echo "::error::rusb is still in the dependency graph without the usb feature"
+            exit 1
+          fi
+          echo "no rusb in the graph"
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml declares rust-version = $version"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Building is not enough: the declared version has to be able to run the
+      # suite, or the claim in Cargo.toml is not worth much.
+      - name: Test on the declared minimum
+        run: cargo test --all-features
+
+  audit:
+    name: Security advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # This crate carries cryptography and a USB stack, and pulls in a couple
+      # of dozen dependencies to do it.  An advisory against any of them is
+      # something the repository should hear about.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the crate archive
+        run: cargo package
+
+      # `exclude` keeps local key material and editor settings out of the
+      # published crate.  This is where a mistake in it shows up.
+      - name: Report contents and check the exclusions held
+        run: |
+          set -euo pipefail
+          cargo package --list | sed 's/^/  /'
+          for unwanted in keys.jsonl .github/ .vscode/; do
+            if cargo package --list | grep -q "^$unwanted"; then
+              echo "::error::$unwanted reached the crate archive"
+              exit 1
+            fi
+          done
+          size=$(du -k target/package/*.crate | cut -f1)
+          echo "crate archive: ${size} KiB"

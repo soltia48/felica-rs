@@ -26,8 +26,8 @@
 //! {"type": "transceive", "bitrate": "212F", "data": "0A02...", "timeout_ms": 1000}
 //! ```
 
-use felica_rs::{Reader, ReaderPreference, RemoteTarget, open_reader};
-use felica_rs::{RemoteRequest, RemoteResponse, RemoteResponseData};
+use felica::{Reader, ReaderPreference, RemoteTarget, open_reader};
+use felica::{RemoteRequest, RemoteResponse, RemoteResponseData};
 use hex::{decode as hex_decode, encode as hex_encode};
 use std::error::Error;
 use std::io::{BufRead, BufReader, Read, Write};

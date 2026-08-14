@@ -1,7 +1,21 @@
 [package]
-name = "felica-rs"
-version = "0.1.0"
+name = "felica"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.88"
+description = "FeliCa protocol implementation: mutual authentication, card emulation and PaSoRi reader drivers"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/soltia48/felica-rs"
+keywords = ["felica", "nfc", "smartcard", "pasori", "rfid"]
+categories = ["hardware-support", "cryptography", "embedded"]
+# Editor settings are not part of the crate.
+exclude = [".github/", ".vscode/"]
+
+# Several modules exist only with the `usb` feature, and the crate docs link to
+# them.  Document with everything on, which is also what docs.rs should show.
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 aes = { version = "0.9", features = ["zeroize"] }
@@ -35,3 +49,22 @@ usb = ["dep:rusb"]
 
 [dev-dependencies]
 encoding_rs = "0.8"
+
+# All but `remote_client` drive a local reader, so they need the `usb` feature.
+# Without this, `cargo build --no-default-features` fails on the examples even
+# though the library itself builds fine.
+[[example]]
+name = "dump"
+required-features = ["usb"]
+
+[[example]]
+name = "dump_suica"
+required-features = ["usb"]
+
+[[example]]
+name = "emulate"
+required-features = ["usb"]
+
+[[example]]
+name = "remote_server"
+required-features = ["usb"]

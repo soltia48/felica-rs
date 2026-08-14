@@ -27,7 +27,7 @@ impl FrameFormat for Rcs956Format {
 /// A parsed or built RC-S956 frame.
 pub type Frame = crate::driver::framing::Frame<Rcs956Format>;
 
-/// Builds a command frame: the [`HOST_TO_CONTROLLER`] identifier, the command
+/// Builds a command frame: the host-to-controller identifier, the command
 /// code, and then `data`.
 pub fn build_command(cmd_code: u8, data: &[u8]) -> Frame {
     let mut payload = Vec::with_capacity(data.len() + 2);

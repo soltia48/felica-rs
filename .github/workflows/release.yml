@@ -1,0 +1,102 @@
+name: Release
+
+# Tag a commit to release it:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# The tag has to match the version in Cargo.toml; the first job checks that
+# before anything is published.
+#
+# The jobs run in this order, and the order is the point:
+#
+#     verify ──┬──► github-release
+#              └──► publish        (crates.io)
+#
+# Publishing to crates.io cannot be undone — a version can be yanked, but not
+# removed, and the number can never be reused.  So everything that can still
+# fail runs first: the suite on every feature combination, and the packaging.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag and Cargo.toml must agree
+        id: version
+        run: |
+          set -euo pipefail
+          manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "manual run, Cargo.toml says $manifest"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag $tag, Cargo.toml $manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+
+      # A release must not ship anything the suite has not passed on, and the
+      # crate is meant to build with or without the reader drivers.
+      - name: Test with the usb feature
+        run: cargo test --all-features
+
+      - name: Test without it
+        run: cargo test --no-default-features
+
+      - name: Package
+        run: cargo package
+
+  publish:
+    name: Publish to crates.io
+    # This is the one step that cannot be taken back, so it waits for `verify`.
+    needs: verify
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Add a protection rule to this environment if you want a manual approval
+    # step before anything reaches crates.io.
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
+  github-release:
+    name: GitHub release
+    needs: verify
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      # The crate has no binary targets — the examples all need a reader
+      # attached — so there is nothing to attach here beyond the notes.
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

@@ -1,10 +1,10 @@
 //! Convenience re-exports for common types and traits.
 //!
 //! This module provides a convenient way to import commonly used types
-//! from the felica-rs library with a single `use` statement:
+//! from the felica library with a single `use` statement:
 //!
 //! ```
-//! use felica_rs::prelude::*;
+//! use felica::prelude::*;
 //! ```
 //!
 //! ## Included Types

@@ -3,10 +3,10 @@
 //! Usage:
 //!   cargo run --example emulate
 
-use felica_rs::felica_standard::{
+use felica::felica_standard::{
     EmulatedArea, EmulatedService, EmulatedSystem, FelicaStandardEmulator,
 };
-use felica_rs::{LocalTarget, ServiceCode, open_port100};
+use felica::{LocalTarget, ServiceCode, open_port100};
 use log::{debug, info};
 use std::error::Error;
 

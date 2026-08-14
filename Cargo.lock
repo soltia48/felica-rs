@@ -296,8 +296,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "felica-rs"
-version = "0.1.0"
+name = "felica"
+version = "1.0.0"
 dependencies = [
  "aes",
  "cbc",

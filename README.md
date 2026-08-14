@@ -1,4 +1,8 @@
-# felica-rs
+# felica
+
+[![CI](https://github.com/soltia48/felica/actions/workflows/ci.yml/badge.svg)](https://github.com/soltia48/felica/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/felica.svg)](https://crates.io/crates/felica)
+[![docs.rs](https://docs.rs/felica/badge.svg)](https://docs.rs/felica)
 
 A Rust library for interacting with NFC (Near Field Communication) devices, with support for Sony's NFC Port-100 (RC-S380), Port-400 (RC-S300), RC-S320, and RC-S330/RC-S360/RC-S370 PaSoRi readers.
 
@@ -14,22 +18,39 @@ A Rust library for interacting with NFC (Near Field Communication) devices, with
 
 ## Requirements
 
-- Rust 2024 edition
-- USB access permissions for NFC readers
+- Rust 1.88 or newer (2024 edition)
+- USB access permissions for NFC readers — only when the `usb` feature is on
 
 ## Installation
 
-Add this to your `Cargo.toml`:
+```sh
+cargo add felica
+```
+
+or, in `Cargo.toml`:
 
 ```toml
 [dependencies]
-felica-rs = { git = "https://github.com/soltia48/felica-rs.git" }
+felica = "1.0"
+```
+
+The default `usb` feature pulls in `rusb` and the PaSoRi drivers. Turn it off
+to build only the hardware-independent parts — the FeliCa Standard protocol,
+the card emulator, and the TCP `driver::remote` — with no USB dependency:
+
+```sh
+cargo add felica --no-default-features
+```
+
+```toml
+[dependencies]
+felica = { version = "1.0", default-features = false }
 ```
 
 ## Quick Start
 
 ```rust
-use felica_rs::prelude::*;
+use felica::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open the first available reader
@@ -129,10 +150,14 @@ Available commands:
 
 ## API Overview
 
+The complete reference is on [docs.rs](https://docs.rs/felica), built with
+all features so that the reader drivers are included. What follows is a sketch
+of the entry points.
+
 ### Reader Selection
 
 ```rust
-use felica_rs::{open_reader, ReaderPreference};
+use felica::{open_reader, ReaderPreference};
 
 // Auto-detect reader
 let reader = open_reader(ReaderPreference::Auto)?;
@@ -147,7 +172,7 @@ let reader = open_reader(ReaderPreference::ForceRcs956)?;
 ### FeliCa Standard Operations
 
 ```rust
-use felica_rs::felica_standard::{FelicaStandard, ServiceCode, BlockListElement};
+use felica::felica_standard::{FelicaStandard, ServiceCode, BlockListElement};
 
 // Poll for a card. When both FeliCa bitrates are requested, 424F is tried
 // first and 212F is used as a fallback for cards that do not support 424F.
@@ -192,6 +217,23 @@ let result = felica.search_service_code(0)?;
 | Sony RC-S320 | 054C:01BB | ✅ Supported |
 | Sony RC-S330/RC-S360/RC-S370 (RC-S956) | 054C:02E1, 054C:0193 | ✅ Supported |
 
+## Continuous integration
+
+Every push and pull request runs, in `.github/workflows/ci.yml`:
+
+| job | what it checks |
+|---|---|
+| Lint | `cargo fmt --check`, `cargo clippy -D warnings` for both feature settings, `cargo doc -D warnings` |
+| Test | the suite on Linux, macOS and Windows |
+| Feature combinations | `--all-features` and `--no-default-features`, and that `rusb` really leaves the dependency graph with the latter |
+| MSRV | the whole suite on the `rust-version` declared in `Cargo.toml` |
+| Security advisories | `cargo audit` over the dependency graph |
+| Package | `cargo package`, checking that `keys.jsonl` and the CI configuration stay out of the crate |
+
+Tagging a commit `v<version>` runs `.github/workflows/release.yml`, which
+checks the tag against `Cargo.toml`, runs the suite on both feature settings
+and publishes to crates.io.
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
@@ -199,3 +241,18 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+Before opening one, the checks below are what CI will run, and all of them
+should pass locally:
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo test --all-features
+cargo test --no-default-features
+```
+
+The last one matters: the crate is meant to build and pass its tests with the
+`usb` feature turned off, and an example or doctest that needs a reader has to
+say so with `required-features = ["usb"]` or a feature-gated doc fence.

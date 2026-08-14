@@ -12,8 +12,9 @@
 //!
 //! ## Example
 //!
-//! ```no_run
-//! use felica_rs::prelude::*;
+#![cfg_attr(feature = "usb", doc = "```no_run")]
+#![cfg_attr(not(feature = "usb"), doc = "```ignore")]
+//! use felica::prelude::*;
 //!
 //! fn read_card(reader: &mut Reader) -> Result<(), FelicaStandardError> {
 //!     // Poll for a FeliCa card with any system code

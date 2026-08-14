@@ -307,6 +307,9 @@ mod tests {
     }
 
     #[test]
+    // Comparing constants is the point: these pin the relationships the
+    // protocol code assumes between the size limits.
+    #[allow(clippy::assertions_on_constants)]
     fn size_and_limit_constants_match_protocol_expectations() {
         assert_eq!(IDM_LEN, 8);
         assert_eq!(BLOCK_SIZE, 16);

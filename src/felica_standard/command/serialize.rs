@@ -80,7 +80,7 @@ impl FelicaStandardCommand {
     /// Returns [`FelicaStandardError::Protocol`] if the command is a secure
     /// (encrypted) one, which must be wrapped by a secure session rather than
     /// framed directly, or if the resulting packet would exceed the
-    /// [255-byte][crate::felica_standard::MAX_PACKET_LEN] limit imposed by the
+    /// 255-byte limit imposed by the
     /// one-byte data length field.
     pub fn to_frame(&self) -> Result<Vec<u8>, FelicaStandardError> {
         match self.encoding()? {

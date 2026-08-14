@@ -25,11 +25,11 @@
 //! cargo run --example dump -- --keys keys.jsonl --remote 127.0.0.1:7878
 //! ```
 
-use felica_rs::felica_standard::{
+use felica::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, KeyStore,
     ResolvedNodeKeys, SearchServiceCodeResult, ServiceCode,
 };
-use felica_rs::{Reader, ReaderPreference, RemoteDriver, open_reader};
+use felica::{Reader, ReaderPreference, RemoteDriver, open_reader};
 use hex::encode;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -486,6 +486,8 @@ fn fetch_key_versions<D: FelicaDriver + ?Sized>(
     key_versions
 }
 
+// The tuple mirrors the three lists this walk accumulates; naming it would not help a reader of the example.
+#[allow(clippy::type_complexity)]
 fn collect_system_areas<D: FelicaDriver + ?Sized>(
     felica: &mut FelicaStandard<D>,
     key_request_codes: &mut Vec<ServiceCode>,
@@ -704,7 +706,7 @@ fn store_key_versions(
     service_codes: &[ServiceCode],
     summaries: Vec<KeyVersionSummary>,
 ) {
-    for (service_code, summary) in service_codes.iter().zip(summaries.into_iter()) {
+    for (service_code, summary) in service_codes.iter().zip(summaries) {
         map.insert(service_code.raw(), summary);
     }
 }
@@ -892,8 +894,8 @@ fn read_service_blocks_with_auth<D: FelicaDriver + ?Sized>(
         .authenticate_node(keys, &target.area_codes, &[service_code], None)
         .map_err(|err| format!("Mutual Authentication failed: {}", err))?;
     let auth_summary = MutualAuthSummary {
-        idi: encode(&auth_result.issue_id).to_uppercase(),
-        pmi: encode(&auth_result.issue_parameter).to_uppercase(),
+        idi: encode(auth_result.issue_id).to_uppercase(),
+        pmi: encode(auth_result.issue_parameter).to_uppercase(),
     };
 
     let mut blocks_hex = Vec::new();
@@ -958,10 +960,9 @@ fn collect_plaintext_service_group(
         .services
         .iter()
         .find(|service| service.attributes_raw & 0x01 == 0x01)
+        && seen.insert(service.service_code_raw)
     {
-        if seen.insert(service.service_code_raw) {
-            targets.push(service.service_code_raw);
-        }
+        targets.push(service.service_code_raw);
     }
 }
 

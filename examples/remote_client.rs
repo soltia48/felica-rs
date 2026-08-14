@@ -11,8 +11,8 @@
 //!
 //! Default address is 127.0.0.1:7878
 
-use felica_rs::RemoteDriver;
-use felica_rs::felica_standard::{BlockListElement, FelicaStandard, ServiceCode};
+use felica::RemoteDriver;
+use felica::felica_standard::{BlockListElement, FelicaStandard, ServiceCode};
 use hex::encode as hex_encode;
 use std::error::Error;
 use std::io::{Write, stdin, stdout};
@@ -176,7 +176,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
             let result = felica.search_service_code(service_index)?;
 
             match result {
-                Some(felica_rs::SearchServiceCodeResult::Service(code)) => {
+                Some(felica::SearchServiceCodeResult::Service(code)) => {
                     println!("Index {}: Service 0x{:04X}", service_index, code.raw());
                     println!("  Number: {}", code.number());
                     println!("  Attributes: 0x{:02X}", code.attributes());
@@ -184,7 +184,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                         println!("  Description: {}", desc);
                     }
                 }
-                Some(felica_rs::SearchServiceCodeResult::Area {
+                Some(felica::SearchServiceCodeResult::Area {
                     area_code,
                     end_service_code,
                 }) => {
@@ -234,7 +234,7 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                 )?;
 
                 match felica.search_service_code(index) {
-                    Ok(Some(felica_rs::SearchServiceCodeResult::Service(code))) => {
+                    Ok(Some(felica::SearchServiceCodeResult::Service(code))) => {
                         println!(
                             "  [{:02X}] Service 0x{:04X} (attr: 0x{:02X})",
                             index,
@@ -255,21 +255,18 @@ fn execute_command(driver: &mut RemoteDriver, input: &str) -> Result<(), Box<dyn
                                 0x00,
                                 0x00,
                             )?;
-                            match felica.read_without_encryption(&codes, &blocks) {
-                                Ok(data) => {
-                                    for (i, block) in data.iter().enumerate() {
-                                        println!(
-                                            "        Block {}: {}",
-                                            i,
-                                            hex_encode(block).to_uppercase()
-                                        );
-                                    }
+                            if let Ok(data) = felica.read_without_encryption(&codes, &blocks) {
+                                for (i, block) in data.iter().enumerate() {
+                                    println!(
+                                        "        Block {}: {}",
+                                        i,
+                                        hex_encode(block).to_uppercase()
+                                    );
                                 }
-                                Err(_) => {}
                             }
                         }
                     }
-                    Ok(Some(felica_rs::SearchServiceCodeResult::Area {
+                    Ok(Some(felica::SearchServiceCodeResult::Area {
                         area_code,
                         end_service_code,
                     })) => {
