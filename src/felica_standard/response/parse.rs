@@ -1,5 +1,12 @@
 use super::*;
 
+/// Offset of the IDm in an addressed response, behind the length byte and the
+/// response code.
+const IDM_OFFSET: usize = 2;
+/// First byte behind the IDm: where a response's own fields begin, and where
+/// the responses that report an outcome put status flag 1.
+const PAYLOAD_OFFSET: usize = IDM_OFFSET + IDM_LEN;
+
 impl FelicaStandardResponse {
     pub fn from_bytes(data: &[u8]) -> DriverResult<FelicaStandardResponse> {
         Self::ensure_response_len(data, 2, "short Felica response")?;
@@ -19,8 +26,8 @@ impl FelicaStandardResponse {
         if code == AUTHENTICATION2_V2_RESPONSE_CODE {
             return Self::parse_authentication2_v2(data);
         }
-        Self::ensure_response_len(data, 10, "short Felica response")?;
-        let (idm, _rest) = parse_idm(&data[2..])?;
+        Self::ensure_response_len(data, PAYLOAD_OFFSET, "short Felica response")?;
+        let (idm, _rest) = parse_idm(&data[IDM_OFFSET..])?;
         match code {
             POLLING_RESPONSE_CODE => Self::parse_polling(idm, data),
             REQUEST_SERVICE_RESPONSE_CODE => Self::parse_request_service(idm, data),
@@ -80,19 +87,27 @@ impl FelicaStandardResponse {
     }
 
     fn parse_authentication2(data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 10, "short authentication2 response payload")?;
+        Self::ensure_response_len(
+            data,
+            PAYLOAD_OFFSET,
+            "short authentication2 response payload",
+        )?;
         Ok(FelicaStandardResponse::Authentication2(
             Authentication2Response {
-                encrypted_payload: data[2..].to_vec(),
+                encrypted_payload: data[IDM_OFFSET..].to_vec(),
             },
         ))
     }
 
     fn parse_authentication2_v2(data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 10, "short authentication2 v2 response payload")?;
+        Self::ensure_response_len(
+            data,
+            PAYLOAD_OFFSET,
+            "short authentication2 v2 response payload",
+        )?;
         Ok(FelicaStandardResponse::Authentication2V2(
             Authentication2V2Response {
-                encrypted_payload: data[2..].to_vec(),
+                encrypted_payload: data[IDM_OFFSET..].to_vec(),
             },
         ))
     }
@@ -125,9 +140,8 @@ impl FelicaStandardResponse {
     }
 
     fn parse_request_service_v2(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short request service v2 response header")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short request service v2 response header")?;
         let mut result = None;
 
         if status_flag1 == 0 {
@@ -195,9 +209,7 @@ impl FelicaStandardResponse {
     }
 
     fn parse_read_without_encryption(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short read without encryption response")?;
-        let sf1 = data[10];
-        let sf2 = data[11];
+        let (sf1, sf2) = Self::status_flags(data, "short read without encryption response")?;
         if sf1 != 0 {
             return Ok(FelicaStandardResponse::ReadWithoutEncryption {
                 idm,
@@ -229,9 +241,7 @@ impl FelicaStandardResponse {
     }
 
     fn parse_write_without_encryption(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short write without encryption response")?;
-        let sf1 = data[10];
-        let sf2 = data[11];
+        let (sf1, sf2) = Self::status_flags(data, "short write without encryption response")?;
         Ok(FelicaStandardResponse::WriteWithoutEncryption {
             idm,
             status_flag1: sf1,
@@ -300,9 +310,8 @@ impl FelicaStandardResponse {
     }
 
     fn parse_request_block_information_ex(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short request block information ex response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short request block information ex response")?;
         if status_flag1 != 0 {
             return Ok(FelicaStandardResponse::RequestBlockInformationEx {
                 idm,
@@ -349,9 +358,8 @@ impl FelicaStandardResponse {
     }
 
     fn parse_request_code_list(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short request code list response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short request code list response")?;
         if status_flag1 != 0 {
             return Ok(FelicaStandardResponse::RequestCodeList {
                 idm,
@@ -413,11 +421,12 @@ impl FelicaStandardResponse {
     }
 
     fn parse_set_parameter(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short set parameter response")?;
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short set parameter response")?;
         Ok(FelicaStandardResponse::SetParameter {
             idm,
-            status_flag1: data[10],
-            status_flag2: data[11],
+            status_flag1,
+            status_flag2,
         })
     }
 
@@ -438,7 +447,7 @@ impl FelicaStandardResponse {
 
     fn parse_get_container_property(data: &[u8]) -> DriverResult<Self> {
         Self::ensure_response_len(data, 3, "short get container property response")?;
-        let payload = data[2..].to_vec();
+        let payload = data[IDM_OFFSET..].to_vec();
         if payload.is_empty() {
             return Err(DriverError::Other(
                 "get container property response data must contain at least one byte".into(),
@@ -448,14 +457,13 @@ impl FelicaStandardResponse {
     }
 
     fn parse_get_container_id(container_idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 10, "short get container id response")?;
+        Self::ensure_response_len(data, PAYLOAD_OFFSET, "short get container id response")?;
         Ok(FelicaStandardResponse::GetContainerId { container_idm })
     }
 
     fn parse_get_area_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short get area information response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short get area information response")?;
         if status_flag1 != 0 {
             return Ok(FelicaStandardResponse::GetAreaInformation {
                 idm,
@@ -477,9 +485,8 @@ impl FelicaStandardResponse {
     }
 
     fn parse_get_node_property(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short get node property response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short get node property response")?;
         if status_flag1 != 0 {
             return Ok(FelicaStandardResponse::GetNodeProperty {
                 idm,
@@ -537,8 +544,8 @@ impl FelicaStandardResponse {
 
     fn parse_get_system_status(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         Self::ensure_response_len(data, 14, "short get system status response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let status_flag1 = data[PAYLOAD_OFFSET];
+        let status_flag2 = data[PAYLOAD_OFFSET + 1];
         let flag = data[12];
         let data_len = data[13] as usize;
         Self::ensure_response_len(
@@ -558,9 +565,8 @@ impl FelicaStandardResponse {
     }
 
     fn parse_request_product_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short request product information response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short request product information response")?;
         if status_flag1 != 0 {
             return Ok(FelicaStandardResponse::RequestProductInformation {
                 idm,
@@ -590,9 +596,8 @@ impl FelicaStandardResponse {
     }
 
     fn parse_request_specification_version(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short request specification version response")?;
-        let status_flag1 = data[10];
-        let status_flag2 = data[11];
+        let (status_flag1, status_flag2) =
+            Self::status_flags(data, "short request specification version response")?;
         let specification_version = if status_flag1 == 0 && data.len() > 12 {
             Some(parse_specification_version_data(&data[12..])?)
         } else {
@@ -607,11 +612,11 @@ impl FelicaStandardResponse {
     }
 
     fn parse_reset_mode(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 12, "short reset mode response")?;
+        let (status_flag1, status_flag2) = Self::status_flags(data, "short reset mode response")?;
         Ok(FelicaStandardResponse::ResetMode {
             idm,
-            status_flag1: data[10],
-            status_flag2: data[11],
+            status_flag1,
+            status_flag2,
         })
     }
 
@@ -790,6 +795,13 @@ impl FelicaStandardResponse {
             challenge_2a,
             challenge_3c,
         })
+    }
+
+    /// Reads the two status flags an addressed response reports its outcome
+    /// with, having checked that the response is long enough to hold them.
+    fn status_flags(data: &[u8], message: &str) -> DriverResult<(u8, u8)> {
+        Self::ensure_response_len(data, PAYLOAD_OFFSET + 2, message)?;
+        Ok((data[PAYLOAD_OFFSET], data[PAYLOAD_OFFSET + 1]))
     }
 
     fn ensure_response_len(data: &[u8], required: usize, message: &str) -> DriverResult<()> {

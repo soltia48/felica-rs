@@ -490,26 +490,15 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 result,
                 ..
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Request Service v2",
-                        status_flag1,
-                        status_flag2,
+                let result =
+                    Self::require_result("Request Service v2", status_flag1, status_flag2, result)?;
+                let key_versions = result.key_versions;
+                if key_versions.len() != service_codes.len() {
+                    Err(FelicaStandardError::Protocol(
+                        "Request Service v2 key version count mismatch".into(),
                     ))
                 } else {
-                    let result = result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Request Service v2 missing result payload".into(),
-                        )
-                    })?;
-                    let key_versions = result.key_versions;
-                    if key_versions.len() != service_codes.len() {
-                        Err(FelicaStandardError::Protocol(
-                            "Request Service v2 key version count mismatch".into(),
-                        ))
-                    } else {
-                        Ok(key_versions)
-                    }
+                    Ok(key_versions)
                 }
             }
             _ => Err(unexpected_response("Request Service V2")),
@@ -723,20 +712,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 result,
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Register Issue ID",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    let result = result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Register Issue ID missing result payload".into(),
-                        )
-                    })?;
-                    Ok(result.remaining_blocks)
-                }
+                let result =
+                    Self::require_result("Register Issue ID", status_flag1, status_flag2, result)?;
+                Ok(result.remaining_blocks)
             }
             _ => Err(unexpected_response("Register Issue ID")),
         }
@@ -819,20 +797,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 result,
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Register Service",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    let result = result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Register Service missing result payload".into(),
-                        )
-                    })?;
-                    Ok(result.remaining_blocks)
-                }
+                let result =
+                    Self::require_result("Register Service", status_flag1, status_flag2, result)?;
+                Ok(result.remaining_blocks)
             }
             _ => Err(unexpected_response("Register Service")),
         }

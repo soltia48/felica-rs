@@ -302,45 +302,25 @@ impl<T: Transport> Chipset<T> {
         Ok(bytes)
     }
 
-    /// Parses and validates a response frame.
+    /// Parses a response frame and checks that it fills the USB packet exactly.
+    ///
+    /// The envelope itself — the length checksum, the data checksum and the
+    /// postamble — is validated by [`Frame::parse`]. What it cannot tell is that
+    /// the frame accounts for every byte the reader sent: a USB read hands over
+    /// a whole packet, so bytes left over past the postamble mean the reader and
+    /// this driver disagree about the response rather than that a second frame
+    /// arrived.
     fn parse_response_frame(&self, frame_bytes: &[u8]) -> Result<Frame> {
-        // Check for extended frame
-        if frame_bytes.get(3..5) == Some(&[0xFF, 0xFF]) {
-            // Extended frame: SOF(3) + FF FF(2) + LEN(2) + LCS(1) + DATA + DCS(1) + POSTAMBLE(1)
-            if frame_bytes.len() < 10 {
-                return Err(DriverError::Other("extended frame too short".into()));
-            }
-            // Verify length checksum
-            let lcs_sum =
-                (frame_bytes[5] as u16 + frame_bytes[6] as u16 + frame_bytes[7] as u16) % 256;
-            if lcs_sum != 0 {
-                return Err(DriverError::Other("frame length checksum error".into()));
-            }
-            let data_len = u16::from_be_bytes([frame_bytes[5], frame_bytes[6]]) as usize;
-            if data_len != frame_bytes.len() - 10 {
-                return Err(DriverError::Other("frame length value mismatch".into()));
-            }
-        } else {
-            // Normal frame: SOF(3) + LEN(1) + LCS(1) + DATA + DCS(1) + POSTAMBLE(1)
-            if frame_bytes.len() < 7 {
-                return Err(DriverError::Other("normal frame too short".into()));
-            }
-            // Verify length checksum
-            let lcs_sum = (frame_bytes[3] as u16 + frame_bytes[4] as u16) % 256;
-            if lcs_sum != 0 {
-                return Err(DriverError::Other("frame length checksum error".into()));
-            }
-            let data_len = frame_bytes[3] as usize;
-            if data_len != frame_bytes.len() - 7 {
-                return Err(DriverError::Other(format!(
-                    "frame length value mismatch: expected {}, got {}",
-                    data_len,
-                    frame_bytes.len() - 7
-                )));
-            }
+        let frame = Frame::parse(frame_bytes)
+            .ok_or_else(|| DriverError::Other("invalid response frame".into()))?;
+        let frame_len = frame.as_bytes().len();
+        if frame_len != frame_bytes.len() {
+            return Err(DriverError::Other(format!(
+                "frame length value mismatch: the frame is {frame_len} bytes but the packet is {}",
+                frame_bytes.len()
+            )));
         }
-
-        Frame::parse(frame_bytes).ok_or_else(|| DriverError::Other("invalid response frame".into()))
+        Ok(frame)
     }
 
     /// Extracts the response payload from a frame.
@@ -704,34 +684,49 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_frame_rejects_invalid_lengths_and_checksums() {
+    fn parse_response_frame_rejects_malformed_frames() {
         let chipset = new_chipset(DummyTransport::default());
 
+        // Truncated before the postamble.
         assert_driver_error_contains(
             chipset.parse_response_frame(&[0x00, 0x00, 0xFF, 0x01, 0xFF, 0xD5]),
-            "normal frame too short",
+            "invalid response frame",
         );
 
         let mut bad_lcs = Frame::build(&[0xD5, 0x03]).as_bytes().to_vec();
         bad_lcs[4] ^= 0x01;
         assert_driver_error_contains(
             chipset.parse_response_frame(&bad_lcs),
-            "frame length checksum error",
-        );
-
-        let mut bad_len = Frame::build(&[0xD5, 0x03]).as_bytes().to_vec();
-        bad_len[3] = bad_len[3].wrapping_add(1);
-        bad_len[4] = bad_len[4].wrapping_sub(1);
-        assert_driver_error_contains(
-            chipset.parse_response_frame(&bad_len),
-            "frame length value mismatch",
+            "invalid response frame",
         );
 
         let mut bad_extended_lcs = Frame::build(&vec![0xAA; 300]).as_bytes().to_vec();
         bad_extended_lcs[7] ^= 0x01;
         assert_driver_error_contains(
             chipset.parse_response_frame(&bad_extended_lcs),
-            "frame length checksum error",
+            "invalid response frame",
+        );
+    }
+
+    /// A frame that does not account for the whole USB packet is reported even
+    /// though its own checksums are sound: the reader sent bytes this driver
+    /// cannot explain.
+    #[test]
+    fn parse_response_frame_rejects_a_packet_with_bytes_past_the_frame() {
+        let chipset = new_chipset(DummyTransport::default());
+
+        let mut packet = Frame::build(&[CONTROLLER_TO_HOST, 0x03, 0x11])
+            .as_bytes()
+            .to_vec();
+        let frame_len = packet.len();
+        packet.extend_from_slice(&[0xAA, 0xBB]);
+
+        assert_driver_error_contains(
+            chipset.parse_response_frame(&packet),
+            &format!(
+                "the frame is {frame_len} bytes but the packet is {}",
+                packet.len()
+            ),
         );
     }
 

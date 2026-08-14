@@ -1,35 +1,81 @@
+//! The NFC targets a reader talks to, and the ones it presents as.
+//!
+//! A target is a bitrate pair plus the protocol fields the activation exchanged.
+//! [`RemoteTarget`] describes a card the reader found, [`LocalTarget`] a card the
+//! reader emulates; they differ only in how their bitrate is set, so the parsing
+//! and validation of one live in the private `BitratePair`.
+
 use crate::clf::errors::UnsupportedTargetError;
 
-/// Validates a bitrate string (e.g., "106A", "212F").
-fn validate_bitrate(part: &str) -> bool {
-    if part.len() < 2 {
-        return false;
-    }
-    let (digits, suffix) = part.split_at(part.len() - 1);
-    digits.chars().all(|c| c.is_ascii_digit()) && suffix.chars().all(|c| c.is_ascii_uppercase())
+/// The send and receive bitrates of a target.
+///
+/// A bitrate is a decimal speed followed by an uppercase technology letter, such
+/// as `106A` or `212F`. A target that sends and receives at different speeds
+/// writes them as `send/recv`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BitratePair {
+    send: String,
+    recv: String,
 }
 
-/// Parses a bitrate specification which may contain send/receive rates separated by '/'.
-fn parse_bitrate(value: &str) -> Result<(String, String), UnsupportedTargetError> {
-    let mut parts = value.splitn(2, '/');
-    let send = parts
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| UnsupportedTargetError("missing bitrate".into()))?;
-    if !validate_bitrate(send) {
-        return Err(UnsupportedTargetError(format!("invalid bitrate: {}", send)));
+impl BitratePair {
+    /// Parses a `send` or `send/recv` specification.
+    fn parse(value: &str) -> Result<Self, UnsupportedTargetError> {
+        let mut parts = value.splitn(2, '/');
+        let send = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .ok_or_else(|| UnsupportedTargetError("missing bitrate".into()))?;
+        Self::ensure_valid(send, "invalid bitrate")?;
+        let recv = match parts.next() {
+            Some(recv) => {
+                Self::ensure_valid(recv, "invalid receive bitrate")?;
+                recv.to_string()
+            }
+            None => send.to_string(),
+        };
+        Ok(Self {
+            send: send.to_string(),
+            recv,
+        })
     }
-    let recv = match parts.next() {
-        Some(recv) if !validate_bitrate(recv) => {
-            return Err(UnsupportedTargetError(format!(
-                "invalid receive bitrate: {}",
-                recv
-            )));
+
+    /// Parses one bitrate, used in both directions.
+    fn single(value: &str) -> Result<Self, UnsupportedTargetError> {
+        Self::ensure_valid(value, "invalid bitrate")?;
+        Ok(Self {
+            send: value.to_string(),
+            recv: value.to_string(),
+        })
+    }
+
+    /// The combined form: one bitrate when both directions match, `send/recv`
+    /// otherwise.
+    fn combined(&self) -> String {
+        if self.send == self.recv {
+            self.send.clone()
+        } else {
+            format!("{}/{}", self.send, self.recv)
         }
-        Some(recv) => recv.to_string(),
-        None => send.to_string(),
-    };
-    Ok((send.to_string(), recv))
+    }
+
+    fn ensure_valid(value: &str, message: &str) -> Result<(), UnsupportedTargetError> {
+        if is_valid_bitrate(value) {
+            Ok(())
+        } else {
+            Err(UnsupportedTargetError(format!("{message}: {value}")))
+        }
+    }
+}
+
+/// Returns `true` if `value` is a decimal speed followed by an uppercase
+/// technology letter, such as `106A` or `212F`.
+fn is_valid_bitrate(value: &str) -> bool {
+    if value.len() < 2 {
+        return false;
+    }
+    let (digits, suffix) = value.split_at(value.len() - 1);
+    digits.chars().all(|c| c.is_ascii_digit()) && suffix.chars().all(|c| c.is_ascii_uppercase())
 }
 
 /// NFC target data fields for various protocols.
@@ -62,104 +108,70 @@ pub struct TargetData {
 
 #[derive(Debug, Clone)]
 pub struct RemoteTarget {
-    bitrate_send: String,
-    bitrate_recv: String,
+    bitrate: BitratePair,
     pub data: TargetData,
 }
 
 impl RemoteTarget {
+    /// Creates a target for a `send` or `send/recv` bitrate specification.
     pub fn new(bitrate: impl Into<String>) -> Result<Self, UnsupportedTargetError> {
-        let bitrate = bitrate.into();
-        let (bitrate_send, bitrate_recv) = parse_bitrate(&bitrate)?;
         Ok(Self {
-            bitrate_send,
-            bitrate_recv,
+            bitrate: BitratePair::parse(&bitrate.into())?,
             data: TargetData::default(),
         })
     }
 
+    /// The bitrate the reader sends at, which is what identifies the
+    /// technology a discovered card was found with.
     pub fn bitrate(&self) -> &str {
-        &self.bitrate_send
+        &self.bitrate.send
     }
 
     pub fn bitrate_send(&self) -> &str {
-        &self.bitrate_send
+        &self.bitrate.send
     }
 
     pub fn bitrate_recv(&self) -> &str {
-        &self.bitrate_recv
-    }
-
-    pub fn fields(&self) -> &TargetData {
-        &self.data
-    }
-
-    pub fn fields_mut(&mut self) -> &mut TargetData {
-        &mut self.data
+        &self.bitrate.recv
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LocalTarget {
-    bitrate_send: String,
-    bitrate_recv: String,
+    bitrate: BitratePair,
     pub data: TargetData,
 }
 
 impl LocalTarget {
+    /// Creates a target that sends and receives at `bitrate`.
     pub fn new(bitrate: impl Into<String>) -> Result<Self, UnsupportedTargetError> {
-        let bitrate = bitrate.into();
-        if !validate_bitrate(&bitrate) {
-            return Err(UnsupportedTargetError(format!(
-                "invalid bitrate: {}",
-                bitrate
-            )));
-        }
         Ok(Self {
-            bitrate_send: bitrate.clone(),
-            bitrate_recv: bitrate,
+            bitrate: BitratePair::single(&bitrate.into())?,
             data: TargetData::default(),
         })
     }
 
+    /// The bitrate in its combined form: one value while both directions match,
+    /// and `send/recv` once a speed negotiation has split them.
     pub fn bitrate(&self) -> String {
-        if self.bitrate_send == self.bitrate_recv {
-            self.bitrate_send.clone()
-        } else {
-            format!("{}/{}", self.bitrate_send, self.bitrate_recv)
-        }
+        self.bitrate.combined()
     }
 
     pub fn bitrate_send(&self) -> &str {
-        &self.bitrate_send
+        &self.bitrate.send
     }
 
     pub fn bitrate_recv(&self) -> &str {
-        &self.bitrate_recv
+        &self.bitrate.recv
     }
 
+    /// Sets both directions to `bitrate`.
     pub fn set_bitrate(
         &mut self,
         bitrate: impl Into<String>,
     ) -> Result<(), UnsupportedTargetError> {
-        let bitrate = bitrate.into();
-        if !validate_bitrate(&bitrate) {
-            return Err(UnsupportedTargetError(format!(
-                "invalid bitrate: {}",
-                bitrate
-            )));
-        }
-        self.bitrate_send = bitrate.clone();
-        self.bitrate_recv = bitrate;
+        self.bitrate = BitratePair::single(&bitrate.into())?;
         Ok(())
-    }
-
-    pub fn fields(&self) -> &TargetData {
-        &self.data
-    }
-
-    pub fn fields_mut(&mut self) -> &mut TargetData {
-        &mut self.data
     }
 }
 
@@ -174,36 +186,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_bitrate_accepts_numeric_uppercase_suffix_and_rejects_invalid_forms() {
-        assert!(validate_bitrate("106A"));
-        assert!(validate_bitrate("424F"));
-        assert!(!validate_bitrate(""));
-        assert!(!validate_bitrate("A"));
-        assert!(!validate_bitrate("106a"));
-        assert!(!validate_bitrate("10AF")); // non-digit in numeric portion
+    fn is_valid_bitrate_accepts_numeric_uppercase_suffix_and_rejects_invalid_forms() {
+        assert!(is_valid_bitrate("106A"));
+        assert!(is_valid_bitrate("424F"));
+        assert!(!is_valid_bitrate(""));
+        assert!(!is_valid_bitrate("A"));
+        assert!(!is_valid_bitrate("106a"));
+        assert!(!is_valid_bitrate("10AF")); // non-digit in numeric portion
     }
 
     #[test]
-    fn parse_bitrate_supports_single_and_split_send_receive_values() {
-        let (send, recv) = parse_bitrate("106A").expect("single bitrate should parse");
-        assert_eq!(send, "106A");
-        assert_eq!(recv, "106A");
+    fn bitrate_pair_supports_single_and_split_send_receive_values() {
+        let single = BitratePair::parse("106A").expect("single bitrate should parse");
+        assert_eq!(single.send, "106A");
+        assert_eq!(single.recv, "106A");
+        assert_eq!(single.combined(), "106A");
 
-        let (send, recv) = parse_bitrate("212F/424F").expect("split bitrate should parse");
-        assert_eq!(send, "212F");
-        assert_eq!(recv, "424F");
+        let split = BitratePair::parse("212F/424F").expect("split bitrate should parse");
+        assert_eq!(split.send, "212F");
+        assert_eq!(split.recv, "424F");
+        assert_eq!(split.combined(), "212F/424F");
     }
 
     #[test]
-    fn parse_bitrate_rejects_missing_or_invalid_values() {
-        let err = parse_bitrate("").expect_err("empty bitrate should fail");
+    fn bitrate_pair_rejects_missing_or_invalid_values() {
+        let err = BitratePair::parse("").expect_err("empty bitrate should fail");
         assert_eq!(err.0, "missing bitrate");
 
-        let err = parse_bitrate("abc").expect_err("invalid send bitrate should fail");
+        let err = BitratePair::parse("abc").expect_err("invalid send bitrate should fail");
         assert_eq!(err.0, "invalid bitrate: abc");
 
-        let err = parse_bitrate("106A/42f").expect_err("invalid receive bitrate should fail");
+        let err = BitratePair::parse("106A/42f").expect_err("invalid receive bitrate should fail");
         assert_eq!(err.0, "invalid receive bitrate: 42f");
+
+        // A single bitrate has no split form to accept.
+        let err = BitratePair::single("212F/424F").expect_err("split value should fail");
+        assert_eq!(err.0, "invalid bitrate: 212F/424F");
     }
 
     #[test]
@@ -212,10 +230,10 @@ mod tests {
         assert_eq!(target.bitrate(), "212F");
         assert_eq!(target.bitrate_send(), "212F");
         assert_eq!(target.bitrate_recv(), "424F");
-        assert!(target.fields().sensf_req.is_none());
+        assert!(target.data.sensf_req.is_none());
 
-        target.fields_mut().sensf_req = Some(vec![0x00, 0xFF]);
-        assert_eq!(target.fields().sensf_req, Some(vec![0x00, 0xFF]));
+        target.data.sensf_req = Some(vec![0x00, 0xFF]);
+        assert_eq!(target.data.sensf_req, Some(vec![0x00, 0xFF]));
     }
 
     #[test]

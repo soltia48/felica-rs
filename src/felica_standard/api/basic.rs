@@ -89,20 +89,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 result,
                 ..
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Read Without Encryption",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    let result = result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Read Without Encryption missing result payload".into(),
-                        )
-                    })?;
-                    Ok(result.blocks)
-                }
+                let result = Self::require_result(
+                    "Read Without Encryption",
+                    status_flag1,
+                    status_flag2,
+                    result,
+                )?;
+                Ok(result.blocks)
             }
             _ => Err(unexpected_response("Read Without Encryption")),
         }
@@ -243,27 +236,20 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 result,
                 ..
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Request Block Information Ex",
-                        status_flag1,
-                        status_flag2,
+                let result = Self::require_result(
+                    "Request Block Information Ex",
+                    status_flag1,
+                    status_flag2,
+                    result,
+                )?;
+                if result.assigned_block_counts.len() != node_codes.len()
+                    || result.free_block_counts.len() != node_codes.len()
+                {
+                    Err(FelicaStandardError::Protocol(
+                        "Request Block Information Ex count list length mismatch".into(),
                     ))
                 } else {
-                    let result = result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Request Block Information Ex missing result payload".into(),
-                        )
-                    })?;
-                    if result.assigned_block_counts.len() != node_codes.len()
-                        || result.free_block_counts.len() != node_codes.len()
-                    {
-                        Err(FelicaStandardError::Protocol(
-                            "Request Block Information Ex count list length mismatch".into(),
-                        ))
-                    } else {
-                        Ok(result)
-                    }
+                    Ok(result)
                 }
             }
             _ => Err(unexpected_response("Request Block Information Ex")),
@@ -294,21 +280,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 result,
                 ..
-            } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Request Code List",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Request Code List missing result payload".into(),
-                        )
-                    })
-                }
-            }
+            } => Self::require_result("Request Code List", status_flag1, status_flag2, result),
             _ => Err(unexpected_response("Request Code List")),
         }
     }
@@ -417,15 +389,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 result,
                 ..
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Get System Status",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    Ok(result)
-                }
+                Self::check_status_flags("Get System Status", status_flag1, status_flag2)?;
+                Ok(result)
             }
             _ => Err(unexpected_response("Get System Status")),
         }
@@ -447,21 +412,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 result,
                 ..
-            } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Request Product Information",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Request Product Information missing result payload".into(),
-                        )
-                    })
-                }
-            }
+            } => Self::require_result(
+                "Request Product Information",
+                status_flag1,
+                status_flag2,
+                result,
+            ),
             _ => Err(unexpected_response("Request Product Information")),
         }
     }
@@ -487,15 +443,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 specification_version,
                 ..
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Request Specification Version",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    Ok(specification_version)
-                }
+                Self::check_status_flags(
+                    "Request Specification Version",
+                    status_flag1,
+                    status_flag2,
+                )?;
+                Ok(specification_version)
             }
             _ => Err(unexpected_response("Request Specification Version")),
         }
@@ -543,21 +496,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 status_flag2,
                 result,
                 ..
-            } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Get Area Information",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Get Area Information missing result payload".into(),
-                        )
-                    })
-                }
-            }
+            } => Self::require_result("Get Area Information", status_flag1, status_flag2, result),
             _ => Err(unexpected_response("Get Area Information")),
         }
     }
@@ -591,34 +530,23 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                 result,
                 ..
             } => {
-                if status_flag1 != 0 {
-                    Err(Self::status_error(
-                        "Get Node Property",
-                        status_flag1,
-                        status_flag2,
-                    ))
-                } else {
-                    let result = result.ok_or_else(|| {
-                        FelicaStandardError::Protocol(
-                            "Get Node Property missing result payload".into(),
-                        )
-                    })?;
-                    if result.node_properties.len() != node_codes.len() {
-                        return Err(FelicaStandardError::Protocol(
-                            "Get Node Property property count mismatch".into(),
-                        ));
-                    }
-                    if result
-                        .node_properties
-                        .iter()
-                        .any(|property| property.property_type() != node_property_type)
-                    {
-                        return Err(FelicaStandardError::Protocol(
-                            "Get Node Property returned unexpected property type".into(),
-                        ));
-                    }
-                    Ok(result)
+                let result =
+                    Self::require_result("Get Node Property", status_flag1, status_flag2, result)?;
+                if result.node_properties.len() != node_codes.len() {
+                    return Err(FelicaStandardError::Protocol(
+                        "Get Node Property property count mismatch".into(),
+                    ));
                 }
+                if result
+                    .node_properties
+                    .iter()
+                    .any(|property| property.property_type() != node_property_type)
+                {
+                    return Err(FelicaStandardError::Protocol(
+                        "Get Node Property returned unexpected property type".into(),
+                    ));
+                }
+                Ok(result)
             }
             _ => Err(unexpected_response("Get Node Property")),
         }

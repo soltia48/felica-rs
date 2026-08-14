@@ -146,12 +146,16 @@ impl<F: FrameFormat> Frame<F> {
 
     /// Parses raw bytes into a frame, or returns `None` if they do not form a
     /// valid one.
+    ///
+    /// `data` may hold more than one frame's worth of bytes — a transport that
+    /// delivers whole packets often does — in which case only the leading frame
+    /// is parsed and [`Self::as_bytes`] returns only its bytes.
     pub fn parse(data: &[u8]) -> Option<Self> {
         if !has_sof(data) {
             return None;
         }
-        let frame_type = classify::<F>(data)?;
-        Some(Self::new(data.to_vec(), frame_type))
+        let (frame_type, frame_len) = classify::<F>(data)?;
+        Some(Self::new(data[..frame_len].to_vec(), frame_type))
     }
 
     /// Returns the frame type.
@@ -175,7 +179,7 @@ impl<F: FrameFormat> Frame<F> {
         }
     }
 
-    /// Returns the raw frame bytes.
+    /// Returns the frame's own bytes, excluding anything that followed it.
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
     }
@@ -225,19 +229,26 @@ fn push_extended_length(frame: &mut Vec<u8>, len_bytes: [u8; 2]) {
 
 /// Decides what kind of frame `data` is, having already established that it
 /// starts with the [`SOF`].
-fn classify<F: FrameFormat>(data: &[u8]) -> Option<FrameType> {
+/// Decides what kind of frame `data` starts with, and how many bytes it takes
+/// up, having already established that it begins with the [`SOF`].
+fn classify<F: FrameFormat>(data: &[u8]) -> Option<(FrameType, usize)> {
     if data == ACK_BYTES {
-        return Some(FrameType::Ack);
+        return Some((FrameType::Ack, ACK_BYTES.len()));
     }
     match F::ERROR {
-        ErrorDetection::ErrorFrame if data == ERROR_BYTES => return Some(FrameType::Error),
+        ErrorDetection::ErrorFrame if data == ERROR_BYTES => {
+            return Some((FrameType::Error, ERROR_BYTES.len()));
+        }
         ErrorDetection::StatusByte if data.get(NORMAL_DATA_START) == Some(&STATUS_ERROR_BYTE) => {
-            return Some(FrameType::Error);
+            // The fault is reported in the payload, and the frame around it is
+            // not validated, so its length is not known either.
+            return Some((FrameType::Error, data.len()));
         }
         _ => {}
     }
     let layout = FrameLayout::parse(data, F::LENGTH)?;
-    Some(FrameType::Data(layout.validated_payload(data)?.to_vec()))
+    let payload = layout.validated_payload(data)?;
+    Some((FrameType::Data(payload.to_vec()), layout.frame_len()?))
 }
 
 /// Where the parts of a data frame sit within its raw bytes.
@@ -276,6 +287,12 @@ impl<'a> FrameLayout<'a> {
             lcs: *data.get(LENGTH_OFFSET + 4)?,
             data_start: EXTENDED_DATA_START,
         })
+    }
+
+    /// The total number of bytes the frame occupies: everything up to and
+    /// including the postamble.
+    fn frame_len(&self) -> Option<usize> {
+        self.data_start.checked_add(self.length)?.checked_add(2) // DCS and postamble
     }
 
     /// Returns the payload once the length checksum, the data checksum and the
@@ -485,6 +502,30 @@ mod tests {
         let mut normal_bad_dcs = normal;
         normal_bad_dcs[6] ^= 0x01;
         assert!(Frame::<ExtendedLe>::parse(&normal_bad_dcs).is_none());
+    }
+
+    #[test]
+    fn parse_stops_at_the_end_of_the_leading_frame() {
+        // A transport that delivers whole packets can hand over more than one
+        // frame's worth of bytes; only the first is parsed.
+        let payload = vec![0x11, 0x22];
+        let frame = Frame::<ExtendedLe>::build(&payload);
+        let frame_len = frame.as_bytes().len();
+
+        let mut packet = frame.as_bytes().to_vec();
+        packet.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let parsed = Frame::<ExtendedLe>::parse(&packet).expect("leading frame should parse");
+        assert_eq!(parsed.as_bytes().len(), frame_len);
+        assert_eq!(parsed.payload(), Some(payload.as_slice()));
+
+        // The same holds for the fixed-size frames.
+        let mut ack = ACK_BYTES.to_vec();
+        ack.push(0x99);
+        let parsed = Frame::<ExtendedLe>::parse(&ack);
+        // An ACK is matched exactly, so trailing bytes make it a data frame
+        // candidate instead — and this one is not a valid frame either.
+        assert!(parsed.is_none());
     }
 
     #[test]

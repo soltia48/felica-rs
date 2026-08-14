@@ -523,13 +523,6 @@ impl NodeProperty {
         }
     }
 
-    pub(crate) fn size_bytes(self) -> usize {
-        match self {
-            NodeProperty::ValueLimitedPurseService { .. } => 10,
-            NodeProperty::MacCommunication { .. } => 1,
-        }
-    }
-
     pub(crate) fn to_bytes(self) -> Vec<u8> {
         match self {
             NodeProperty::ValueLimitedPurseService {
@@ -1052,7 +1045,6 @@ mod tests {
             purse.property_type(),
             NodePropertyType::ValueLimitedPurseService
         );
-        assert_eq!(purse.size_bytes(), 10);
         let purse_bytes = purse.to_bytes();
         assert_eq!(purse_bytes.len(), 10);
         assert_eq!(purse_bytes[0], 0x01);
@@ -1062,7 +1054,6 @@ mod tests {
 
         let mac = NodeProperty::MacCommunication { enabled: false };
         assert_eq!(mac.property_type(), NodePropertyType::MacCommunication);
-        assert_eq!(mac.size_bytes(), 1);
         assert_eq!(mac.to_bytes(), vec![0x00]);
     }
 

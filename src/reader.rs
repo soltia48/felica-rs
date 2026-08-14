@@ -101,24 +101,46 @@ pub fn open_reader(preference: ReaderPreference) -> Result<Reader> {
     }
 }
 
+/// One reader [`ReaderPreference::Auto`] knows how to attach to.
+struct SupportedReader {
+    /// How a failure to open this reader is reported.
+    name: &'static str,
+    /// Attaches to the reader.
+    open: fn() -> Result<Reader>,
+}
+
+/// The readers [`ReaderPreference::Auto`] tries, in the order it tries them.
+const AUTO_PROBE_ORDER: [SupportedReader; 4] = [
+    SupportedReader {
+        name: "Port-100",
+        open: || open_port100().map(Reader::new),
+    },
+    SupportedReader {
+        name: "Port-400",
+        open: || open_port400().map(Reader::new),
+    },
+    SupportedReader {
+        name: "RC-S956",
+        open: || open_rcs956().map(Reader::new),
+    },
+    SupportedReader {
+        name: "RC-S320",
+        open: || open_rcs320().map(Reader::new),
+    },
+];
+
 fn open_first_available() -> Result<Reader> {
-    let err100 = match open_port100() {
-        Ok(device) => return Ok(Reader::new(device)),
-        Err(err) => err,
-    };
-    let err400 = match open_port400() {
-        Ok(device) => return Ok(Reader::new(device)),
-        Err(err) => err,
-    };
-    let err956 = match open_rcs956() {
-        Ok(device) => return Ok(Reader::new(device)),
-        Err(err) => err,
-    };
-    let err320 = match open_rcs320() {
-        Ok(device) => return Ok(Reader::new(device)),
-        Err(err) => err,
-    };
+    let mut failures = Vec::with_capacity(AUTO_PROBE_ORDER.len());
+    for candidate in AUTO_PROBE_ORDER {
+        match (candidate.open)() {
+            Ok(reader) => return Ok(reader),
+            // Every reader is tried before giving up, and the report names them
+            // all: which one is actually attached is not knowable from here.
+            Err(err) => failures.push(format!("{} ({err})", candidate.name)),
+        }
+    }
     Err(DriverError::Other(format!(
-        "failed to open Port-100 ({err100}), Port-400 ({err400}), RC-S956 ({err956}), and RC-S320 ({err320})"
+        "failed to open {}",
+        failures.join(", ")
     )))
 }

@@ -110,6 +110,24 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         Ok(())
     }
 
+    /// Checks a response's status flags and hands back the payload the card
+    /// sends behind them.
+    ///
+    /// §4.5.1 pairs the two: a card that completed the command normally sends
+    /// its result. A normal completion with nothing behind it is therefore a
+    /// protocol violation rather than an empty answer, and is reported as one.
+    fn require_result<R>(
+        command: &'static str,
+        sf1: u8,
+        sf2: u8,
+        result: Option<R>,
+    ) -> Result<R, FelicaStandardError> {
+        Self::check_status_flags(command, sf1, sf2)?;
+        result.ok_or_else(|| {
+            FelicaStandardError::Protocol(format!("{command} missing result payload"))
+        })
+    }
+
     /// Polls for a FeliCa (Type 3 / NFC-F) card at a single `bitrate`
     /// (`"212F"` or `"424F"`).
     ///

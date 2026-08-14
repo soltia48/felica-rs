@@ -1,76 +1,5 @@
 use super::*;
-
-struct PayloadWriter {
-    buf: Vec<u8>,
-}
-
-impl PayloadWriter {
-    fn new(opcode: u8) -> Self {
-        Self { buf: vec![opcode] }
-    }
-
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn idm(&mut self, idm: &[u8; IDM_LEN]) {
-        self.buf.extend_from_slice(idm);
-    }
-
-    fn push_u8(&mut self, value: u8) {
-        self.buf.push(value);
-    }
-
-    fn extend_bytes(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-    }
-
-    fn extend_u16_le(&mut self, value: u16) {
-        self.buf.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn extend_u16_be(&mut self, value: u16) {
-        self.buf.extend_from_slice(&value.to_be_bytes());
-    }
-
-    fn extend_u16_list_le(&mut self, values: &[u16]) {
-        for &value in values {
-            self.extend_u16_le(value);
-        }
-    }
-
-    fn extend_service_codes(&mut self, service_codes: &[ServiceCode]) {
-        for &code in service_codes {
-            self.buf.extend_from_slice(&code.to_le_bytes());
-        }
-    }
-
-    fn extend_block_list(&mut self, block_list: &[BlockListElement]) {
-        for block in block_list {
-            self.buf.extend(block.pack());
-        }
-    }
-
-    fn finish_frame(self) -> Result<Vec<u8>, FelicaStandardError> {
-        frame_with_length_prefix(&self.buf)
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.buf
-    }
-}
-
-fn append_service_codes(payload: &mut PayloadWriter, service_codes: &[ServiceCode]) {
-    payload.push_u8(service_codes.len() as u8);
-    payload.extend_service_codes(service_codes);
-}
-
-fn append_block_list(payload: &mut PayloadWriter, block_list: &[BlockListElement]) {
-    payload.push_u8(block_list.len() as u8);
-    payload.extend_block_list(block_list);
-}
+use crate::felica_standard::payload::PayloadWriter;
 
 impl FelicaStandardCommand {
     /// Encodes this command as a wire frame (LEN byte + packet data).
@@ -127,7 +56,7 @@ impl FelicaStandardCommand {
                 );
                 let mut payload = PayloadWriter::new(REQUEST_SERVICE_COMMAND_CODE);
                 payload.idm(idm);
-                append_service_codes(&mut payload, service_codes);
+                payload.extend_counted_service_codes(service_codes);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
             FelicaStandardCommand::RequestResponse { idm } => {
@@ -146,8 +75,8 @@ impl FelicaStandardCommand {
                 debug_assert!(!block_list.is_empty() && block_list.len() <= MAX_BLOCK_COUNT);
                 let mut payload = PayloadWriter::new(READ_WITHOUT_ENCRYPTION_COMMAND_CODE);
                 payload.idm(idm);
-                append_service_codes(&mut payload, service_codes);
-                append_block_list(&mut payload, block_list);
+                payload.extend_counted_service_codes(service_codes);
+                payload.extend_counted_block_list(block_list);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
             FelicaStandardCommand::WriteWithoutEncryption {
@@ -163,8 +92,8 @@ impl FelicaStandardCommand {
                 debug_assert_eq!(data.len(), block_list.len() * BLOCK_SIZE);
                 let mut payload = PayloadWriter::new(WRITE_WITHOUT_ENCRYPTION_COMMAND_CODE);
                 payload.idm(idm);
-                append_service_codes(&mut payload, service_codes);
-                append_block_list(&mut payload, block_list);
+                payload.extend_counted_service_codes(service_codes);
+                payload.extend_counted_block_list(block_list);
                 payload.extend_bytes(data);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
@@ -183,8 +112,7 @@ impl FelicaStandardCommand {
                 debug_assert!(!node_codes.is_empty() && node_codes.len() <= MAX_NODE_CODES);
                 let mut payload = PayloadWriter::new(REQUEST_BLOCK_INFORMATION_COMMAND_CODE);
                 payload.idm(idm);
-                payload.push_u8(node_codes.len() as u8);
-                payload.extend_u16_list_le(node_codes);
+                payload.extend_counted_u16_le(node_codes);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
             FelicaStandardCommand::Authentication1 {
@@ -211,7 +139,7 @@ impl FelicaStandardCommand {
             FelicaStandardCommand::Read { block_list } => {
                 debug_assert!(!block_list.is_empty() && block_list.len() <= MAX_BLOCK_COUNT);
                 let mut payload = PayloadWriter::with_capacity(1 + block_list.len() * 3);
-                append_block_list(&mut payload, block_list);
+                payload.extend_counted_block_list(block_list);
                 Ok(CommandEncoding::Secure {
                     opcode: READ_COMMAND_CODE,
                     payload: payload.finish(),
@@ -222,7 +150,7 @@ impl FelicaStandardCommand {
                 debug_assert_eq!(data.len(), block_list.len() * BLOCK_SIZE);
                 let mut payload =
                     PayloadWriter::with_capacity(1 + block_list.len() * 3 + data.len());
-                append_block_list(&mut payload, block_list);
+                payload.extend_counted_block_list(block_list);
                 payload.extend_bytes(data);
                 Ok(CommandEncoding::Secure {
                     opcode: WRITE_COMMAND_CODE,
@@ -232,7 +160,7 @@ impl FelicaStandardCommand {
             FelicaStandardCommand::ReadV2 { block_list } => {
                 debug_assert!(!block_list.is_empty() && block_list.len() <= MAX_BLOCK_COUNT);
                 let mut payload = PayloadWriter::with_capacity(1 + block_list.len() * 3);
-                append_block_list(&mut payload, block_list);
+                payload.extend_counted_block_list(block_list);
                 Ok(CommandEncoding::Secure {
                     opcode: READ_V2_COMMAND_CODE,
                     payload: payload.finish(),
@@ -243,7 +171,7 @@ impl FelicaStandardCommand {
                 debug_assert_eq!(data.len(), block_list.len() * BLOCK_SIZE);
                 let mut payload =
                     PayloadWriter::with_capacity(1 + block_list.len() * 3 + data.len());
-                append_block_list(&mut payload, block_list);
+                payload.extend_counted_block_list(block_list);
                 payload.extend_bytes(data);
                 Ok(CommandEncoding::Secure {
                     opcode: WRITE_V2_COMMAND_CODE,
@@ -265,8 +193,7 @@ impl FelicaStandardCommand {
                 debug_assert!(!node_codes.is_empty() && node_codes.len() <= MAX_NODE_CODES);
                 let mut payload = PayloadWriter::new(REQUEST_BLOCK_INFORMATION_EX_COMMAND_CODE);
                 payload.idm(idm);
-                payload.push_u8(node_codes.len() as u8);
-                payload.extend_u16_list_le(node_codes);
+                payload.extend_counted_u16_le(node_codes);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
             FelicaStandardCommand::SetParameter {
@@ -305,8 +232,7 @@ impl FelicaStandardCommand {
                 let mut payload = PayloadWriter::new(GET_NODE_PROPERTY_COMMAND_CODE);
                 payload.idm(idm);
                 payload.push_u8(node_property_type.to_byte());
-                payload.push_u8(node_codes.len() as u8);
-                payload.extend_u16_list_le(node_codes);
+                payload.extend_counted_u16_le(node_codes);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
             FelicaStandardCommand::GetContainerProperty { property } => {
@@ -320,7 +246,7 @@ impl FelicaStandardCommand {
                 );
                 let mut payload = PayloadWriter::new(REQUEST_SERVICE_V2_COMMAND_CODE);
                 payload.idm(idm);
-                append_service_codes(&mut payload, service_codes);
+                payload.extend_counted_service_codes(service_codes);
                 Ok(CommandEncoding::Plain(payload.finish_frame()?))
             }
             FelicaStandardCommand::GetSystemStatus { idm } => {
