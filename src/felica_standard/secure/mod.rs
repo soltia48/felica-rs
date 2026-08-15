@@ -12,35 +12,35 @@
 //! scheme selected at authentication time. The low-level ciphers live in
 //! [`primitives`].
 
-mod aes_v2;
 mod des;
 mod primitives;
 #[cfg(test)]
 mod test_util;
+mod v2_aes;
 
 use crate::felica_standard::redact::Redacted;
 use crate::felica_standard::{
     BLOCK_SIZE, DES_BLOCK_SIZE, DES_MAC_SIZE, FelicaStandardError, MAX_PACKET_LEN,
     V2_AES128_MAC_SIZE,
 };
-use aes_v2::{decrypt_secure_response_v2_aes128, encrypt_secure_request_v2_aes128};
 use des::{calculate_command_mac_des, decrypt_secure_response_des};
 use primitives::{encrypt_des_cbc_zero_iv, pad_to_des_block_size};
 use std::fmt;
+use v2_aes::{decrypt_secure_response_v2_aes128, encrypt_secure_request_v2_aes128};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 // Re-export each scheme's public and crate-internal surface so the rest of the
 // crate keeps referring to it through the `secure::` path.
-pub(crate) use aes_v2::AuthenticationContextV2Aes128;
-#[cfg(test)]
-pub(crate) use aes_v2::build_secure_response_frame_v2_aes128;
-pub use aes_v2::{Authentication2V2Response, generate_group_key_v2_aes128};
 pub use des::{Authentication2Response, generate_service_keys_des};
 pub(crate) use des::{
     AuthenticationContext, build_authentication2_payload, build_secure_response_frame_des,
     check_packet_mac_des, encrypt_authentication2_payload, generate_registration_package_des,
 };
 pub(crate) use primitives::{ct_eq, decrypt_des_cbc_zero_iv, encrypt_des_block};
+pub(crate) use v2_aes::AuthenticationContextV2Aes128;
+#[cfg(test)]
+pub(crate) use v2_aes::build_secure_response_frame_v2_aes128;
+pub use v2_aes::{Authentication2V2Response, generate_group_key_v2_aes128};
 
 const TRANSACTION_NUMBER_SIZE: usize = 2;
 const TRANSACTION_ID_SIZE: usize = 6;
