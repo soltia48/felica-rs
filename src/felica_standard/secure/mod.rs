@@ -4,7 +4,7 @@
 //! captured by [`SecureSessionScheme`]:
 //!
 //! - **DES/3DES** ([`des`]) — the original FeliCa Standard secure messaging.
-//! - **v2 AES-128** ([`aes_v2`]) — the FeliCa Standard v2 scheme.
+//! - **v2 AES-128** ([`v2_aes`]) — the FeliCa Standard v2 scheme.
 //!
 //! This module holds the scheme-agnostic session abstractions — the
 //! authenticated-session state ([`AuthenticatedContext`]) and the per-command

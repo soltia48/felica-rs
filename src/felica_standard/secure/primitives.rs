@@ -3,7 +3,7 @@
 //!
 //! These are the lowest-level primitives — single-block ciphers, CBC helpers,
 //! XOR, and PKCS#7 padding. They carry no protocol framing; the per-scheme
-//! modules ([`super::des`], [`super::aes_v2`]) build the message formats on top
+//! modules ([`super::des`], [`super::v2_aes`]) build the message formats on top
 //! of them.
 
 use crate::felica_standard::{DES_BLOCK_SIZE, V2_AES128_BLOCK_SIZE};
