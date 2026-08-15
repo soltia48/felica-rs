@@ -1,6 +1,6 @@
 [package]
 name = "felica"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.88"
 description = "FeliCa protocol implementation: mutual authentication, card emulation and PaSoRi reader drivers"
