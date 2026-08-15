@@ -167,6 +167,22 @@ impl ServiceCode {
         self.0 & 0x0001 == 0
     }
 
+    /// Whether a node named in a service code list is an authentication-free
+    /// Service, which holds a key of its own but folds none into the
+    /// authentication key chain.
+    ///
+    /// This is deliberately narrower than `!requires_key()`. A service code list
+    /// may name areas and the system node as well as services, and the low bit
+    /// alone misclassifies both: `FFFFh` and an area whose attribute is
+    /// `000001b` each carry a key the chain does apply, yet read as odd. Neither
+    /// decodes to a table 3-2 service attribute, so requiring [`attribute`] to
+    /// decode first is what separates them from a genuine key-free service.
+    ///
+    /// [`attribute`]: Self::attribute
+    pub fn is_key_free_service(&self) -> bool {
+        self.attribute().is_some() && !self.requires_key()
+    }
+
     pub(crate) fn to_le_bytes(self) -> [u8; 2] {
         self.0.to_le_bytes()
     }
@@ -880,6 +896,46 @@ mod tests {
             no_key.attributes_description().as_deref(),
             Some("Random read/write without key")
         );
+    }
+
+    /// Only a code that decodes to a table 3-2 service attribute *and* reads as
+    /// authentication free folds no key into the authentication chain. The low
+    /// bit alone would misclassify the other nodes a service code list may name:
+    /// the system node and an area whose attribute is `000001b` both read as
+    /// odd, and both contribute their key.
+    #[test]
+    fn key_free_classification_covers_every_node_a_service_list_may_name() {
+        // Table 3-2 pairs each attribute with the key-free value one greater.
+        for bits in [
+            0b001000u16,
+            0b001010,
+            0b001100,
+            0b001110,
+            0b010000,
+            0b010010,
+            0b010100,
+            0b010110,
+        ] {
+            let with_key = ServiceCode::new((0x123 << 6) | bits);
+            let without_key = ServiceCode::new((0x123 << 6) | bits | 1);
+            assert!(!with_key.is_key_free_service(), "{bits:06b} with key");
+            assert!(without_key.is_key_free_service(), "{bits:06b} without key");
+        }
+
+        // The nodes a service code list may name that are not services at all:
+        // the system node, and an area under either attribute it may carry
+        // (`000000b`, so bare, and `000001b`). None decodes to a service
+        // attribute, and every one contributes its key.
+        for raw in [0xFFFFu16, 0x123 << 6, (0x123 << 6) | 0b000001] {
+            let code = ServiceCode::new(raw);
+            assert!(code.attribute().is_none(), "{raw:04X} is not a service");
+            assert!(!code.is_key_free_service(), "{raw:04X} contributes");
+        }
+
+        // Two of those three read as odd, which is the trap `requires_key` alone
+        // falls into and `is_key_free_service` exists to avoid.
+        assert!(!ServiceCode::new(0xFFFF).requires_key());
+        assert!(!ServiceCode::new((0x123 << 6) | 0b000001).requires_key());
     }
 
     /// Every attribute in table 3-2, checked against the kind and the access

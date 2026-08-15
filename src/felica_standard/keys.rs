@@ -98,8 +98,10 @@ pub enum KeyError {
     /// DES authentication was requested with an empty area path.
     #[error("DES authentication requires at least one area")]
     DesRequiresArea,
-    /// DES authentication was requested with no services.
-    #[error("DES authentication requires at least one service")]
+    /// DES authentication was requested with no key-contributing service —
+    /// either the list is empty, or every entry is an authentication-free
+    /// service, which folds no key into the chain.
+    #[error("DES authentication requires at least one key-contributing service")]
     DesRequiresService,
     /// An `individual_key` was supplied for a DES node, which has no such key.
     #[error("individual_key applies only to AES-128 nodes")]
@@ -268,8 +270,26 @@ impl ResolvedNodeKeys {
     ///   (`0xFFFF`), the `area_path` keys, and the service keys via
     ///   [`generate_service_keys_des`]. `area_path` is used verbatim (the root
     ///   area `0x0000` is *not* injected — include it yourself if the card needs
-    ///   it). Both `area_path` and `services` must be non-empty, otherwise
-    ///   [`KeyError::DesRequiresArea`] / [`KeyError::DesRequiresService`].
+    ///   it). `area_path` must be non-empty, otherwise
+    ///   [`KeyError::DesRequiresArea`].
+    ///
+    ///   Only the **key-contributing** entries of `services` advance the chain.
+    ///   A service code list may name areas and the system node as well as
+    ///   services, and the card applies the key of each of those; what it
+    ///   applies no key for is an authentication-free service
+    ///   ([`ServiceCode::is_key_free_service`]), which holds a key without
+    ///   contributing one. Such entries are skipped here, so their keys need not
+    ///   be in the store — but they are kept in the returned `services` list,
+    ///   because the card still has to receive the list as the caller gave it.
+    ///   At least one entry must contribute, otherwise
+    ///   [`KeyError::DesRequiresService`]; a list of nothing but key-free
+    ///   services would leave the user service key equal to the group service
+    ///   key.
+    ///
+    ///   [`EmulatedSystem`] applies the same rule on the card side, so the two
+    ///   agree on what a given request derives.
+    ///
+    ///   [`EmulatedSystem`]: super::EmulatedSystem
     /// - **AES-128** yields [`DerivedAuthKeys::Aes128`], chaining the area and
     ///   service keys (no system key) via [`generate_group_key_v2_aes128`]. The
     ///   combined node list (`area_path ++ services`) must be non-empty, though
@@ -300,13 +320,25 @@ impl ResolvedNodeKeys {
     }
 
     /// Pick the scheme from the target node (deepest service, else deepest area).
+    ///
+    /// A key-free service is passed over where a key-contributing one is
+    /// available: [`derive_des`] no longer consults its key, so requiring the
+    /// store to hold one just to name the scheme would reject a request the
+    /// derivation itself can serve. The fallback keeps a list of nothing but
+    /// key-free services resolving as it did before, so the error it produces
+    /// still comes from the derivation rather than from here.
+    ///
+    /// [`derive_des`]: Self::derive_des
     fn chain_algorithm(
         &self,
         area_path: &[u16],
         services: &[ServiceCode],
     ) -> Result<Algorithm, KeyError> {
         let target = services
-            .last()
+            .iter()
+            .rev()
+            .find(|s| !s.is_key_free_service())
+            .or_else(|| services.last())
             .map(|s| s.raw())
             .or_else(|| area_path.last().copied())
             .ok_or(KeyError::EmptyChain)?;
@@ -325,7 +357,7 @@ impl ResolvedNodeKeys {
         if area_path.is_empty() {
             return Err(KeyError::DesRequiresArea);
         }
-        if services.is_empty() {
+        if !services.iter().any(|s| !s.is_key_free_service()) {
             return Err(KeyError::DesRequiresService);
         }
 
@@ -336,6 +368,9 @@ impl ResolvedNodeKeys {
         }
         let mut service_keys = Vec::with_capacity(services.len());
         for service in services {
+            if service.is_key_free_service() {
+                continue;
+            }
             service_keys.push(self.require_des(service.raw())?);
         }
 
@@ -655,6 +690,81 @@ mod tests {
                 assert_eq!(user_service_key, &user);
             }
             other => panic!("expected DES keys, got {other:?}"),
+        }
+    }
+
+    /// The card folds no key in for an authentication-free service, wherever it
+    /// sits in the list and however many appear, so the derivation must skip
+    /// them too. Naming one must therefore leave the derived keys untouched —
+    /// the behaviour [`EmulatedSystem`] implements on the card side.
+    ///
+    /// [`EmulatedSystem`]: crate::felica_standard::EmulatedSystem
+    #[test]
+    fn derive_des_skips_authentication_free_services() {
+        const SYSTEM: [u8; 8] = [0xFF; 8];
+        const AREA: [u8; 8] = [0xA0; 8];
+        const KEYED: [u8; 8] = [0x50; 8];
+
+        let area = 0x1000u16; // attribute 000000b — an area, always contributing
+        let keyed = ServiceCode::new(0x1008); // 001000b — authentication required
+        let key_free = ServiceCode::new(0x1009); // 001001b — authentication free
+        assert!(!keyed.is_key_free_service());
+        assert!(key_free.is_key_free_service());
+
+        // The key-free service's key is deliberately absent: the derivation must
+        // not ask for it, and `chain_algorithm` must not pick it as the node it
+        // reads the scheme from. Either slip would surface here as `MissingKey`.
+        let resolved = ResolvedNodeKeys::from_map(HashMap::from([
+            (SYSTEM_SERVICE_CODE, NodeKey::Des(SYSTEM)),
+            (area, NodeKey::Des(AREA)),
+            (keyed.raw(), NodeKey::Des(KEYED)),
+        ]));
+        let (group, user) = generate_service_keys_des(&SYSTEM, &[AREA], &[KEYED]);
+
+        for services in [
+            vec![keyed],
+            vec![keyed, key_free],
+            vec![keyed, key_free, key_free],
+        ] {
+            let derived = resolved
+                .derive_auth_keys(&[area], &services, None)
+                .unwrap_or_else(|err| panic!("{services:04X?} should derive, got {err}"));
+            match &derived {
+                DerivedAuthKeys::Des {
+                    services: listed,
+                    group_service_key,
+                    user_service_key,
+                    ..
+                } => {
+                    assert_eq!(group_service_key, &group, "{services:04X?}");
+                    assert_eq!(user_service_key, &user, "{services:04X?}");
+                    // The list still travels to the card as the caller gave it;
+                    // only the key chain skips the key-free entries.
+                    assert_eq!(listed, &services, "{services:04X?}");
+                }
+                other => panic!("expected DES keys, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn derive_des_rejects_a_service_list_that_contributes_no_key() {
+        let area = 0x1000u16;
+        let key_free = ServiceCode::new(0x1009);
+        let resolved = ResolvedNodeKeys::from_map(HashMap::from([
+            (SYSTEM_SERVICE_CODE, NodeKey::Des([0xFF; 8])),
+            (area, NodeKey::Des([0xA0; 8])),
+            (key_free.raw(), NodeKey::Des([0x50; 8])),
+        ]));
+
+        for services in [vec![], vec![key_free], vec![key_free, key_free]] {
+            assert!(
+                matches!(
+                    resolved.derive_auth_keys(&[area], &services, None),
+                    Err(KeyError::DesRequiresService)
+                ),
+                "{services:04X?} should be refused"
+            );
         }
     }
 
