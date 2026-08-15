@@ -26,13 +26,13 @@ use felica::felica_standard::{
     ResolvedNodeKeys, ServiceCode,
 };
 use felica::{ReaderPreference, RemoteDriver, open_reader};
-use hex::encode;
+use hex::{encode, encode_upper};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Suica system code
 const SUICA_SYSTEM_CODE: u16 = 0x0003;
@@ -56,9 +56,48 @@ const AREA_NODE_IDS: &[u16] = &[0x0000, 0x0040, 0x0800, 0x0FC0, 0x1000];
 
 /// Service node IDs for Suica
 const REQUIRED_SERVICE_NODE_IDS: &[u16] = &[
-    0x0048, 0x0088, 0x0810, 0x08C8, 0x090C, 0x1008, 0x1048, 0x108C, 0x10C8,
+    0x0048, // 発行情報
+    0x0088, // 属性情報
+    0x0810, // その他（用途未確定）
+    0x08C8, // 最終チャージ情報
+    0x090C, // 取引履歴
+    0x1008, // 拡張情報（定期券番・定期発売額・オートチャージ等）
+    0x1048, // 定期情報
+    0x108C, // 改札入出場情報
+    0x10C8, // SF改札入場情報
 ];
+
+/// Where each service sits in [`REQUIRED_SERVICE_NODE_IDS`]. A block read
+/// addresses a service by its index in the authenticated list, not by its code.
+const ISSUE_SERVICE: u8 = 0;
+const ATTRIBUTE_SERVICE: u8 = 1;
+const MISC_SERVICE: u8 = 2;
+const TOPUP_SERVICE: u8 = 3;
+const HISTORY_SERVICE: u8 = 4;
+const EXTENDED_SERVICE: u8 = 5;
+const COMMUTER_SERVICE: u8 = 6;
+const GATE_SERVICE: u8 = 7;
+const SF_GATE_SERVICE: u8 = 8;
+
+/// 料金発券・改札情報. Not present on every card, so it is probed and appended
+/// to the authenticated list only when the card actually carries it.
 const PAID_TICKET_SERVICE_NODE_ID: u16 = 0x1848;
+
+/// Blocks the 拡張情報 service holds. The commuter pass extras live in the first
+/// two, the 通学証明書省略期限 in block 5 and the auto-charge settings in the last.
+const EXTENDED_BLOCK_COUNT: usize = 10;
+
+/// Bit 6 of byte 9 in the 発行情報 metadata block marks the card as collected
+/// (取り込み済み), which also makes it invalid for further use.
+const COLLECTED_FLAG_MASK: u8 = 1 << 6;
+
+/// Service setting bits in byte 8 of the 属性情報 block.
+const VOICE_GUIDANCE_MASK: u8 = 0x10;
+const SF_OUTSIDE_COMMUTER_MASK: u8 = 0x20;
+const TOUCH_DE_GO_MASK: u8 = 0x04;
+
+/// Purchase (物販) transactions store a clock instead of entry/exit stations.
+const PURCHASE_TRANSACTION_TYPE: u8 = 0x46;
 
 /// Equipment type descriptions
 fn equipment_type_to_str(equipment_type: u8) -> String {
@@ -130,6 +169,15 @@ fn pay_type_to_str(pay_type: u8) -> String {
     }
 }
 
+/// 定期券・企画券の購入支払種別。取引履歴の支払種別と同じコード体系だが、
+/// 0x3F は「クレジットカード」の意味で使われる。
+fn purchase_pay_type_to_str(pay_type: u8) -> String {
+    if pay_type == 0x3F {
+        return "クレジットカード".to_string();
+    }
+    pay_type_to_str(pay_type)
+}
+
 /// Gate instruction type descriptions
 fn gate_instruction_type_to_str(gate_instruction_type: u8) -> String {
     match gate_instruction_type {
@@ -176,16 +224,6 @@ fn intermediate_gate_instruction_type_to_str(gate_instruction_type: u8) -> Strin
     }
 }
 
-/// Card type labels
-fn card_type_to_str(card_type: u8) -> &'static str {
-    match card_type {
-        0 => "せたまる/IruCa",
-        2 => "Suica/PiTaPa/TOICA/PASMO",
-        3 => "ICOCA",
-        _ => "不明",
-    }
-}
-
 /// Issuer ID information (company name, identifier)
 fn issuer_id_info(issuer_id: u16) -> Option<(&'static str, &'static str)> {
     match issuer_id {
@@ -196,6 +234,7 @@ fn issuer_id_info(issuer_id: u16) -> Option<(&'static str, &'static str)> {
         0x0107 => Some(("九州旅客鉄道株式会社", "JK")),
         0x0252 => Some(("株式会社パスモ", "PB")),
         0x0387 => Some(("株式会社名古屋交通開発機構・株式会社エムアイシー", "TP")),
+        0x04AD => Some(("株式会社スルッとKANSAI", "SU")),
         0x05D5 => Some(("株式会社ニモカ", "NR")),
         0x05D7 => Some(("福岡市交通局", "FC")),
         _ => None,
@@ -213,11 +252,11 @@ fn issuer_id_to_str(issuer_id: u16) -> String {
 /// Format IDi bytes to human-readable string
 fn idi_bytes_to_str(idi_bytes: &[u8]) -> String {
     if idi_bytes.len() < 8 {
-        return encode(idi_bytes).to_uppercase();
+        return encode_upper(idi_bytes);
     }
 
     let issuer_id = u16::from_be_bytes([idi_bytes[0], idi_bytes[1]]);
-    let remainder = encode(&idi_bytes[2..4]).to_uppercase();
+    let remainder = encode_upper(&idi_bytes[2..4]);
 
     let head = match issuer_id_info(issuer_id) {
         Some((_, identifier)) => format!("{}{}", identifier, remainder),
@@ -237,12 +276,88 @@ fn idi_bytes_to_str(idi_bytes: &[u8]) -> String {
     format!("{}{}{}", head, date_part, tail)
 }
 
-/// Format date from packed format
+fn be16(block: &[u8], offset: usize) -> u16 {
+    u16::from_be_bytes([block[offset], block[offset + 1]])
+}
+
+fn le16(block: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([block[offset], block[offset + 1]])
+}
+
+/// Decode a packed BCD field to its digits.
+fn decode_bcd(bytes: &[u8]) -> String {
+    let mut digits = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        digits.push(char::from(b'0' + (byte >> 4)));
+        digits.push(char::from(b'0' + (byte & 0x0F)));
+    }
+    digits
+}
+
+/// Split the packed on-card date into `(year offset, month, day)`.
+fn int_to_date(value: u16) -> (u16, u16, u16) {
+    (value >> 9, (value >> 5) & 0x0F, value & 0x1F)
+}
+
+/// Format a packed card date as `YYYY-MM-DD`.
+///
+/// Empty date slots come back as all-zero. Year 0 / month 0 / day 0 is not a
+/// real date, so it renders as a dash instead of a misleading "2000-00-00".
 fn format_date(value: u16) -> String {
-    let year = value >> 9;
-    let month = (value >> 5) & 0x0F;
-    let day = value & 0x1F;
-    format!("{:02}-{:02}-{:02}", year, month, day)
+    if value == 0 {
+        return "—".to_string();
+    }
+    let (year, month, day) = int_to_date(value);
+    format!("{:04}-{:02}-{:02}", 2000 + year, month, day)
+}
+
+/// Format a birth date, inferring the century of its two-digit year.
+///
+/// The on-card year is effectively two digits, so 1999 and 2099 are
+/// indistinguishable from the raw value. Every other card date is card-era
+/// (2001 onward), so [`format_date`]'s plain 2000-based reading is correct for
+/// them. A birth date, however, can predate 2000, so pick the most recent
+/// century that does not put the date in the future (a birth date cannot be
+/// later than today). Example: year `99` reads as 2099 → not yet reached → 1999.
+fn format_birth_date(value: u16) -> String {
+    format_birth_date_with_reference(value, current_year())
+}
+
+fn format_birth_date_with_reference(value: u16, reference_year: i32) -> String {
+    if value == 0 {
+        return "—".to_string();
+    }
+    let (year, month, day) = int_to_date(value);
+    let mut full_year = 2000 + i32::from(year);
+    if full_year > reference_year {
+        full_year -= 100;
+    }
+    format!("{:04}-{:02}-{:02}", full_year, month, day)
+}
+
+/// Current UTC year, used only to pick the century of a birth date. A local
+/// timezone would shift this by at most a day, which cannot change the answer.
+fn current_year() -> i32 {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    civil_year_from_days(seconds.div_euclid(86_400))
+}
+
+/// Year of the civil date `days` days after 1970-01-01 (Howard Hinnant's
+/// `civil_from_days`, kept to the parts the year needs).
+fn civil_year_from_days(days: i64) -> i32 {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    // The era starts in March, so January and February belong to the next year.
+    let year = year_of_era + era * 400 + i64::from(shifted_month >= 10);
+    year as i32
 }
 
 /// Format time from packed format
@@ -251,6 +366,52 @@ fn format_time(value: u16) -> String {
     let minute = (value >> 5) & 0x3F;
     let second = (value & 0x1F) * 2;
     format!("{:02}:{:02}:{:02}", hour, minute, second)
+}
+
+/// Render an integer with `,` thousands separators.
+fn thousands(value: i64) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if value < 0 {
+        out.push('-');
+    }
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Format an integer amount as yen with thousands separators.
+fn format_yen(value: impl Into<i64>) -> String {
+    format!("{} 円", thousands(value.into()))
+}
+
+/// Format a balance change, signed, or a dash when there is nothing to compare
+/// against.
+fn format_delta(value: Option<i64>) -> String {
+    match value {
+        Some(value) if value > 0 => format!("+{} 円", thousands(value)),
+        Some(value) => format!("{} 円", thousands(value)),
+        None => "—".to_string(),
+    }
+}
+
+/// Decode a Shift_JIS owner name, dropping the padding the card writes.
+///
+/// The field is fixed-width, so it arrives padded with spaces or NULs.
+fn decode_owner_name(block: &[u8]) -> String {
+    let (decoded, _, _) = SHIFT_JIS.decode(block);
+    decoded
+        .trim_end_matches(|ch: char| ch == '\0' || ch.is_whitespace())
+        .to_string()
+}
+
+/// True when a block still holds its unwritten all-zero pattern.
+fn is_blank(block: &[u8; 16]) -> bool {
+    block.iter().all(|&byte| byte == 0)
 }
 
 /// Station information
@@ -384,6 +545,10 @@ fn print_section(title: &str) {
 
 fn print_item(label: &str, value: impl std::fmt::Display) {
     println!("  - {}: {}", label, value);
+}
+
+fn print_note(note: &str) {
+    println!("  ({})", note);
 }
 
 fn print_usage() {
@@ -551,7 +716,7 @@ fn resolve_card_keys(key_store: &KeyStore, idm: &[u8]) -> Result<ResolvedNodeKey
         make_input_error(format!(
             "No keys found for system code 0x{:04X} and IDm {}; check keys.jsonl",
             SUICA_SYSTEM_CODE,
-            encode(idm).to_uppercase()
+            encode_upper(idm)
         ))
     })
 }
@@ -588,8 +753,8 @@ fn run_with_driver<D: FelicaDriver + ?Sized>(
         }
     };
 
-    let idm_hex = encode(felica.idm()).to_uppercase();
-    let pmm_hex = encode(felica.pmm()).to_uppercase();
+    let idm_hex = encode_upper(felica.idm());
+    let pmm_hex = encode_upper(felica.pmm());
 
     print_section("カード識別");
     print_item("IDm", &idm_hex);
@@ -631,7 +796,7 @@ fn run_with_driver<D: FelicaDriver + ?Sized>(
     // Derive the DES/AES keys for the target nodes and authenticate in one call.
     let auth_result = felica.authenticate_node(&card_keys, &areas, &services, None)?;
     let idi_str = idi_bytes_to_str(&auth_result.issue_id);
-    let pmi_hex = encode(auth_result.issue_parameter).to_uppercase();
+    let pmi_hex = encode_upper(auth_result.issue_parameter);
 
     print_item("IDi", &idi_str);
     print_item("PMi", &pmi_hex);
@@ -646,7 +811,7 @@ fn run_with_driver<D: FelicaDriver + ?Sized>(
 
 fn print_paid_ticket_skip_message(reason: &str) {
     print_section("料金発券・改札情報");
-    println!("  ({})", reason);
+    print_note(reason);
 }
 
 fn read_and_print_suica_data<D: FelicaDriver + ?Sized>(
@@ -654,28 +819,18 @@ fn read_and_print_suica_data<D: FelicaDriver + ?Sized>(
     paid_ticket_service_index: Option<u8>,
     paid_ticket_skip_reason: Option<&str>,
 ) -> Result<(), FelicaStandardError> {
-    // Read issue information (service index 0)
     print_issue_information(felica)?;
-
-    // Read attribute information (service index 1)
     print_attribute_information(felica)?;
-
-    // Read unknown information (service index 2)
-    print_unknown_information(felica)?;
-
-    // Read last topup information (service index 3)
     print_last_topup_information(felica)?;
-
-    // Read transaction history (service index 4)
+    print_unknown_information(felica)?;
     print_transaction_history(felica)?;
 
-    // Read commuter pass information (service index 6)
-    print_commuter_pass_information(felica)?;
+    // 定期券の付加情報とオートチャージ設定は同じ拡張情報サービスに載っている。
+    let extended_blocks = read_blocks(felica, EXTENDED_SERVICE, EXTENDED_BLOCK_COUNT)?;
+    print_commuter_pass_information(felica, &extended_blocks)?;
+    print_auto_charge_information(&extended_blocks);
 
-    // Read gate in/out information (service index 7)
     print_gate_in_out_information(felica)?;
-
-    // Read SF gate entry information (service index 8)
     print_sf_gate_entry_information(felica)?;
 
     match paid_ticket_service_index {
@@ -721,9 +876,9 @@ fn print_issue_information<D: FelicaDriver + ?Sized>(
 ) -> Result<(), FelicaStandardError> {
     print_section("発行情報");
 
-    let blocks = read_blocks(felica, 0, 4)?;
+    let blocks = read_blocks(felica, ISSUE_SERVICE, 4)?;
     if blocks.len() < 4 {
-        println!("  (データが不十分です)");
+        print_note("データが不十分です");
         return Ok(());
     }
 
@@ -733,38 +888,28 @@ fn print_issue_information<D: FelicaDriver + ?Sized>(
     let metadata_block = &blocks[3];
 
     // Owner name (Shift_JIS encoded)
-    let name_bytes: Vec<u8> = owner_block
-        .iter()
-        .take_while(|&&b| b != 0)
-        .copied()
-        .collect();
-    let (name, _, _) = SHIFT_JIS.decode(&name_bytes);
-    print_item("所有者名", name.trim());
+    print_item("所有者名", decode_owner_name(owner_block));
 
     // Secondary IDi
     print_item("第二発行ID", idi_bytes_to_str(secondary_idi_block));
 
     // Phone number
-    let phone = encode(&personal_block[0..8])
-        .trim_end_matches('f')
+    let phone = encode_upper(&personal_block[0..8])
+        .trim_end_matches('F')
         .to_string();
     print_item("所有者電話番号", phone);
 
     // Owner age
-    let age = encode(&personal_block[8..9]);
-    print_item("所有者年齢", age);
+    print_item("所有者年齢", encode_upper(&personal_block[8..9]));
 
     // Owner date of birth
-    let dob = u16::from_be_bytes([personal_block[9], personal_block[10]]);
-    print_item("所有者生年月日", format_date(dob));
+    print_item("所有者生年月日", format_birth_date(be16(personal_block, 9)));
 
     // Deposit
-    let deposit = u16::from_le_bytes([personal_block[12], personal_block[13]]);
-    print_item("デポジット額", format!("{} 円", deposit));
+    print_item("デポジット額", format_yen(le16(personal_block, 12)));
 
     // Issuer ID
-    let issuer_id = u16::from_be_bytes([metadata_block[0], metadata_block[1]]);
-    print_item("発行者ID", issuer_id_to_str(issuer_id));
+    print_item("発行者ID", issuer_id_to_str(be16(metadata_block, 0)));
 
     // Equipment type
     let issued_by = metadata_block[2];
@@ -779,12 +924,15 @@ fn print_issue_information<D: FelicaDriver + ?Sized>(
     );
 
     // Issue date
-    let issued_at = u16::from_be_bytes([metadata_block[7], metadata_block[8]]);
-    print_item("発行日", format_date(issued_at));
+    print_item("発行日", format_date(be16(metadata_block, 7)));
 
     // Expiration date
-    let expires_at = u16::from_be_bytes([metadata_block[14], metadata_block[15]]);
-    print_item("有効期限", format_date(expires_at));
+    print_item("有効期限", format_date(be16(metadata_block, 14)));
+
+    // Collected (取り込み済み) cards are invalid for further use.
+    if metadata_block[9] & COLLECTED_FLAG_MASK != 0 {
+        print_item("取り込み済み", "はい（無効カード）");
+    }
 
     Ok(())
 }
@@ -794,110 +942,38 @@ fn print_attribute_information<D: FelicaDriver + ?Sized>(
 ) -> Result<(), FelicaStandardError> {
     print_section("属性情報");
 
-    let blocks = read_blocks(felica, 1, 1)?;
+    let blocks = read_blocks(felica, ATTRIBUTE_SERVICE, 1)?;
     if blocks.is_empty() {
-        println!("  (データが不十分です)");
+        print_note("データが不十分です");
         return Ok(());
     }
 
     let block = &blocks[0];
 
-    let card_type = block[8] >> 4;
-    print_item("カード種別", card_type_to_str(card_type));
+    print_item("残高", format_yen(le16(block, 11)));
+    print_item("取引通番", be16(block, 14));
 
-    let region = block[8] & 0x0F;
-    print_item("地域", region);
-
-    let amount = u16::from_le_bytes([block[11], block[12]]);
-    print_item("残高", format!("{} 円", amount));
-
-    let transaction_number = u16::from_be_bytes([block[14], block[15]]);
-    print_item("取引通番", transaction_number);
-
-    Ok(())
-}
-
-fn print_transaction_history<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<D>,
-) -> Result<(), FelicaStandardError> {
-    print_section("取引履歴");
-
-    let blocks = read_blocks(felica, 4, 20)?;
-    if blocks.is_empty() {
-        println!("  (履歴がありません)");
-        return Ok(());
-    }
-
-    for (index, block) in blocks.iter().enumerate() {
-        let recorded_by = block[0];
-        if recorded_by == 0x00 {
-            break;
-        }
-
-        let transaction_type = block[1] & 0x7F;
-        let pay_type = block[2];
-        let gate_instruction_type = block[3];
-        let recorded_at = u16::from_be_bytes([block[4], block[5]]);
-
-        println!("[{:02}] {}", index, format_date(recorded_at));
-        print_item("機器", equipment_type_to_str(recorded_by));
-        print_item("取引種別", transaction_type_to_str(transaction_type));
-        print_item("支払種別", pay_type_to_str(pay_type));
-        print_item(
-            "改札処理",
-            gate_instruction_type_to_str(gate_instruction_type),
-        );
-
-        if transaction_type == 0x46 {
-            // 物販
-            let time_value = u16::from_be_bytes([block[6], block[7]]);
-            print_item("取引時刻", format_time(time_value));
+    // Byte 8 carries the service settings the card holder can toggle.
+    let settings = block[8];
+    let use_str = |enabled: bool| {
+        if enabled {
+            "利用する"
         } else {
-            let entry_station_line = block[6];
-            let entry_station_order = block[7];
-            let exit_station_line = block[8];
-            let exit_station_order = block[9];
-            print_item(
-                "入場駅",
-                format_station(entry_station_line, entry_station_order),
-            );
-            print_item(
-                "出場駅",
-                format_station(exit_station_line, exit_station_order),
-            );
+            "利用しない"
         }
-
-        let amount = u16::from_le_bytes([block[10], block[11]]);
-        let transaction_number = u16::from_be_bytes([block[13], block[14]]);
-        print_item("残高", format!("{} 円", amount));
-        print_item("取引通番", transaction_number);
-        println!();
-    }
-
-    Ok(())
-}
-
-fn print_unknown_information<D: FelicaDriver + ?Sized>(
-    felica: &mut FelicaStandard<D>,
-) -> Result<(), FelicaStandardError> {
-    print_section("？？情報");
-
-    let blocks = read_blocks(felica, 2, 1)?;
-    if blocks.is_empty() {
-        println!("  (データがありません)");
-        return Ok(());
-    }
-
-    let block = &blocks[0];
-
-    let amount = u16::from_le_bytes([block[0], block[1]]);
-    print_item("不明な残高", format!("{} 円", amount));
-
-    let unknown_date = u16::from_be_bytes([block[8], block[9]]);
-    print_item("不明な日付", format_date(unknown_date));
-
-    let transaction_number = u16::from_be_bytes([block[14], block[15]]);
-    print_item("不明な取引通番", transaction_number);
+    };
+    print_item(
+        "音声案内サービス",
+        use_str(settings & VOICE_GUIDANCE_MASK != 0),
+    );
+    print_item(
+        "定期有効期間外のSF利用",
+        use_str(settings & SF_OUTSIDE_COMMUTER_MASK != 0),
+    );
+    print_item(
+        "タッチでGo！新幹線",
+        use_str(settings & TOUCH_DE_GO_MASK != 0),
+    );
 
     Ok(())
 }
@@ -907,9 +983,9 @@ fn print_last_topup_information<D: FelicaDriver + ?Sized>(
 ) -> Result<(), FelicaStandardError> {
     print_section("最終チャージ情報");
 
-    let blocks = read_blocks(felica, 3, 3)?;
+    let blocks = read_blocks(felica, TOPUP_SERVICE, 3)?;
     if blocks.is_empty() {
-        println!("  (データがありません)");
+        print_note("データがありません");
         return Ok(());
     }
 
@@ -925,31 +1001,125 @@ fn print_last_topup_information<D: FelicaDriver + ?Sized>(
         format_station(topup_station_line, topup_station_order),
     );
 
-    let topup_amount = u16::from_le_bytes([detail_block[5], detail_block[6]]);
-    print_item("チャージ金額", format!("{} 円", topup_amount));
+    print_item("チャージ金額", format_yen(le16(detail_block, 5)));
+
+    Ok(())
+}
+
+fn print_unknown_information<D: FelicaDriver + ?Sized>(
+    felica: &mut FelicaStandard<D>,
+) -> Result<(), FelicaStandardError> {
+    print_section("その他情報（用途未確定）");
+
+    let blocks = read_blocks(felica, MISC_SERVICE, 1)?;
+    if blocks.is_empty() {
+        print_note("データがありません");
+        return Ok(());
+    }
+
+    let block = &blocks[0];
+
+    print_item("不明な残高", format_yen(le16(block, 0)));
+    print_item("不明な日付", format_date(be16(block, 8)));
+    print_item("不明な取引通番", be16(block, 14));
+
+    Ok(())
+}
+
+fn print_transaction_history<D: FelicaDriver + ?Sized>(
+    felica: &mut FelicaStandard<D>,
+) -> Result<(), FelicaStandardError> {
+    print_section("取引履歴");
+
+    let blocks = read_blocks(felica, HISTORY_SERVICE, 20)?;
+    // Unwritten slots read back as zero, and every slot past the first one is
+    // empty too, so the history ends there.
+    let entries: Vec<[u8; 16]> = blocks
+        .into_iter()
+        .take_while(|block| block[0] != 0x00)
+        .collect();
+    if entries.is_empty() {
+        print_note("履歴がありません");
+        return Ok(());
+    }
+
+    for (index, block) in entries.iter().enumerate() {
+        let recorded_by = block[0];
+        let transaction_type = block[1] & 0x7F;
+        let pay_type = block[2];
+        let gate_instruction_type = block[3];
+
+        println!("[{:02}] {}", index, format_date(be16(block, 4)));
+        print_item("機器", equipment_type_to_str(recorded_by));
+        print_item("取引種別", transaction_type_to_str(transaction_type));
+        print_item("支払種別", pay_type_to_str(pay_type));
+        print_item(
+            "改札処理",
+            gate_instruction_type_to_str(gate_instruction_type),
+        );
+
+        if transaction_type == PURCHASE_TRANSACTION_TYPE {
+            // 物販は経路の代わりに時刻を記録する。
+            print_item("取引時刻", format_time(be16(block, 6)));
+        } else {
+            let entry_station_line = block[6];
+            let entry_station_order = block[7];
+            let exit_station_line = block[8];
+            let exit_station_order = block[9];
+            print_item(
+                "入場駅",
+                format_station(entry_station_line, entry_station_order),
+            );
+            print_item(
+                "出場駅",
+                format_station(exit_station_line, exit_station_order),
+            );
+        }
+
+        // Entries run newest first, so this transaction moved the balance by
+        // the difference against the entry recorded before it. The oldest entry
+        // has no predecessor on the card to compare against.
+        let balance = le16(block, 10);
+        let delta = entries
+            .get(index + 1)
+            .map(|older| i64::from(balance) - i64::from(le16(older, 10)));
+        print_item("残高", format_yen(balance));
+        print_item("差額", format_delta(delta));
+        print_item("取引通番", be16(block, 13));
+        println!();
+    }
 
     Ok(())
 }
 
 fn print_commuter_pass_information<D: FelicaDriver + ?Sized>(
     felica: &mut FelicaStandard<D>,
+    extended_blocks: &[[u8; 16]],
 ) -> Result<(), FelicaStandardError> {
     print_section("定期情報");
 
-    let blocks = read_blocks(felica, 6, 3)?;
+    let blocks = read_blocks(felica, COMMUTER_SERVICE, 3)?;
     if blocks.len() < 3 {
-        println!("  (データが不十分です)");
+        print_note("データが不十分です");
         return Ok(());
     }
 
     let primary_block = &blocks[0];
     let supplemental_block = &blocks[2];
 
-    let start_at = u16::from_be_bytes([primary_block[0], primary_block[1]]);
-    print_item("開始日", format_date(start_at));
+    let start_at = format_date(be16(primary_block, 0));
+    if start_at == "—" {
+        print_note("定期券なし");
+        return Ok(());
+    }
 
-    let end_at = u16::from_be_bytes([primary_block[2], primary_block[3]]);
-    print_item("終了日", format_date(end_at));
+    // 発行事業者・券番・発売額などは拡張情報サービス側に載っている。
+    if extended_blocks.len() >= EXTENDED_BLOCK_COUNT {
+        print_item("発行事業者", issuer_id_to_str(be16(&extended_blocks[0], 0)));
+    }
+
+    print_item("開始日", start_at);
+    print_item("終了日", format_date(be16(primary_block, 2)));
 
     let start_station_line = primary_block[8];
     let start_station_order = primary_block[9];
@@ -979,10 +1149,75 @@ fn print_commuter_pass_information<D: FelicaDriver + ?Sized>(
         format_station(via2_station_line, via2_station_order),
     );
 
-    let issued_at = u16::from_be_bytes([supplemental_block[5], supplemental_block[6]]);
-    print_item("発行日", format_date(issued_at));
+    print_item("発行日", format_date(be16(supplemental_block, 5)));
+
+    if extended_blocks.len() < EXTENDED_BLOCK_COUNT {
+        print_note("拡張情報が読めなかったため券番・発売額などは省略しました");
+        return Ok(());
+    }
+
+    // 券番は拡張情報ブロック0の末尾からブロック1の先頭にまたがる BCD 6 桁。
+    let pass_number = decode_bcd(&[
+        extended_blocks[0][15],
+        extended_blocks[1][0],
+        extended_blocks[1][1],
+    ]);
+    print_item("券番", pass_number);
+
+    // 発売額は 3 バイトのリトルエンディアン。
+    let sale_price = u32::from_le_bytes([
+        extended_blocks[1][7],
+        extended_blocks[1][8],
+        extended_blocks[1][9],
+        0,
+    ]);
+    print_item("発売額", format_yen(sale_price));
+
+    let purchase_pay_type = extended_blocks[1][6];
+    print_item(
+        "購入時支払方法",
+        purchase_pay_type_to_str(purchase_pay_type),
+    );
+
+    // R 通番は BCD 4 桁のうち下 3 桁。
+    let r_number: String = decode_bcd(&extended_blocks[1][10..12])
+        .chars()
+        .skip(1)
+        .collect();
+    print_item("R通番", r_number);
+
+    // 通学証明書省略期限は学生定期のみ。
+    let certificate_expiry = format_date(be16(&extended_blocks[5], 10));
+    if certificate_expiry != "—" {
+        print_item("通学証明書省略期限", certificate_expiry);
+    }
 
     Ok(())
+}
+
+fn print_auto_charge_information(extended_blocks: &[[u8; 16]]) {
+    print_section("オートチャージ");
+
+    let Some(block) = extended_blocks.get(EXTENDED_BLOCK_COUNT - 1) else {
+        print_note("データがありません");
+        return;
+    };
+
+    let contracted = (block[0] >> 7) & 1 == 1;
+    let enabled = (block[0] >> 6) & 1 == 1;
+    let yes_no = |value: bool| if value { "有" } else { "無" };
+
+    print_item("契約", yes_no(contracted));
+    print_item("有効", yes_no(enabled));
+
+    if contracted {
+        // チャージ額としきい値はどちらも 1000 円単位。
+        print_item("チャージ額", format_yen(u16::from(block[0] & 0x0F) * 1000));
+        print_item(
+            "しきい値",
+            format_yen(u16::from((block[1] >> 2) & 0x0F) * 1000),
+        );
+    }
 }
 
 fn print_gate_in_out_information<D: FelicaDriver + ?Sized>(
@@ -990,19 +1225,25 @@ fn print_gate_in_out_information<D: FelicaDriver + ?Sized>(
 ) -> Result<(), FelicaStandardError> {
     print_section("改札入出場情報");
 
-    let blocks = read_blocks(felica, 7, 3)?;
-    if blocks.is_empty() {
-        println!("  (データがありません)");
+    let blocks = read_blocks(felica, GATE_SERVICE, 3)?;
+    // Unused slots come back zero-filled; skipping them keeps phantom rows out
+    // of the dump while the printed index stays the card's own slot number.
+    let entries: Vec<(usize, [u8; 16])> = blocks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, block)| !is_blank(block))
+        .collect();
+    if entries.is_empty() {
+        print_note("記録がありません");
         return Ok(());
     }
 
-    for (index, block) in blocks.iter().enumerate() {
-        let date = u16::from_be_bytes([block[6], block[7]]);
+    for (index, block) in &entries {
         let time_hex = encode(&block[8..10]);
         println!(
             "[{:02}] {} {}:{}",
             index,
-            format_date(date),
+            format_date(be16(block, 6)),
             &time_hex[0..2],
             &time_hex[2..4]
         );
@@ -1020,14 +1261,9 @@ fn print_gate_in_out_information<D: FelicaDriver + ?Sized>(
         let station_order = block[3];
         print_item("入出場駅", format_station(station_line, station_order));
 
-        let device_number = encode(&block[4..6]).to_uppercase();
-        print_item("装置番号", device_number);
-
-        let amount = u16::from_le_bytes([block[10], block[11]]);
-        print_item("金額", format!("{} 円", amount));
-
-        let commuter_pass_fee = u16::from_le_bytes([block[12], block[13]]);
-        print_item("最寄定期区間までの運賃", commuter_pass_fee);
+        print_item("装置番号", encode_upper(&block[4..6]));
+        print_item("金額", format_yen(le16(block, 10)));
+        print_item("最寄定期区間までの運賃", format_yen(le16(block, 12)));
 
         let nearest_station_line = block[14];
         let nearest_station_order = block[15];
@@ -1047,14 +1283,19 @@ fn print_sf_gate_entry_information<D: FelicaDriver + ?Sized>(
 ) -> Result<(), FelicaStandardError> {
     print_section("SF改札入場情報");
 
-    let blocks = read_blocks(felica, 8, 2)?;
+    let blocks = read_blocks(felica, SF_GATE_SERVICE, 2)?;
     if blocks.len() < 2 {
-        println!("  (データが不十分です)");
+        print_note("データが不十分です");
         return Ok(());
     }
 
     let first_block = &blocks[0];
     let second_block = &blocks[1];
+
+    if is_blank(first_block) && is_blank(second_block) {
+        print_note("記録がありません");
+        return Ok(());
+    }
 
     let entry_station_line = first_block[0];
     let entry_station_order = first_block[1];
@@ -1063,10 +1304,9 @@ fn print_sf_gate_entry_information<D: FelicaDriver + ?Sized>(
         format_station(entry_station_line, entry_station_order),
     );
 
-    let intermediate_date = u16::from_be_bytes([second_block[0], second_block[1]]);
     print_item(
         "料金収受対象中間改札入出場日付",
-        format_date(intermediate_date),
+        format_date(be16(second_block, 0)),
     );
 
     let entry_time = encode(&second_block[2..4]);
@@ -1115,13 +1355,18 @@ fn print_paid_ticket_issue_information<D: FelicaDriver + ?Sized>(
     print_section("料金発券・改札情報");
 
     let blocks = read_blocks(felica, service_index, 2)?;
-    if blocks.is_empty() {
-        println!("  (データがありません)");
+    let entries: Vec<(usize, [u8; 16])> = blocks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, block)| !is_blank(block))
+        .collect();
+    if entries.is_empty() {
+        print_note("記録がありません");
         return Ok(());
     }
 
-    for (index, block) in blocks.iter().enumerate() {
-        println!("[{:02}]", index,);
+    for (index, block) in &entries {
+        println!("[{:02}]", index);
 
         let depart_station_line = block[0];
         let depart_station_order = block[1];
@@ -1137,20 +1382,14 @@ fn print_paid_ticket_issue_information<D: FelicaDriver + ?Sized>(
             format_station(arrive_station_line, arrive_station_order),
         );
 
-        let expiration_date = u16::from_be_bytes([block[4], block[5]]);
-        print_item("有効期限", format_date(expiration_date));
+        print_item("有効期限", format_date(be16(block, 4)));
+        print_item("発券時間", format_time(be16(block, 6)));
+        print_item("発券種別", encode_upper(&block[8..9]));
 
-        let issue_time = u16::from_be_bytes([block[6], block[7]]);
-        print_item("発券時間", format_time(issue_time));
+        // 金額は 10 円単位で 1 バイトに収められている。
+        print_item("金額", format_yen(u16::from(block[9]) * 10));
 
-        let issue_type = &block[8..9];
-        print_item("発券種別", encode(issue_type));
-
-        let fee = block[9];
-        print_item("金額", fee * 10);
-
-        let device_number = encode(&block[10..12]).to_uppercase();
-        print_item("装置番号", device_number);
+        print_item("装置番号", encode_upper(&block[10..12]));
 
         let checked_station_line = block[12];
         let checked_station_order = block[13];
@@ -1159,8 +1398,7 @@ fn print_paid_ticket_issue_information<D: FelicaDriver + ?Sized>(
             format_station(checked_station_line, checked_station_order),
         );
 
-        let issue_time = u16::from_be_bytes([block[14], block[15]]);
-        print_item("改札実施時間", format_time(issue_time));
+        print_item("改札実施時間", format_time(be16(block, 14)));
 
         println!();
     }
