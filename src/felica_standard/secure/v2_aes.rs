@@ -538,7 +538,7 @@ mod tests {
         fn code_key(code: u16) -> [u8; V2_AES128_BLOCK_SIZE] {
             let tag = code.to_be_bytes();
             let mut key = [0u8; V2_AES128_BLOCK_SIZE];
-            for chunk in key.chunks_exact_mut(2) {
+            for chunk in key.as_chunks_mut::<2>().0 {
                 chunk.copy_from_slice(&tag);
             }
             key

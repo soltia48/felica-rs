@@ -162,7 +162,9 @@ impl<T: Transport> Chipset<T> {
 
     pub fn apply_initiator_defaults(&mut self) -> Result<()> {
         let defaults: Vec<(u8, u8)> = IN_SET_PROTOCOL_DEFAULTS
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0], pair[1]))
             .collect();
         self.write_initiator_protocol(&defaults)
@@ -195,7 +197,7 @@ impl<T: Transport> Chipset<T> {
         }
         let rsp = self.send_command(0x02, &payload)?;
         ensure_status_ok(rsp.first().copied())?;
-        for pair in payload.chunks_exact(2) {
+        for pair in payload.as_chunks::<2>().0 {
             if let Some(slot) = self.initiator_protocol.get_mut(pair[0] as usize) {
                 *slot = Some(pair[1]);
             }
@@ -578,7 +580,7 @@ fn take_rct_block(body: &[u8], offset: usize) -> Result<Vec<u8>> {
 /// A setting already carrying the wanted value needs no write; a register not
 /// listed yet is appended as long as there is room for it.
 fn update_rct_setting(settings: &mut Vec<u8>, entry: [u8; 3]) -> bool {
-    for existing in settings.chunks_exact_mut(3) {
+    for existing in settings.as_chunks_mut::<3>().0 {
         if existing[0] != entry[0] || existing[1] != entry[1] {
             continue;
         }

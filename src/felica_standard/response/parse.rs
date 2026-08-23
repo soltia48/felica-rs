@@ -133,7 +133,7 @@ impl FelicaStandardResponse {
         let expected_len = 11 + node_count * 2;
         Self::ensure_response_len(data, expected_len, "short request service key version list")?;
         let mut key_versions = Vec::with_capacity(node_count);
-        for chunk in data[11..11 + node_count * 2].chunks_exact(2) {
+        for chunk in data[11..11 + node_count * 2].as_chunks::<2>().0 {
             key_versions.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
         Ok(FelicaStandardResponse::RequestService { idm, key_versions })
@@ -180,7 +180,7 @@ impl FelicaStandardResponse {
                         "request service v2 key version list truncated".into(),
                     ));
                 }
-                for chunk in payload[..expected].chunks_exact(2) {
+                for chunk in payload[..expected].as_chunks::<2>().0 {
                     parsed_versions.push(RequestServiceV2KeyVersion::Single(u16::from_le_bytes([
                         chunk[0], chunk[1],
                     ])));
@@ -286,7 +286,7 @@ impl FelicaStandardResponse {
             "short request system code response list",
         )?;
         let mut system_codes = Vec::with_capacity(count);
-        for chunk in data[11..11 + count * 2].chunks_exact(2) {
+        for chunk in data[11..11 + count * 2].as_chunks::<2>().0 {
             system_codes.push(u16::from_be_bytes([chunk[0], chunk[1]]));
         }
         Ok(FelicaStandardResponse::RequestSystemCode { idm, system_codes })
@@ -303,7 +303,7 @@ impl FelicaStandardResponse {
         let expected_len = 11 + count * 2;
         Self::ensure_response_len(data, expected_len, "short request block information list")?;
         let mut block_counts = Vec::with_capacity(count);
-        for chunk in data[11..11 + count * 2].chunks_exact(2) {
+        for chunk in data[11..11 + count * 2].as_chunks::<2>().0 {
             block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
         }
         Ok(FelicaStandardResponse::RequestBlockInformation { idm, block_counts })
@@ -341,7 +341,7 @@ impl FelicaStandardResponse {
         )?;
         let mut assigned_block_counts = Vec::with_capacity(count);
         let mut free_block_counts = Vec::with_capacity(count);
-        for chunk in data[13..13 + count * 4].chunks_exact(4) {
+        for chunk in data[13..13 + count * 4].as_chunks::<4>().0 {
             assigned_block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
             free_block_counts.push(u16::from_le_bytes([chunk[2], chunk[3]]));
         }
@@ -384,7 +384,7 @@ impl FelicaStandardResponse {
         )?;
 
         let mut areas = Vec::with_capacity(area_count);
-        for chunk in data[offset..offset + area_payload_len].chunks_exact(4) {
+        for chunk in data[offset..offset + area_payload_len].as_chunks::<4>().0 {
             areas.push(AreaCodeRange {
                 area_code: u16::from_le_bytes([chunk[0], chunk[1]]),
                 end_service_code: u16::from_le_bytes([chunk[2], chunk[3]]),
@@ -404,7 +404,10 @@ impl FelicaStandardResponse {
         )?;
 
         let mut services = Vec::with_capacity(service_count);
-        for chunk in data[offset..offset + service_payload_len].chunks_exact(2) {
+        for chunk in data[offset..offset + service_payload_len]
+            .as_chunks::<2>()
+            .0
+        {
             services.push(ServiceCode::new(u16::from_le_bytes([chunk[0], chunk[1]])));
         }
 
@@ -512,7 +515,7 @@ impl FelicaStandardResponse {
 
         let node_properties = if payload.len() == value_limited_len {
             let mut properties = Vec::with_capacity(node_count);
-            for chunk in payload.chunks_exact(10) {
+            for chunk in payload.as_chunks::<10>().0 {
                 properties.push(NodeProperty::ValueLimitedPurseService {
                     enabled: chunk[0] == 0x01,
                     upper_limit: i32::from_le_bytes([chunk[1], chunk[2], chunk[3], chunk[4]]),
@@ -849,7 +852,7 @@ fn parse_specification_version_data(data: &[u8]) -> DriverResult<SpecificationVe
     }
     let mut option_versions = Vec::with_capacity(option_count);
     let option_bytes = &data[4..4 + option_bytes_len];
-    for chunk in option_bytes.chunks_exact(2) {
+    for chunk in option_bytes.as_chunks::<2>().0 {
         option_versions.push(OptionVersion::from_le_bytes([chunk[0], chunk[1]]));
     }
     Ok(SpecificationVersion {
@@ -869,7 +872,7 @@ fn parse_pmm(data: &[u8]) -> DriverResult<(Pmm, &[u8])> {
 
 fn collect_blocks(data: &[u8], block_count: usize) -> Vec<[u8; BLOCK_SIZE]> {
     let mut blocks = Vec::with_capacity(block_count);
-    for chunk in data[..block_count * BLOCK_SIZE].chunks_exact(BLOCK_SIZE) {
+    for chunk in data[..block_count * BLOCK_SIZE].as_chunks::<BLOCK_SIZE>().0 {
         let mut block = [0u8; BLOCK_SIZE];
         block.copy_from_slice(chunk);
         blocks.push(block);
