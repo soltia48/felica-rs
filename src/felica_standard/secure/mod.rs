@@ -230,7 +230,9 @@ impl AuthenticatedContext {
     /// whose key it replaces — depends on the order being preserved.
     ///
     /// For DES this is the **service** list of Authentication1: the area list
-    /// scopes the key chain and is not addressable. For v2 it is the node list.
+    /// scopes the key chain and is not addressable. A session used to change the
+    /// system key must therefore include the system node (`0xFFFF`) in that
+    /// service list. For v2 it is the node list.
     ///
     /// A context built by hand (a relay that holds the keys, say) should pass
     /// the same list it authenticated with; leaving it empty only means node

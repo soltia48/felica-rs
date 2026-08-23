@@ -126,7 +126,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         // A block list element's "service code list order" counts the service
         // list only (§4.4.5); the area list scopes the key chain and is not
         // addressable. A node whose key is to be changed therefore has to be
-        // named among the services, which the system node `FFFFh` may be.
+        // named among the services. In particular, changing the system key
+        // requires the service list to contain the system node `FFFFh`.
         .with_nodes(services.iter().map(ServiceCode::raw).collect());
         self.authenticated_context = Some(context);
 
@@ -410,6 +411,17 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Changes one or more DES node keys with a secure Write command.
+    ///
+    /// `ChangeKeyParameters::parent_key` follows the DES key hierarchy: use the
+    /// containing Area key for a Service, or the parent Area key for an Area.
+    /// For the system node (`0xFFFF`), which has no parent Area, the old system
+    /// key is also its parent key. The Authentication1 service list must contain
+    /// `0xFFFF` so the block list element's service-list-order field can address
+    /// the System.
+    ///
+    /// This method uses the supplied key material as-is; it cannot derive the
+    /// parent key because it does not own the card's Area hierarchy.
     pub fn change_keys(
         &mut self,
         change_key_params: &[ChangeKeyParameters],
@@ -678,6 +690,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Registers issue information and a new Area 0 key.
+    ///
+    /// `area0_key` is the **new** Area 0 key stored in the plaintext issuance
+    /// package. `package_key` is the Area 0 key used to calculate the package
+    /// MAC and encrypt the package. These arguments have distinct roles and are
+    /// not required to contain the same key.
     pub fn register_issue_id(
         &mut self,
         system_code: u16,
@@ -720,6 +738,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Registers a new Area.
+    ///
+    /// `area_key` is the new key assigned to the Area. `package_key` must be the
+    /// Area key of the parent Area in which the new Area is created.
     pub fn register_area(
         &mut self,
         area_code: u16,
@@ -764,6 +786,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Registers a new Service.
+    ///
+    /// `service_key` is the new key assigned to the Service. `package_key` must
+    /// be the Area key of the Area in which the new Service is created.
     pub fn register_service(
         &mut self,
         service_code: u16,

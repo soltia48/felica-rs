@@ -751,10 +751,20 @@ pub struct MutualAuthenticationResult {
 /// [`SecureSessionCredentials`]: super::SecureSessionCredentials
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ChangeKeyParameters {
+    /// Node code of the key being changed. `0xFFFF` denotes the system key.
     pub node: u16,
+    /// Key of the node's parent in the DES key hierarchy.
+    ///
+    /// For a service key this is the key of the Area containing the Service;
+    /// for an Area key it is the key of the parent Area. The System has no
+    /// parent Area, so changing the system key uses the old system key itself
+    /// as the parent key (`parent_key == old_key`).
     pub parent_key: [u8; 8],
+    /// New key to install for `node`.
     pub new_key: [u8; 8],
+    /// Existing key currently assigned to `node`.
     pub old_key: [u8; 8],
+    /// Key version to assign to the new key.
     pub new_key_version: u16,
 }
 
@@ -827,6 +837,11 @@ impl fmt::Debug for ChangeKeyParameters {
 }
 
 impl ChangeKeyParameters {
+    /// Creates the parameters for one DES key change.
+    ///
+    /// The caller supplies the parent key according to the node hierarchy. In
+    /// particular, when `node` is the system (`0xFFFF`), `parent_key` must be
+    /// the same key as `old_key` because the System has no parent Area.
     pub fn new(
         node: u16,
         parent_key: [u8; 8],
