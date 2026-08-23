@@ -742,7 +742,7 @@ impl FelicaStandardResponse {
     }
 
     fn parse_secure_read(data: &[u8], read_v2: bool) -> DriverResult<Self> {
-        if data.len() < 3 {
+        if data.len() < 2 {
             return Err(DriverError::Other(
                 "encrypted read response shorter than status flags".into(),
             ));
@@ -763,6 +763,11 @@ impl FelicaStandardResponse {
                     result: None,
                 }
             });
+        }
+        if data.len() < 3 {
+            return Err(DriverError::Other(
+                "successful encrypted read response missing block count".into(),
+            ));
         }
         let block_count = data[2] as usize;
         if block_count == 0 || block_count > MAX_BLOCK_COUNT {

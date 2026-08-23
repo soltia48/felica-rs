@@ -317,6 +317,31 @@ fn from_secure_bytes_parses_secure_read_v2_success() {
 }
 
 #[test]
+fn from_secure_bytes_parses_two_byte_secure_read_errors() {
+    for command_code in [READ_COMMAND_CODE, READ_V2_COMMAND_CODE] {
+        let parsed = FelicaStandardResponse::from_secure_bytes(command_code, &[0x01, 0xA2])
+            .expect("two status flags are a complete secure Read error response");
+        match parsed {
+            FelicaStandardResponse::Read {
+                status_flag1,
+                status_flag2,
+                result,
+            }
+            | FelicaStandardResponse::ReadV2 {
+                status_flag1,
+                status_flag2,
+                result,
+            } => {
+                assert_eq!(status_flag1, 0x01);
+                assert_eq!(status_flag2, 0xA2);
+                assert!(result.is_none());
+            }
+            other => panic!("unexpected parsed response variant: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn from_secure_bytes_rejects_register_issue_id_without_remaining_blocks() {
     assert_driver_error_contains(
         FelicaStandardResponse::from_secure_bytes(REGISTER_ISSUE_ID_COMMAND_CODE, &[0x00, 0x00]),

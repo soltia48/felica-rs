@@ -30,7 +30,7 @@ use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::redact::Redacted;
-use super::secure::{generate_group_key_v2_aes128, generate_service_keys_des};
+use super::secure::{SecureSessionScheme, generate_group_key_v2_aes128, generate_service_keys_des};
 use super::types::ServiceCode;
 
 /// Node code of the system key (`0xFFFF`), the root of the DES key hierarchy.
@@ -53,6 +53,14 @@ pub enum NodeKey {
 }
 
 impl NodeKey {
+    /// Returns the secure-messaging scheme this key belongs to.
+    pub fn scheme(&self) -> SecureSessionScheme {
+        match self {
+            NodeKey::Des(_) => SecureSessionScheme::Des,
+            NodeKey::Aes128(_) => SecureSessionScheme::Aes128,
+        }
+    }
+
     fn algorithm(&self) -> Algorithm {
         match self {
             NodeKey::Des(_) => Algorithm::Des,
@@ -74,10 +82,31 @@ impl fmt::Debug for NodeKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Algorithm {
     Des,
     Aes128,
+}
+
+impl Algorithm {
+    fn from_scheme(scheme: SecureSessionScheme) -> Self {
+        match scheme {
+            SecureSessionScheme::Des => Self::Des,
+            SecureSessionScheme::Aes128 => Self::Aes128,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct NodeKeyId {
+    node: u16,
+    algorithm: Algorithm,
+}
+
+impl NodeKeyId {
+    fn new(node: u16, algorithm: Algorithm) -> Self {
+        Self { node, algorithm }
+    }
 }
 
 /// Errors from loading a key store or deriving authentication keys.
@@ -145,15 +174,18 @@ struct JsonlKeyRecord {
     key: String,
 }
 
-type NodeKeys = HashMap<u16, NodeKey>;
-/// `IDm hex ("" = shared across all cards) -> node -> key`.
+/// Keys are indexed by both Node Code and algorithm so an AES/DES card can
+/// retain both keys for the same Node.
+type NodeKeys = HashMap<NodeKeyId, NodeKey>;
+/// `IDm hex ("" = shared across all cards) -> (node, algorithm) -> key`.
 type IdmScopedKeys = HashMap<String, NodeKeys>;
 
 /// A collection of node keys indexed by `system_code`, then IDm, then node.
 ///
 /// Records with a null `idm` are stored under the shared key (`""`) and apply to
 /// every card in the system; records with an IDm apply only to that card and
-/// override the shared entry for the same node (see [`Self::resolve`]).
+/// override the shared entry for the same node and algorithm (see
+/// [`Self::resolve`]). DES and AES records for one node coexist.
 #[derive(Debug, Default)]
 pub struct KeyStore {
     by_system: HashMap<u16, IdmScopedKeys>,
@@ -195,13 +227,14 @@ impl KeyStore {
 
             match parse_record(trimmed) {
                 Ok((system_code, idm_key, node, node_key)) => {
+                    let key_id = NodeKeyId::new(node, node_key.algorithm());
                     store
                         .by_system
                         .entry(system_code)
                         .or_default()
                         .entry(idm_key)
                         .or_default()
-                        .insert(node, node_key);
+                        .insert(key_id, node_key);
                 }
                 Err(message) => warnings.push(warn(line_num, message)),
             }
@@ -210,9 +243,10 @@ impl KeyStore {
         KeyStoreLoad { store, warnings }
     }
 
-    /// Total number of node keys stored for a system, summed across every IDm
-    /// scope (a node present in both a shared and a card-specific scope counts
-    /// twice). Useful as a quick "did I load any keys for this system?" check.
+    /// Total number of node-and-algorithm keys stored for a system, summed
+    /// across every IDm scope. DES and AES keys for the same node count as two;
+    /// a key present in both shared and card-specific scopes also counts twice.
+    /// Useful as a quick "did I load any keys for this system?" check.
     pub fn key_count(&self, system_code: u16) -> usize {
         self.by_system
             .get(&system_code)
@@ -231,10 +265,12 @@ impl KeyStore {
         // `ResolvedNodeKeys` it belongs to is dropped.
         let mut merged = NodeKeys::new();
         if let Some(shared) = idm_scoped.get("") {
-            merged.extend(shared.iter().map(|(code, key)| (*code, key.clone())));
+            merged.extend(shared.iter().map(|(id, key)| (*id, key.clone())));
         }
         if let Some(card) = idm_scoped.get(&idm_hex) {
-            merged.extend(card.iter().map(|(code, key)| (*code, key.clone())));
+            // The composite key makes an IDm-scoped DES record override only
+            // shared DES, while a shared AES key for the same Node survives.
+            merged.extend(card.iter().map(|(id, key)| (*id, key.clone())));
         }
 
         if merged.is_empty() {
@@ -252,15 +288,36 @@ pub struct ResolvedNodeKeys {
 }
 
 impl ResolvedNodeKeys {
-    /// Look up the raw key for a single node.
+    /// Look up the preferred raw key for a single node.
+    ///
+    /// AES-128 is preferred when both AES and DES keys are present, making the
+    /// result independent of JSONL record order. Use [`Self::get_for_scheme`]
+    /// when the caller needs a particular scheme.
     pub fn get(&self, node: u16) -> Option<&NodeKey> {
-        self.keys.get(&node)
+        self.get_by_algorithm(node, Algorithm::Aes128)
+            .or_else(|| self.get_by_algorithm(node, Algorithm::Des))
+    }
+
+    /// Look up a node key for one explicit secure-messaging scheme.
+    pub fn get_for_scheme(&self, node: u16, scheme: SecureSessionScheme) -> Option<&NodeKey> {
+        self.get_by_algorithm(node, Algorithm::from_scheme(scheme))
     }
 
     /// Build one from an explicit node map (mainly for callers that source keys
     /// from somewhere other than a [`KeyStore`]).
     pub fn from_map(keys: HashMap<u16, NodeKey>) -> Self {
-        Self { keys }
+        Self::from_keys(keys)
+    }
+
+    /// Build a resolved set from node/key pairs while retaining separate DES
+    /// and AES entries for duplicate Node Codes.
+    pub fn from_keys(keys: impl IntoIterator<Item = (u16, NodeKey)>) -> Self {
+        let mut resolved = NodeKeys::new();
+        for (node, key) in keys {
+            let id = NodeKeyId::new(node, key.algorithm());
+            resolved.insert(id, key);
+        }
+        Self { keys: resolved }
     }
 
     /// Derive the authentication keys for the node(s) being accessed.
@@ -268,8 +325,11 @@ impl ResolvedNodeKeys {
     /// `area_path` lists the area codes from the outermost area inward;
     /// `services` are the target services (several when one session spans
     /// overlapping services). The scheme is chosen from the target node's own
-    /// key (deepest service, else deepest area). All keys in the chain must share
-    /// that scheme, otherwise [`KeyError::MixedAlgorithm`].
+    /// key (deepest service, else deepest area); AES-128 is preferred when that
+    /// node has both key types. All keys in the chain must provide the selected
+    /// scheme, otherwise [`KeyError::MixedAlgorithm`]. Use
+    /// [`Self::derive_auth_keys_with_scheme`] to select DES explicitly on a
+    /// dual-key node.
     ///
     /// - **DES** yields [`DerivedAuthKeys::Des`], chaining the system key
     ///   (`0xFFFF`), the `area_path` keys, and the service keys via
@@ -324,6 +384,33 @@ impl ResolvedNodeKeys {
         }
     }
 
+    /// Derive authentication keys using an explicitly selected scheme.
+    ///
+    /// This is useful for AES/DES cards where one Node has keys for both
+    /// schemes. The legacy [`Self::derive_auth_keys`] method deterministically
+    /// prefers AES in that case.
+    pub fn derive_auth_keys_with_scheme(
+        &self,
+        scheme: SecureSessionScheme,
+        area_path: &[u16],
+        services: &[ServiceCode],
+        individual_key: Option<[u8; AES_KEY_LEN]>,
+    ) -> Result<DerivedAuthKeys, KeyError> {
+        match scheme {
+            SecureSessionScheme::Des => {
+                if individual_key.is_some() {
+                    return Err(KeyError::IndividualKeyNotApplicable);
+                }
+                self.derive_des(area_path, services)
+            }
+            SecureSessionScheme::Aes128 => self.derive_aes128(
+                area_path,
+                services,
+                individual_key.unwrap_or([0u8; AES_KEY_LEN]),
+            ),
+        }
+    }
+
     /// Pick the scheme from the target node (deepest service, else deepest area).
     ///
     /// A key-free service is passed over where a key-contributing one is
@@ -348,8 +435,7 @@ impl ResolvedNodeKeys {
             .or_else(|| area_path.last().copied())
             .ok_or(KeyError::EmptyChain)?;
         Ok(self
-            .keys
-            .get(&target)
+            .get(target)
             .ok_or(KeyError::MissingKey { node: target })?
             .algorithm())
     }
@@ -418,19 +504,25 @@ impl ResolvedNodeKeys {
     }
 
     fn require_des(&self, node: u16) -> Result<[u8; DES_KEY_LEN], KeyError> {
-        match self.keys.get(&node) {
+        match self.get_by_algorithm(node, Algorithm::Des) {
             Some(NodeKey::Des(key)) => Ok(*key),
             Some(NodeKey::Aes128(_)) => Err(KeyError::MixedAlgorithm),
+            None if self.get(node).is_some() => Err(KeyError::MixedAlgorithm),
             None => Err(KeyError::MissingKey { node }),
         }
     }
 
     fn require_aes(&self, node: u16) -> Result<[u8; AES_KEY_LEN], KeyError> {
-        match self.keys.get(&node) {
+        match self.get_by_algorithm(node, Algorithm::Aes128) {
             Some(NodeKey::Aes128(key)) => Ok(*key),
             Some(NodeKey::Des(_)) => Err(KeyError::MixedAlgorithm),
+            None if self.get(node).is_some() => Err(KeyError::MixedAlgorithm),
             None => Err(KeyError::MissingKey { node }),
         }
+    }
+
+    fn get_by_algorithm(&self, node: u16, algorithm: Algorithm) -> Option<&NodeKey> {
+        self.keys.get(&NodeKeyId::new(node, algorithm))
     }
 }
 
@@ -604,6 +696,20 @@ mod tests {
         .join("\n")
     }
 
+    fn dual_scheme_jsonl() -> String {
+        [
+            r#"{"system_code":"0018","node":"FFFF","algo":"DES","version":"0001","idm":null,"key":"0F0F0F0F0F0F0F0F"}"#,
+            r#"{"system_code":"0018","node":"0000","algo":"DES","version":"0001","idm":null,"key":"0D0D0D0D0D0D0D0D"}"#,
+            r#"{"system_code":"0018","node":"0000","algo":"AES","version":"0002","idm":null,"key":"0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A"}"#,
+            r#"{"system_code":"0018","node":"1008","algo":"DES","version":"0001","idm":null,"key":"1111111111111111"}"#,
+            r#"{"system_code":"0018","node":"1008","algo":"AES","version":"0002","idm":null,"key":"0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B"}"#,
+            // This card-specific DES key overrides shared DES without hiding
+            // the shared AES key for the same node.
+            r#"{"system_code":"0018","node":"1008","algo":"DES","version":"0003","idm":"0123456789ABCDEF","key":"2222222222222222"}"#,
+        ]
+        .join("\n")
+    }
+
     #[test]
     fn loads_valid_records_and_reports_bad_lines() {
         let loaded = KeyStore::from_jsonl_str(&sample_jsonl());
@@ -667,6 +773,62 @@ mod tests {
     fn resolve_returns_none_for_unknown_system() {
         let loaded = KeyStore::from_jsonl_str(&sample_jsonl());
         assert!(loaded.store.resolve(0xFEFE, &IDM).is_none());
+    }
+
+    #[test]
+    fn retains_des_and_aes_for_the_same_node() {
+        let loaded = KeyStore::from_jsonl_str(&dual_scheme_jsonl());
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(loaded.store.key_count(0x0018), 6);
+
+        let resolved = loaded.store.resolve(0x0018, &IDM).unwrap();
+        assert_eq!(
+            resolved.get_for_scheme(0x1008, SecureSessionScheme::Des),
+            Some(&NodeKey::Des([0x22; 8]))
+        );
+        assert_eq!(
+            resolved.get_for_scheme(0x1008, SecureSessionScheme::Aes128),
+            Some(&NodeKey::Aes128([0x0B; 16]))
+        );
+        // Default lookup and derivation prefer AES, independent of JSONL order.
+        assert!(matches!(resolved.get(0x1008), Some(NodeKey::Aes128(_))));
+        assert!(matches!(
+            resolved.derive_auth_keys(&[0x0000], &[ServiceCode::new(0x1008)], None),
+            Ok(DerivedAuthKeys::Aes128 { .. })
+        ));
+        let service_only_aes = resolved
+            .derive_auth_keys_with_scheme(
+                SecureSessionScheme::Aes128,
+                &[],
+                &[ServiceCode::new(0x1008)],
+                None,
+            )
+            .unwrap();
+        match &service_only_aes {
+            DerivedAuthKeys::Aes128 { nodes, .. } => assert_eq!(nodes.as_slice(), &[0x1008]),
+            other => panic!("expected service-only AES keys, got {other:?}"),
+        }
+
+        let explicit_des = resolved
+            .derive_auth_keys_with_scheme(
+                SecureSessionScheme::Des,
+                &[0x0000],
+                &[ServiceCode::new(0x1008)],
+                None,
+            )
+            .unwrap();
+        assert!(matches!(explicit_des, DerivedAuthKeys::Des { .. }));
+
+        // A different card still sees shared DES and AES independently.
+        let other = loaded.store.resolve(0x0018, &[0u8; 8]).unwrap();
+        assert_eq!(
+            other.get_for_scheme(0x1008, SecureSessionScheme::Des),
+            Some(&NodeKey::Des([0x11; 8]))
+        );
+        assert_eq!(
+            other.get_for_scheme(0x1008, SecureSessionScheme::Aes128),
+            Some(&NodeKey::Aes128([0x0B; 16]))
+        );
     }
 
     #[test]

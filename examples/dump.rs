@@ -27,7 +27,7 @@
 
 use felica::felica_standard::{
     BlockListElement, FelicaDriver, FelicaStandard, FelicaStandardError, KeyStore,
-    ResolvedNodeKeys, SearchServiceCodeResult, ServiceCode,
+    ResolvedNodeKeys, SearchServiceCodeResult, SecureSessionScheme, ServiceCode,
 };
 use felica::{Reader, ReaderPreference, RemoteDriver, open_reader};
 use hex::encode;
@@ -801,6 +801,19 @@ fn read_authenticated_services<D: FelicaDriver + ?Sized>(
     let mut read_results: HashMap<u16, Vec<String>> = HashMap::new();
     let mut mutual_auth_summary = None;
     for target in targets {
+        // Each authenticated read leaves the card in Mode 2. Start every target
+        // from a clean card and local session state so switching between DES
+        // and AES, or starting a new Node list, is deterministic.
+        if let Err(err) = felica.reset_mode() {
+            warnings.push(format!(
+                "Reset Mode failed before authenticated read of service {}: {}",
+                hex_u16(target.service_code_raw),
+                err
+            ));
+            break;
+        }
+        felica.clear_authenticated_context();
+
         match read_service_blocks_with_auth(felica, &target, keys) {
             Ok(result) => {
                 if mutual_auth_summary.is_none() {
@@ -815,6 +828,14 @@ fn read_authenticated_services<D: FelicaDriver + ?Sized>(
             )),
         }
     }
+
+    if let Err(err) = felica.reset_mode() {
+        warnings.push(format!(
+            "Reset Mode failed after authenticated reads: {}",
+            err
+        ));
+    }
+    felica.clear_authenticated_context();
 
     assign_blocks(areas, system_services, &mut read_results);
     mutual_auth_summary
@@ -888,10 +909,25 @@ fn read_service_blocks_with_auth<D: FelicaDriver + ?Sized>(
     keys: &ResolvedNodeKeys,
 ) -> Result<AuthReadResult, String> {
     let service_code = ServiceCode::new(target.service_code_raw);
-    // Derive the right keys (DES group/user or AES-128 group key) from the node
-    // being accessed and run the matching mutual authentication in one step.
+    let scheme = keys
+        .get(target.service_code_raw)
+        .map(|key| key.scheme())
+        .ok_or_else(|| {
+            format!(
+                "No key is available for service {}",
+                hex_u16(target.service_code_raw)
+            )
+        })?;
+
+    // DES derives through the containing Area hierarchy. AES Authentication1
+    // v2 may authenticate the target Service alone, so do not require AES Area
+    // keys that are unrelated to this read session.
+    let authentication_areas = match scheme {
+        SecureSessionScheme::Des => target.area_codes.as_slice(),
+        SecureSessionScheme::Aes128 => &[],
+    };
     let auth_result = felica
-        .authenticate_node(keys, &target.area_codes, &[service_code], None)
+        .authenticate_node(keys, authentication_areas, &[service_code], None)
         .map_err(|err| format!("Mutual Authentication failed: {}", err))?;
     let auth_summary = MutualAuthSummary {
         idi: encode(auth_result.issue_id).to_uppercase(),
@@ -901,8 +937,14 @@ fn read_service_blocks_with_auth<D: FelicaDriver + ?Sized>(
     let mut blocks_hex = Vec::new();
     let mut block_number: u16 = 0;
     loop {
+        // Both authentication paths above put the target Service first in the
+        // addressable Service/Node list.
         let block_list = [BlockListElement::new(block_number, 0, 0)];
-        match felica.read(&block_list) {
+        let read_result = match scheme {
+            SecureSessionScheme::Des => felica.read(&block_list),
+            SecureSessionScheme::Aes128 => felica.read_v2(&block_list),
+        };
+        match read_result {
             Ok(blocks) if blocks.is_empty() => break,
             Ok(blocks) => {
                 append_blocks_hex(&mut blocks_hex, blocks);
