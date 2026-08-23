@@ -1,7 +1,6 @@
 use super::*;
 use crate::felica_standard::payload::{
-    PayloadWriter, ensure_count_in_range, ensure_fits_in_count, ensure_omitted_on_error,
-    for_success,
+    PayloadWriter, ensure_count_in_range, ensure_fits_in_count, for_success,
 };
 
 /// What a response calls the bytes behind its status flags, for the errors
@@ -17,6 +16,11 @@ impl FelicaStandardResponse {
     pub fn to_payload(&self) -> Result<Vec<u8>, FelicaStandardError> {
         match self {
             FelicaStandardResponse::Polling { idm, pmm, optional } => {
+                if !matches!(optional.len(), 0 | 2) {
+                    return Err(FelicaStandardError::Protocol(
+                        "polling response optional data must contain 0 or 2 bytes".into(),
+                    ));
+                }
                 let mut payload = PayloadWriter::response(POLLING_RESPONSE_CODE, idm);
                 payload.extend_bytes(pmm);
                 payload.extend_bytes(optional);
@@ -124,6 +128,11 @@ impl FelicaStandardResponse {
                 Ok(payload.finish())
             }
             FelicaStandardResponse::Authentication2(auth) => {
+                if auth.encrypted_payload.len() != 32 {
+                    return Err(FelicaStandardError::Protocol(
+                        "authentication2 response encrypted payload must contain 32 bytes".into(),
+                    ));
+                }
                 let mut payload = PayloadWriter::new(AUTHENTICATION2_RESPONSE_CODE);
                 payload.extend_bytes(&auth.encrypted_payload);
                 Ok(payload.finish())
@@ -335,24 +344,29 @@ impl FelicaStandardResponse {
                 status_flag2,
                 specification_version,
             } => {
-                // Unlike the other flagged responses this one may report success
-                // and still carry nothing, so only the error half is required.
-                ensure_omitted_on_error(
+                let version = for_success(
                     "request specification version",
                     "payload",
                     *status_flag1,
-                    specification_version.is_some(),
+                    specification_version.as_ref(),
                 )?;
                 let mut payload =
                     PayloadWriter::response(REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE, idm);
                 payload.status_flags(*status_flag1, *status_flag2);
-                if let Some(version) = specification_version
-                    .as_ref()
-                    .filter(|_| *status_flag1 == 0)
-                {
+                if let Some(version) = version {
                     if version.format_version != 0x00 {
                         return Err(FelicaStandardError::Protocol(
                             "request specification version format version must be 0x00".into(),
+                        ));
+                    }
+                    if !version.basic_version.is_valid_bcd()
+                        || version
+                            .option_versions
+                            .iter()
+                            .any(|option| !option.is_valid_bcd())
+                    {
+                        return Err(FelicaStandardError::Protocol(
+                            "request specification version contains a non-BCD version digit".into(),
                         ));
                     }
                     ensure_fits_in_count(
@@ -386,6 +400,12 @@ impl FelicaStandardResponse {
                 Ok(payload.finish())
             }
             FelicaStandardResponse::Authentication2V2(auth) => {
+                if auth.encrypted_payload.len() != 26 {
+                    return Err(FelicaStandardError::Protocol(
+                        "authentication2 v2 response encrypted payload must contain 26 bytes"
+                            .into(),
+                    ));
+                }
                 let mut payload = PayloadWriter::new(AUTHENTICATION2_V2_RESPONSE_CODE);
                 payload.extend_bytes(&auth.encrypted_payload);
                 Ok(payload.finish())
@@ -541,10 +561,15 @@ impl FelicaStandardResponse {
             key_versions.len(),
             MAX_SERVICE_CODES,
         )?;
+        if !matches!(result.crypto_id, 0x4F | 0x41 | 0x43) {
+            return Err(FelicaStandardError::Protocol(
+                "request service v2 crypto identifier must be 0x4F, 0x41 or 0x43".into(),
+            ));
+        }
         payload.push_u8(result.crypto_id);
         payload.push_count(key_versions.len());
 
-        if !matches!(result.crypto_id, 0x41 | 0x43) {
+        if result.crypto_id == 0x4F {
             for version in key_versions {
                 if version.secondary_raw().is_some() {
                     return Err(FelicaStandardError::Protocol(

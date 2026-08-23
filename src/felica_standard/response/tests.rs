@@ -112,6 +112,37 @@ fn from_bytes_parses_polling_with_optional_bytes() {
 }
 
 #[test]
+fn from_bytes_rejects_trailing_bytes_in_fixed_or_counted_responses() {
+    let responses = [
+        FelicaStandardResponse::RequestResponse {
+            idm: sample_idm(),
+            mode: 0,
+        }
+        .to_frame()
+        .unwrap(),
+        FelicaStandardResponse::RequestService {
+            idm: sample_idm(),
+            key_versions: vec![0x1234],
+        }
+        .to_frame()
+        .unwrap(),
+        FelicaStandardResponse::WriteWithoutEncryption {
+            idm: sample_idm(),
+            status_flag1: 0,
+            status_flag2: 0,
+        }
+        .to_frame()
+        .unwrap(),
+    ];
+
+    for mut frame in responses {
+        frame.push(0xEE);
+        frame[0] = frame.len() as u8;
+        assert_driver_error_contains(FelicaStandardResponse::from_bytes(&frame), "response");
+    }
+}
+
+#[test]
 fn from_bytes_parses_request_service_v2_dual_keys() {
     let idm = sample_idm();
     let mut payload = vec![REQUEST_SERVICE_V2_RESPONSE_CODE];
@@ -167,7 +198,7 @@ fn from_bytes_rejects_truncated_request_service_v2_dual_keys() {
 
     assert_driver_error_contains(
         FelicaStandardResponse::from_bytes(&frame),
-        "dual key version list truncated",
+        "length does not match dual key version count",
     );
 }
 
@@ -219,7 +250,7 @@ fn from_bytes_rejects_unknown_get_node_property_payload_length() {
 
 #[test]
 fn from_bytes_parses_authentication2_v2_variant() {
-    let encrypted_payload = [0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97];
+    let encrypted_payload = [0x90; 26];
     let mut payload = vec![AUTHENTICATION2_V2_RESPONSE_CODE];
     payload.extend_from_slice(&encrypted_payload);
     let frame = frame_with_length_prefix(&payload).unwrap();
@@ -361,7 +392,7 @@ fn to_payload_rejects_request_service_v2_mismatched_crypto_and_key_version_shape
         status_flag1: 0x00,
         status_flag2: 0x00,
         result: Some(RequestServiceV2Result {
-            crypto_id: 0x40,
+            crypto_id: 0x4F,
             key_versions: vec![RequestServiceV2KeyVersion::Dual {
                 aes: 0x3333,
                 des: 0x4444,
@@ -528,6 +559,44 @@ fn request_specification_version_to_frame_round_trip() {
 }
 
 #[test]
+fn request_specification_version_requires_a_complete_bcd_payload_on_success() {
+    let mut missing = vec![REQUEST_SPECIFICATION_VERSION_RESPONSE_CODE];
+    missing.extend_from_slice(&sample_idm());
+    missing.extend_from_slice(&[0x00, 0x00]);
+    assert_driver_error_contains(
+        FelicaStandardResponse::from_bytes(&frame_with_length_prefix(&missing).unwrap()),
+        "payload too short",
+    );
+
+    let mut invalid_bcd = missing;
+    invalid_bcd.extend_from_slice(&[0x00, 0x1A, 0x81, 0x00]);
+    assert_driver_error_contains(
+        FelicaStandardResponse::from_bytes(&frame_with_length_prefix(&invalid_bcd).unwrap()),
+        "not valid packed BCD",
+    );
+
+    let missing_result = FelicaStandardResponse::RequestSpecificationVersion {
+        idm: sample_idm(),
+        status_flag1: 0,
+        status_flag2: 0,
+        specification_version: None,
+    };
+    assert_protocol_error_contains(missing_result.to_payload(), "payload is missing on success");
+
+    let invalid_result = FelicaStandardResponse::RequestSpecificationVersion {
+        idm: sample_idm(),
+        status_flag1: 0,
+        status_flag2: 0,
+        specification_version: Some(SpecificationVersion {
+            format_version: 0,
+            basic_version: OptionVersion::new(0x0A, 0, 0),
+            option_versions: vec![],
+        }),
+    };
+    assert_protocol_error_contains(invalid_result.to_payload(), "non-BCD version digit");
+}
+
+#[test]
 fn request_product_information_to_frame_round_trip() {
     let expected_platform_info = vec![0xDE, 0xAD, 0xBE, 0xEF];
     let response = FelicaStandardResponse::RequestProductInformation {
@@ -574,7 +643,7 @@ fn get_container_property_to_frame_round_trip() {
 
 #[test]
 fn authentication2_v2_to_frame_round_trip() {
-    let expected_payload = vec![0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97];
+    let expected_payload = vec![0x90; 26];
     let response = FelicaStandardResponse::Authentication2V2(Authentication2V2Response {
         encrypted_payload: expected_payload.clone(),
     });

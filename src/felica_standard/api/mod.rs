@@ -102,14 +102,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
     /// Decides success or failure from a response's status flags.
     ///
-    /// Status flag 1 is the authority: §4.5.1 defines `00h` as "the card
-    /// processed the command normally", and status flag 2 only details *why* a
-    /// failure happened. Status flag 2 must therefore not be second-guessed when
-    /// flag 1 reports normal completion — §4.5.2 (table 4-11) defines `71h`
-    /// (memory rewrite count exceeded) as a **warning** that is raised *after*
-    /// the write has been performed, and notes that some products pair it with
-    /// `SF1 = 00h` and others with `SF1 = FFh`. Rejecting such a response would
-    /// report a completed write as a failure and invite the caller to retry it.
+    /// §4.5.1 normally makes status flag 1 authoritative: `00h` means that the
+    /// card processed the command normally. The one documented exception is
+    /// §4.5.2 table 4-11's `SF2 = 71h` (memory rewrite count exceeded), a warning
+    /// raised *after* the write has been performed. Products may pair it with
+    /// either `SF1 = 00h` or `SF1 = FFh`; both combinations are therefore
+    /// accepted so a caller is not invited to repeat a completed write.
     ///
     /// A non-zero flag 2 alongside a normal-completion flag 1 is logged so the
     /// warning is not silently dropped.
@@ -118,6 +116,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         sf1: u8,
         sf2: u8,
     ) -> Result<(), FelicaStandardError> {
+        if sf2 == 0x71 && matches!(sf1, 0x00 | 0xFF) {
+            log::warn!(
+                "{command} completed with memory rewrite count warning 71: {}",
+                StatusFlag2::from_byte(sf2).description()
+            );
+            return Ok(());
+        }
         if sf1 != 0x00 {
             return Err(Self::status_error(command, sf1, sf2));
         }

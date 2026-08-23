@@ -46,6 +46,125 @@ fn request_service_frame_round_trip() {
 }
 
 #[test]
+fn authentication_v2_frames_round_trip() {
+    let idm = sample_idm();
+    let authentication1 = FelicaStandardCommand::Authentication1V2 {
+        idm,
+        operation_parameter: 0x01,
+        nodes: vec![0x0100, 0x0200],
+        challenge_1a: [0xA1; 16],
+    };
+    match FelicaStandardCommand::parse_frame(&authentication1.to_frame().unwrap()).unwrap() {
+        FelicaStandardCommand::Authentication1V2 {
+            idm: parsed_idm,
+            operation_parameter,
+            nodes,
+            challenge_1a,
+        } => {
+            assert_eq!(parsed_idm, idm);
+            assert_eq!(operation_parameter, 0x01);
+            assert_eq!(nodes, vec![0x0100, 0x0200]);
+            assert_eq!(challenge_1a, [0xA1; 16]);
+        }
+        _ => panic!("unexpected parsed command variant"),
+    }
+
+    let authentication2 = FelicaStandardCommand::Authentication2V2 {
+        idm,
+        challenge_2b: [0xB2; 16],
+    };
+    match FelicaStandardCommand::parse_frame(&authentication2.to_frame().unwrap()).unwrap() {
+        FelicaStandardCommand::Authentication2V2 {
+            idm: parsed_idm,
+            challenge_2b,
+        } => {
+            assert_eq!(parsed_idm, idm);
+            assert_eq!(challenge_2b, [0xB2; 16]);
+        }
+        _ => panic!("unexpected parsed command variant"),
+    }
+}
+
+#[test]
+fn plain_command_parsers_reject_bytes_past_the_defined_packet_data() {
+    let idm = sample_idm();
+    let block = BlockListElement::new(0x0001, 0x00, 0x00);
+    let commands = vec![
+        FelicaStandardCommand::Polling {
+            system_code: 0xFFFF,
+            request_code: 0x00,
+            time_slots: 0x00,
+        },
+        FelicaStandardCommand::RequestService {
+            idm,
+            service_codes: vec![ServiceCode::new(0x0009)],
+        },
+        FelicaStandardCommand::ReadWithoutEncryption {
+            idm,
+            service_codes: vec![ServiceCode::new(0x0009)],
+            block_list: vec![block],
+        },
+        FelicaStandardCommand::WriteWithoutEncryption {
+            idm,
+            service_codes: vec![ServiceCode::new(0x0009)],
+            block_list: vec![block],
+            data: vec![0xAA; BLOCK_SIZE],
+        },
+        FelicaStandardCommand::SearchServiceCode {
+            idm,
+            service_index: 0,
+        },
+        FelicaStandardCommand::RequestBlockInformation {
+            idm,
+            node_codes: vec![0x0009],
+        },
+        FelicaStandardCommand::Authentication1 {
+            idm,
+            areas: vec![],
+            services: vec![0x0009],
+            challenge_1a: [0x11; 8],
+        },
+        FelicaStandardCommand::Authentication2 {
+            idm,
+            challenge_2b: [0x22; 8],
+        },
+        FelicaStandardCommand::RequestBlockInformationEx {
+            idm,
+            node_codes: vec![0x0009],
+        },
+        FelicaStandardCommand::GetNodeProperty {
+            idm,
+            node_property_type: NodePropertyType::MacCommunication,
+            node_codes: vec![0x0009],
+        },
+        FelicaStandardCommand::RequestServiceV2 {
+            idm,
+            service_codes: vec![ServiceCode::new(0x0009)],
+        },
+        FelicaStandardCommand::Authentication1V2 {
+            idm,
+            operation_parameter: 0,
+            nodes: vec![0x0009],
+            challenge_1a: [0x33; 16],
+        },
+        FelicaStandardCommand::Authentication2V2 {
+            idm,
+            challenge_2b: [0x44; 16],
+        },
+    ];
+
+    for command in commands {
+        let mut frame = command.to_frame().unwrap();
+        frame.push(0xEE);
+        frame[0] = frame.len() as u8;
+        assert_protocol_error_contains(
+            FelicaStandardCommand::parse_frame(&frame),
+            "trailing bytes",
+        );
+    }
+}
+
+#[test]
 fn read_without_encryption_round_trip_with_mixed_block_encodings() {
     let idm = sample_idm();
     let service_codes = vec![ServiceCode::new(0x1008)];

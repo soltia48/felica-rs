@@ -273,6 +273,64 @@ fn request_service_rejects_empty_service_codes() {
 }
 
 #[test]
+fn basic_commands_reject_response_counts_that_do_not_match_the_request() {
+    let mut request_service_driver = MockDriver::with_polling_result(sample_polling_result());
+    request_service_driver.queue_response(
+        FelicaStandardResponse::RequestService {
+            idm: sample_idm(),
+            key_versions: vec![0x0001],
+        }
+        .to_frame()
+        .unwrap(),
+    );
+    let (mut felica, _) =
+        FelicaStandard::polling(&mut request_service_driver, "212F", 0xFFFF, 0x00, 0x00).unwrap();
+    assert_protocol_error_contains(
+        felica.request_service(&[ServiceCode::new(0x0009), ServiceCode::new(0x000B)]),
+        "key version count mismatch",
+    );
+
+    let mut read_driver = MockDriver::with_polling_result(sample_polling_result());
+    read_driver.queue_response(
+        FelicaStandardResponse::ReadWithoutEncryption {
+            idm: sample_idm(),
+            status_flag1: 0,
+            status_flag2: 0,
+            result: Some(ReadWithoutEncryptionResult {
+                blocks: vec![[0x11; BLOCK_SIZE], [0x22; BLOCK_SIZE]],
+            }),
+        }
+        .to_frame()
+        .unwrap(),
+    );
+    let (mut felica, _) =
+        FelicaStandard::polling(&mut read_driver, "212F", 0xFFFF, 0x00, 0x00).unwrap();
+    assert_protocol_error_contains(
+        felica.read_without_encryption(
+            &[ServiceCode::new(0x0009)],
+            &[BlockListElement::new(0, 0, 0)],
+        ),
+        "response block count mismatch",
+    );
+
+    let mut block_info_driver = MockDriver::with_polling_result(sample_polling_result());
+    block_info_driver.queue_response(
+        FelicaStandardResponse::RequestBlockInformation {
+            idm: sample_idm(),
+            block_counts: vec![1],
+        }
+        .to_frame()
+        .unwrap(),
+    );
+    let (mut felica, _) =
+        FelicaStandard::polling(&mut block_info_driver, "212F", 0xFFFF, 0x00, 0x00).unwrap();
+    assert_protocol_error_contains(
+        felica.request_block_information(&[0x0009, 0x000B]),
+        "block count list length mismatch",
+    );
+}
+
+#[test]
 fn request_response_reports_unexpected_response_variant() {
     let mut driver = MockDriver::with_polling_result(sample_polling_result());
     let unexpected_frame = FelicaStandardResponse::RequestService {
@@ -489,7 +547,7 @@ fn authentication1_v2_parses_v2_response() {
 fn authentication2_v2_reports_scheme() {
     let mut driver = MockDriver::with_polling_result(sample_polling_result());
     let frame = FelicaStandardResponse::Authentication2V2(Authentication2V2Response {
-        encrypted_payload: vec![0xAA; 8],
+        encrypted_payload: vec![0xAA; 26],
     })
     .to_frame()
     .unwrap();
@@ -684,9 +742,9 @@ fn write_without_encryption_accepts_the_memory_rewrite_count_warning() {
         .expect("a normal-completion status flag 1 means the write was performed");
 }
 
-/// A non-zero status flag 1 still fails, warning byte or not.
+/// §4.5.2 explicitly permits the same post-write warning with SF1=FFh.
 #[test]
-fn write_without_encryption_still_fails_on_a_non_zero_status_flag1() {
+fn write_without_encryption_accepts_the_warning_with_ff_status_flag1() {
     let mut driver = MockDriver::with_polling_result(sample_polling_result());
     driver.queue_response(
         FelicaStandardResponse::WriteWithoutEncryption {
@@ -701,21 +759,13 @@ fn write_without_encryption_still_fails_on_a_non_zero_status_flag1() {
     let (mut felica, _) = FelicaStandard::polling(&mut driver, "212F", 0xFFFF, 0x00, 0x00)
         .expect("polling should succeed");
     let block_list = [BlockListElement::new(0x0000, 0x00, 0x00)];
-    match felica.write_without_encryption(
-        &[ServiceCode::new(0x0009)],
-        &block_list,
-        &[0xAA; BLOCK_SIZE],
-    ) {
-        Err(FelicaStandardError::Status {
-            status_flag1,
-            status_flag2,
-            ..
-        }) => {
-            assert_eq!(status_flag1, 0xFF);
-            assert_eq!(status_flag2, 0x71);
-        }
-        other => panic!("expected a status error, got {other:?}"),
-    }
+    felica
+        .write_without_encryption(
+            &[ServiceCode::new(0x0009)],
+            &block_list,
+            &[0xAA; BLOCK_SIZE],
+        )
+        .expect("FFh/71h reports a completed write with a warning");
 }
 
 /// §4.4.5 leaves 最大同時読み出しブロック数 to the product, but the *response* is

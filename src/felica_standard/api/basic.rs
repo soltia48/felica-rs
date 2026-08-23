@@ -30,7 +30,14 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         )?;
 
         match response {
-            FelicaStandardResponse::RequestService { key_versions, .. } => Ok(key_versions),
+            FelicaStandardResponse::RequestService { key_versions, .. } => {
+                if key_versions.len() != service_codes.len() {
+                    return Err(FelicaStandardError::Protocol(
+                        "Request Service key version count mismatch".into(),
+                    ));
+                }
+                Ok(key_versions)
+            }
             _ => Err(unexpected_response("Request Service")),
         }
     }
@@ -113,6 +120,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
                     status_flag2,
                     result,
                 )?;
+                if result.blocks.len() != block_list.len() {
+                    return Err(FelicaStandardError::Protocol(
+                        "Read Without Encryption response block count mismatch".into(),
+                    ));
+                }
                 Ok(result.blocks)
             }
             _ => Err(unexpected_response("Read Without Encryption")),
@@ -235,6 +247,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
         match response {
             FelicaStandardResponse::RequestBlockInformation { block_counts, .. } => {
+                if block_counts.len() != node_codes.len() {
+                    return Err(FelicaStandardError::Protocol(
+                        "Request Block Information block count list length mismatch".into(),
+                    ));
+                }
                 Ok(block_counts)
             }
             _ => Err(unexpected_response("Request Block Information")),
@@ -482,8 +499,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
 
     /// Returns the basic and optional-feature versions implemented by the card.
     ///
-    /// `None` is preserved for a successful response that omits the optional
-    /// version payload.
+    /// A successful response always contains the version payload. The return
+    /// type remains optional for API compatibility, but a conforming parsed
+    /// success is therefore always `Some`.
     pub fn request_specification_version(
         &mut self,
     ) -> Result<Option<SpecificationVersion>, FelicaStandardError> {

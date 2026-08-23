@@ -762,19 +762,22 @@ pub struct GetSystemStatusResult {
     pub data: Vec<u8>,
 }
 
-/// A packed FeliCa specification version with three four-bit components.
+/// A packed FeliCa specification version with three BCD digits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OptionVersion {
-    /// Major version (`0..=15`).
+    /// Major-version BCD digit (`0..=9` on the wire).
     pub major: u8,
-    /// Minor version (`0..=15`).
+    /// Minor-version BCD digit (`0..=9` on the wire).
     pub minor: u8,
-    /// Patch version (`0..=15`).
+    /// Patch-version BCD digit (`0..=9` on the wire).
     pub patch: u8,
 }
 
 impl OptionVersion {
     /// Creates a version, retaining only the low four bits of each component.
+    ///
+    /// Components `0Ah..=0Fh` are not valid BCD and are rejected when a
+    /// response is serialized.
     pub fn new(major: u8, minor: u8, patch: u8) -> Self {
         Self {
             major: major & 0x0F,
@@ -783,12 +786,21 @@ impl OptionVersion {
         }
     }
 
-    pub(crate) fn from_le_bytes(bytes: [u8; 2]) -> Self {
-        Self {
+    pub(crate) fn from_le_bytes(bytes: [u8; 2]) -> Option<Self> {
+        let version = Self {
             major: bytes[1] & 0x0F,
             minor: (bytes[0] >> 4) & 0x0F,
             patch: bytes[0] & 0x0F,
+        };
+        if bytes[1] & 0xF0 == 0x80 && version.is_valid_bcd() {
+            Some(version)
+        } else {
+            None
         }
+    }
+
+    pub(crate) fn is_valid_bcd(self) -> bool {
+        self.major <= 9 && self.minor <= 9 && self.patch <= 9
     }
 
     pub(crate) fn to_le_bytes(self) -> [u8; 2] {
@@ -1335,8 +1347,10 @@ mod tests {
         assert_eq!(version.to_le_bytes(), [0x46, 0x82]);
         assert_eq!(
             OptionVersion::from_le_bytes(version.to_le_bytes()),
-            OptionVersion::new(0x02, 0x04, 0x06)
+            Some(OptionVersion::new(0x02, 0x04, 0x06))
         );
+        assert_eq!(OptionVersion::from_le_bytes([0x1A, 0x82]), None);
+        assert_eq!(OptionVersion::from_le_bytes([0x12, 0x02]), None);
 
         let spec = SpecificationVersion {
             format_version: 1,

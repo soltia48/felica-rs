@@ -93,10 +93,10 @@ impl FelicaStandardResponse {
     }
 
     fn parse_authentication2(data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
-            PAYLOAD_OFFSET,
-            "short authentication2 response payload",
+            34,
+            "authentication2 response must contain exactly 32 encrypted bytes",
         )?;
         Ok(FelicaStandardResponse::Authentication2(
             Authentication2Response {
@@ -106,10 +106,10 @@ impl FelicaStandardResponse {
     }
 
     fn parse_authentication2_v2(data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
-            PAYLOAD_OFFSET,
-            "short authentication2 v2 response payload",
+            28,
+            "authentication2 v2 response must contain a transaction number, 16 encrypted bytes and an 8-byte MAC",
         )?;
         Ok(FelicaStandardResponse::Authentication2V2(
             Authentication2V2Response {
@@ -120,6 +120,11 @@ impl FelicaStandardResponse {
 
     fn parse_polling(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         Self::ensure_response_len(data, 18, "short polling response")?;
+        if !matches!(data.len(), 18 | 20) {
+            return Err(DriverError::Other(
+                "polling response optional data must contain 0 or 2 bytes".into(),
+            ));
+        }
         let (pmm, _rest) = parse_pmm(&data[10..])?;
         Ok(FelicaStandardResponse::Polling {
             idm,
@@ -137,7 +142,11 @@ impl FelicaStandardResponse {
             ));
         }
         let expected_len = 11 + node_count * 2;
-        Self::ensure_response_len(data, expected_len, "short request service key version list")?;
+        Self::ensure_exact_response_len(
+            data,
+            expected_len,
+            "request service response length does not match node count",
+        )?;
         let mut key_versions = Vec::with_capacity(node_count);
         for chunk in data[11..11 + node_count * 2].as_chunks::<2>().0 {
             key_versions.push(u16::from_le_bytes([chunk[0], chunk[1]]));
@@ -157,6 +166,11 @@ impl FelicaStandardResponse {
                 "short request service v2 crypto identifier response",
             )?;
             let parsed_crypto_id = data[12];
+            if !matches!(parsed_crypto_id, 0x4F | 0x41 | 0x43) {
+                return Err(DriverError::Other(
+                    "request service v2 crypto identifier must be 0x4F, 0x41 or 0x43".into(),
+                ));
+            }
             let node_count = data[13] as usize;
             if node_count == 0 || node_count > MAX_SERVICE_CODES {
                 return Err(DriverError::Other(
@@ -167,11 +181,11 @@ impl FelicaStandardResponse {
             let mut parsed_versions = Vec::with_capacity(node_count);
             if matches!(parsed_crypto_id, 0x41 | 0x43) {
                 let expected = node_count * 4;
-                if payload.len() < expected {
-                    return Err(DriverError::Other(
-                        "request service v2 dual key version list truncated".into(),
-                    ));
-                }
+                Self::ensure_exact_response_len(
+                    data,
+                    14 + expected,
+                    "request service v2 response length does not match dual key version count",
+                )?;
                 for i in 0..node_count {
                     let aes_offset = i * 2;
                     let des_offset = node_count * 2 + aes_offset;
@@ -181,11 +195,11 @@ impl FelicaStandardResponse {
                 }
             } else {
                 let expected = node_count * 2;
-                if payload.len() < expected {
-                    return Err(DriverError::Other(
-                        "request service v2 key version list truncated".into(),
-                    ));
-                }
+                Self::ensure_exact_response_len(
+                    data,
+                    14 + expected,
+                    "request service v2 response length does not match key version count",
+                )?;
                 for chunk in payload[..expected].as_chunks::<2>().0 {
                     parsed_versions.push(RequestServiceV2KeyVersion::Single(u16::from_le_bytes([
                         chunk[0], chunk[1],
@@ -196,6 +210,12 @@ impl FelicaStandardResponse {
                 crypto_id: parsed_crypto_id,
                 key_versions: parsed_versions,
             });
+        } else {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "request service v2 error response must contain only status flags",
+            )?;
         }
 
         Ok(FelicaStandardResponse::RequestServiceV2 {
@@ -207,7 +227,11 @@ impl FelicaStandardResponse {
     }
 
     fn parse_request_response(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 11, "short request response payload")?;
+        Self::ensure_exact_response_len(
+            data,
+            11,
+            "request response must contain exactly one mode byte",
+        )?;
         Ok(FelicaStandardResponse::RequestResponse {
             idm,
             mode: data[10],
@@ -217,6 +241,11 @@ impl FelicaStandardResponse {
     fn parse_read_without_encryption(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         let (sf1, sf2) = Self::status_flags(data, "short read without encryption response")?;
         if sf1 != 0 {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "read without encryption error response must contain only status flags",
+            )?;
             return Ok(FelicaStandardResponse::ReadWithoutEncryption {
                 idm,
                 status_flag1: sf1,
@@ -232,10 +261,10 @@ impl FelicaStandardResponse {
             ));
         }
         let expected_len = 13 + block_count * BLOCK_SIZE;
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
             expected_len,
-            "short read without encryption block data",
+            "read without encryption response length does not match block count",
         )?;
         let blocks = collect_blocks(&data[13..13 + block_count * BLOCK_SIZE], block_count);
         Ok(FelicaStandardResponse::ReadWithoutEncryption {
@@ -248,6 +277,11 @@ impl FelicaStandardResponse {
 
     fn parse_write_without_encryption(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         let (sf1, sf2) = Self::status_flags(data, "short write without encryption response")?;
+        Self::ensure_exact_response_len(
+            data,
+            12,
+            "write without encryption response must contain only status flags",
+        )?;
         Ok(FelicaStandardResponse::WriteWithoutEncryption {
             idm,
             status_flag1: sf1,
@@ -286,10 +320,10 @@ impl FelicaStandardResponse {
             ));
         }
         let expected_len = 11 + count * 2;
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
             expected_len,
-            "short request system code response list",
+            "request system code response length does not match count",
         )?;
         let mut system_codes = Vec::with_capacity(count);
         for chunk in data[11..11 + count * 2].as_chunks::<2>().0 {
@@ -307,7 +341,11 @@ impl FelicaStandardResponse {
             ));
         }
         let expected_len = 11 + count * 2;
-        Self::ensure_response_len(data, expected_len, "short request block information list")?;
+        Self::ensure_exact_response_len(
+            data,
+            expected_len,
+            "request block information response length does not match count",
+        )?;
         let mut block_counts = Vec::with_capacity(count);
         for chunk in data[11..11 + count * 2].as_chunks::<2>().0 {
             block_counts.push(u16::from_le_bytes([chunk[0], chunk[1]]));
@@ -319,6 +357,11 @@ impl FelicaStandardResponse {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short request block information ex response")?;
         if status_flag1 != 0 {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "request block information ex error response must contain only status flags",
+            )?;
             return Ok(FelicaStandardResponse::RequestBlockInformationEx {
                 idm,
                 status_flag1,
@@ -340,10 +383,10 @@ impl FelicaStandardResponse {
         }
 
         let expected_len = 13 + count * 4;
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
             expected_len,
-            "short request block information ex count list",
+            "request block information ex response length does not match count",
         )?;
         let mut assigned_block_counts = Vec::with_capacity(count);
         let mut free_block_counts = Vec::with_capacity(count);
@@ -367,6 +410,11 @@ impl FelicaStandardResponse {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short request code list response")?;
         if status_flag1 != 0 {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "request code list error response must contain only status flags",
+            )?;
             return Ok(FelicaStandardResponse::RequestCodeList {
                 idm,
                 status_flag1,
@@ -408,6 +456,11 @@ impl FelicaStandardResponse {
             offset + service_payload_len,
             "short request code list service payload",
         )?;
+        Self::ensure_exact_response_len(
+            data,
+            offset + service_payload_len,
+            "request code list response length does not match its counts",
+        )?;
 
         let mut services = Vec::with_capacity(service_count);
         for chunk in data[offset..offset + service_payload_len]
@@ -432,6 +485,11 @@ impl FelicaStandardResponse {
     fn parse_set_parameter(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short set parameter response")?;
+        Self::ensure_exact_response_len(
+            data,
+            12,
+            "set parameter response must contain only status flags",
+        )?;
         Ok(FelicaStandardResponse::SetParameter {
             idm,
             status_flag1,
@@ -440,7 +498,11 @@ impl FelicaStandardResponse {
     }
 
     fn parse_get_container_issue_information(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 26, "short get container issue information response")?;
+        Self::ensure_exact_response_len(
+            data,
+            26,
+            "get container issue information response must contain exactly 16 data bytes",
+        )?;
         let mut format_version_carrier_information = [0u8; 5];
         format_version_carrier_information.copy_from_slice(&data[10..15]);
         let mut mobile_phone_model_information = [0u8; 11];
@@ -466,7 +528,11 @@ impl FelicaStandardResponse {
     }
 
     fn parse_get_container_id(container_idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, PAYLOAD_OFFSET, "short get container id response")?;
+        Self::ensure_exact_response_len(
+            data,
+            PAYLOAD_OFFSET,
+            "get container id response must contain exactly one IDm",
+        )?;
         Ok(FelicaStandardResponse::GetContainerId { container_idm })
     }
 
@@ -474,6 +540,11 @@ impl FelicaStandardResponse {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short get area information response")?;
         if status_flag1 != 0 {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "get area information error response must contain only status flags",
+            )?;
             return Ok(FelicaStandardResponse::GetAreaInformation {
                 idm,
                 status_flag1,
@@ -481,7 +552,11 @@ impl FelicaStandardResponse {
                 result: None,
             });
         }
-        Self::ensure_response_len(data, 16, "short get area information success response")?;
+        Self::ensure_exact_response_len(
+            data,
+            16,
+            "get area information success response must contain exactly four result bytes",
+        )?;
         Ok(FelicaStandardResponse::GetAreaInformation {
             idm,
             status_flag1,
@@ -497,6 +572,11 @@ impl FelicaStandardResponse {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short get node property response")?;
         if status_flag1 != 0 {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "get node property error response must contain only status flags",
+            )?;
             return Ok(FelicaStandardResponse::GetNodeProperty {
                 idm,
                 status_flag1,
@@ -557,10 +637,10 @@ impl FelicaStandardResponse {
         let status_flag2 = data[PAYLOAD_OFFSET + 1];
         let flag = data[12];
         let data_len = data[13] as usize;
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
             14 + data_len,
-            "short get system status response payload",
+            "get system status response length does not match data length",
         )?;
         Ok(FelicaStandardResponse::GetSystemStatus {
             idm,
@@ -577,6 +657,11 @@ impl FelicaStandardResponse {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short request product information response")?;
         if status_flag1 != 0 {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "request product information error response must contain only status flags",
+            )?;
             return Ok(FelicaStandardResponse::RequestProductInformation {
                 idm,
                 status_flag1,
@@ -591,10 +676,10 @@ impl FelicaStandardResponse {
             "short request product information success response",
         )?;
         let data_len = data[12] as usize;
-        Self::ensure_response_len(
+        Self::ensure_exact_response_len(
             data,
             13 + data_len,
-            "short request product information response payload",
+            "request product information response length does not match data length",
         )?;
         Ok(FelicaStandardResponse::RequestProductInformation {
             idm,
@@ -607,9 +692,14 @@ impl FelicaStandardResponse {
     fn parse_request_specification_version(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         let (status_flag1, status_flag2) =
             Self::status_flags(data, "short request specification version response")?;
-        let specification_version = if status_flag1 == 0 && data.len() > 12 {
+        let specification_version = if status_flag1 == 0 {
             Some(parse_specification_version_data(&data[12..])?)
         } else {
+            Self::ensure_exact_response_len(
+                data,
+                12,
+                "request specification version error response must contain only status flags",
+            )?;
             None
         };
         Ok(FelicaStandardResponse::RequestSpecificationVersion {
@@ -622,6 +712,11 @@ impl FelicaStandardResponse {
 
     fn parse_reset_mode(idm: Idm, data: &[u8]) -> DriverResult<Self> {
         let (status_flag1, status_flag2) = Self::status_flags(data, "short reset mode response")?;
+        Self::ensure_exact_response_len(
+            data,
+            12,
+            "reset mode response must contain only status flags",
+        )?;
         Ok(FelicaStandardResponse::ResetMode {
             idm,
             status_flag1,
@@ -630,7 +725,11 @@ impl FelicaStandardResponse {
     }
 
     fn parse_authentication1(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 26, "short authentication1 response")?;
+        Self::ensure_exact_response_len(
+            data,
+            26,
+            "authentication1 response must contain exactly two 8-byte challenges",
+        )?;
         let mut challenge_1b = [0u8; 8];
         challenge_1b.copy_from_slice(&data[10..18]);
         let mut challenge_2a = [0u8; 8];
@@ -791,7 +890,11 @@ impl FelicaStandardResponse {
     }
 
     fn parse_authentication1_v2(idm: Idm, data: &[u8]) -> DriverResult<Self> {
-        Self::ensure_response_len(data, 46, "short authentication1 v2 response")?;
+        Self::ensure_exact_response_len(
+            data,
+            46,
+            "authentication1 v2 response must contain exactly two 16-byte challenges and challenge3c",
+        )?;
         let mut challenge_1b = [0u8; 16];
         challenge_1b.copy_from_slice(&data[10..26]);
         let mut challenge_2a = [0u8; 16];
@@ -820,6 +923,14 @@ impl FelicaStandardResponse {
             Ok(())
         }
     }
+
+    fn ensure_exact_response_len(data: &[u8], expected: usize, message: &str) -> DriverResult<()> {
+        if data.len() == expected {
+            Ok(())
+        } else {
+            Err(DriverError::Other(message.into()))
+        }
+    }
 }
 
 fn parse_fixed<'a, const N: usize>(
@@ -846,20 +957,30 @@ fn parse_specification_version_data(data: &[u8]) -> DriverResult<SpecificationVe
             "request specification version format version must be 0x00".into(),
         ));
     }
-    let basic_version = OptionVersion::from_le_bytes([data[1], data[2]]);
+    let basic_version = OptionVersion::from_le_bytes([data[1], data[2]]).ok_or_else(|| {
+        DriverError::Other(
+            "request specification version basic version is not valid packed BCD".into(),
+        )
+    })?;
     let option_count = data[3] as usize;
     let option_bytes_len = option_count.checked_mul(2).ok_or_else(|| {
         DriverError::Other("request specification version option bytes length overflow".into())
     })?;
-    if data.len() < 4 + option_bytes_len {
+    if data.len() != 4 + option_bytes_len {
         return Err(DriverError::Other(
-            "request specification version option list truncated".into(),
+            "request specification version payload length does not match option count".into(),
         ));
     }
     let mut option_versions = Vec::with_capacity(option_count);
     let option_bytes = &data[4..4 + option_bytes_len];
     for chunk in option_bytes.as_chunks::<2>().0 {
-        option_versions.push(OptionVersion::from_le_bytes([chunk[0], chunk[1]]));
+        option_versions.push(
+            OptionVersion::from_le_bytes([chunk[0], chunk[1]]).ok_or_else(|| {
+                DriverError::Other(
+                    "request specification version option is not valid packed BCD".into(),
+                )
+            })?,
+        );
     }
     Ok(SpecificationVersion {
         format_version,

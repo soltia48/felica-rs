@@ -30,9 +30,11 @@ type SharedBlocks = Rc<RefCell<Vec<[u8; BLOCK_SIZE]>>>;
 /// In-memory multi-System FeliCa Standard card emulator.
 ///
 /// It models Polling/System selection, card Modes, file-system access, legacy
-/// DES authentication and secure messaging, purse behavior, overlap Services,
-/// and issuing commands. It is suitable for protocol tests and reader-target
-/// mode implementations; RF timing and collision behavior remain the host's
+/// DES authentication and secure messaging, purse behavior, and overlap
+/// Services. Issuing command frames are decoded, but issuing is deliberately
+/// disabled and returns the protocol's unsupported-command status (`FFh/C2h`).
+/// The emulator is suitable for protocol tests and reader-target mode
+/// implementations; RF timing and collision behavior remain the host's
 /// responsibility.
 pub struct FelicaStandardEmulator {
     systems: Vec<EmulatedSystem>,

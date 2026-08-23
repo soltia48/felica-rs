@@ -1,7 +1,11 @@
+/// FeliCa carrier frequency used by the timing formulas in §2.3.4.
+const CARRIER_FREQUENCY_HZ: f64 = 13_560_000.0;
 /// Time a card takes to answer in the first time slot of a Polling command.
-const POLLING_FIRST_SLOT_SECONDS: f32 = 0.003625;
+const POLLING_FIRST_SLOT_SECONDS: f64 = (512.0 + 256.0) * 64.0 / CARRIER_FREQUENCY_HZ;
 /// Length of each further time slot the command grants.
-const POLLING_SLOT_SECONDS: f32 = 0.001208;
+const POLLING_SLOT_SECONDS: f64 = 256.0 * 64.0 / CARRIER_FREQUENCY_HZ;
+/// Base time quantum `T = 256 × 16 / fc` used by PMm response-time bytes.
+const FELICA_TIME_QUANTUM_SECONDS: f64 = 256.0 * 16.0 / CARRIER_FREQUENCY_HZ;
 
 /// Time to wait for the answers to a Polling command, in milliseconds.
 ///
@@ -10,8 +14,8 @@ const POLLING_SLOT_SECONDS: f32 = 0.001208;
 /// a slot at random, so the wait covers the response time of the first slot plus
 /// one slot period for every further one.
 pub fn polling_timeout_ms(time_slots: u8) -> u16 {
-    let seconds = POLLING_FIRST_SLOT_SECONDS + time_slots as f32 * POLLING_SLOT_SECONDS;
-    (seconds * 1000.0).ceil().clamp(0.0, u16::MAX as f32) as u16
+    let seconds = POLLING_FIRST_SLOT_SECONDS + time_slots as f64 * POLLING_SLOT_SECONDS;
+    (seconds * 1000.0).ceil().clamp(0.0, u16::MAX as f64) as u16
 }
 
 /// Data returned when an NFC-F target is selected by Polling.
@@ -19,7 +23,7 @@ pub fn polling_timeout_ms(time_slots: u8) -> u16 {
 /// Besides identifying the card, PMm supplies maximum-response-time parameters
 /// used by the timeout helpers on this type (§2.3.4). Short or missing PMm data
 /// is treated as zero-valued timing parameters and all results are rounded up to
-/// milliseconds with the implementation's minimum timeout floor.
+/// whole milliseconds so the computed maximum is never shortened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Type3TagPollingResult {
     /// Eight-byte Manufacture ID (`IDm`) identifying the activated card.
@@ -32,8 +36,6 @@ pub struct Type3TagPollingResult {
 }
 
 impl Type3TagPollingResult {
-    const MIN_TIMEOUT_SECONDS: f32 = 0.0020000003;
-
     /// Compute the Request Service command timeout using the Request Service PMm byte.
     pub fn request_service_timeout_ms(&self, service_count: usize) -> u16 {
         self.scaled_timeout_with_units(
@@ -170,7 +172,6 @@ impl Type3TagPollingResult {
     }
 
     /// Compute the Issuing/Registration command timeout using the Registration PMm byte.
-    /// Sony specifies a minimum of 2 ms for these operations (a floor that we apply to all commands).
     pub fn registration_timeout_ms(&self) -> u16 {
         let timeout_seconds = self.timeout_seconds(PmmSlot::REGISTRATION, |p| p.a + 1.0);
         Self::seconds_to_timeout_ms(timeout_seconds)
@@ -180,7 +181,7 @@ impl Type3TagPollingResult {
         self.compute_timeout(slot, |p| p.a + 1.0)
     }
 
-    fn scaled_timeout(&self, slot: PmmSlot, units: f32) -> u16 {
+    fn scaled_timeout(&self, slot: PmmSlot, units: f64) -> u16 {
         self.compute_timeout(slot, |p| ((p.b + 1.0) * units) + p.a + 1.0)
     }
 
@@ -190,24 +191,22 @@ impl Type3TagPollingResult {
 
     fn compute_timeout<F>(&self, slot: PmmSlot, term_fn: F) -> u16
     where
-        F: Fn(&TimingParameters) -> f32,
+        F: Fn(&TimingParameters) -> f64,
     {
         let timeout_seconds = self.timeout_seconds(slot, term_fn);
         Self::seconds_to_timeout_ms(timeout_seconds)
     }
 
-    fn timeout_seconds<F>(&self, slot: PmmSlot, term_fn: F) -> f32
+    fn timeout_seconds<F>(&self, slot: PmmSlot, term_fn: F) -> f64
     where
-        F: Fn(&TimingParameters) -> f32,
+        F: Fn(&TimingParameters) -> f64,
     {
         let params = self.timing_parameters(slot);
-        302e-6_f32 * term_fn(&params) * 4f32.powi(params.e)
+        FELICA_TIME_QUANTUM_SECONDS * term_fn(&params) * 4f64.powi(params.e)
     }
 
-    fn seconds_to_timeout_ms(seconds: f32) -> u16 {
-        (seconds.max(Self::MIN_TIMEOUT_SECONDS) * 1000.0)
-            .ceil()
-            .clamp(0.0, u16::MAX as f32) as u16
+    fn seconds_to_timeout_ms(seconds: f64) -> u16 {
+        (seconds * 1000.0).ceil().clamp(0.0, u16::MAX as f64) as u16
     }
 
     fn timing_parameters(&self, slot: PmmSlot) -> TimingParameters {
@@ -218,16 +217,16 @@ impl Type3TagPollingResult {
 
 #[derive(Clone, Copy)]
 struct TimingParameters {
-    a: f32,
-    b: f32,
+    a: f64,
+    b: f64,
     e: i32,
 }
 
 impl From<u8> for TimingParameters {
     fn from(byte: u8) -> Self {
         Self {
-            a: (byte & 0x07) as f32,
-            b: ((byte >> 3) & 0x07) as f32,
+            a: (byte & 0x07) as f64,
+            b: ((byte >> 3) & 0x07) as f64,
             e: (byte >> 6) as i32,
         }
     }
@@ -289,13 +288,13 @@ impl UnitClamp {
         Self::new(0, None)
     }
 
-    fn clamp(self, units: usize) -> f32 {
+    fn clamp(self, units: usize) -> f64 {
         let clamped = units.max(self.min);
         let clamped = match self.max {
             Some(max) => clamped.min(max),
             None => clamped,
         };
-        clamped as f32
+        clamped as f64
     }
 }
 
@@ -324,14 +323,24 @@ mod tests {
     }
 
     #[test]
-    fn timeout_uses_minimum_floor_when_parameters_are_small_or_missing() {
+    fn timeout_uses_the_exact_pmm_formula_when_parameters_are_small_or_missing() {
         let empty = polling_result_with_pmm(Vec::new());
-        assert_eq!(empty.request_response_timeout_ms(), 3);
-        assert_eq!(empty.read_without_encryption_timeout_ms(1), 3);
+        assert_eq!(empty.request_response_timeout_ms(), 1);
+        assert_eq!(empty.read_without_encryption_timeout_ms(1), 1);
 
         let zeros = polling_result_with_pmm(vec![0; 8]);
-        assert_eq!(zeros.request_response_timeout_ms(), 3);
-        assert_eq!(zeros.request_service_timeout_ms(1), 3);
+        assert_eq!(zeros.request_response_timeout_ms(), 1);
+        assert_eq!(zeros.request_service_timeout_ms(1), 1);
+    }
+
+    #[test]
+    fn timeout_rounding_never_shortens_the_specification_maximum() {
+        let mut pmm = vec![0; 8];
+        // Request Service: A=7, B=7, E=3. For n=7 the exact result is
+        // 1237.257... ms, which must round up to 1238 ms.
+        pmm[2] = 0xFF;
+        let result = polling_result_with_pmm(pmm);
+        assert_eq!(result.request_service_timeout_ms(7), 1238);
     }
 
     #[test]
@@ -397,8 +406,8 @@ mod tests {
     #[test]
     fn timing_parameter_and_unit_clamp_helpers_behave_as_expected() {
         let params = TimingParameters::from(0b11_101_010);
-        assert_eq!(params.a, 0b010 as f32);
-        assert_eq!(params.b, 0b101 as f32);
+        assert_eq!(params.a, 0b010 as f64);
+        assert_eq!(params.b, 0b101 as f64);
         assert_eq!(params.e, 0b11);
 
         assert_eq!(UnitClamp::between(1, 4).clamp(0), 1.0);

@@ -40,6 +40,8 @@ impl FelicaStandardCommand {
             REQUEST_BLOCK_INFORMATION_COMMAND_CODE => Self::parse_request_block_information(body),
             AUTHENTICATION1_COMMAND_CODE => Self::parse_authentication1(body),
             AUTHENTICATION2_COMMAND_CODE => Self::parse_authentication2(body),
+            AUTHENTICATION1_V2_COMMAND_CODE => Self::parse_authentication1_v2(body),
+            AUTHENTICATION2_V2_COMMAND_CODE => Self::parse_authentication2_v2(body),
             REQUEST_CODE_LIST_COMMAND_CODE => Self::parse_request_code_list(body),
             REQUEST_BLOCK_INFORMATION_EX_COMMAND_CODE => {
                 Self::parse_request_block_information_ex(body)
@@ -78,6 +80,23 @@ impl FelicaStandardCommand {
                 "polling payload too short".into(),
             ));
         }
+        if body.len() > 4 {
+            return Err(FelicaStandardError::Protocol(
+                "polling payload has trailing bytes".into(),
+            ));
+        }
+        if !POLLING_REQUEST_CODES.contains(&body[2]) {
+            return Err(FelicaStandardError::Protocol(format!(
+                "polling request code {:#04X} is reserved",
+                body[2]
+            )));
+        }
+        if !POLLING_TIME_SLOTS.contains(&body[3]) {
+            return Err(FelicaStandardError::Protocol(format!(
+                "polling time slot value {:#04X} is not defined",
+                body[3]
+            )));
+        }
         Ok(FelicaStandardCommand::Polling {
             system_code: u16::from_be_bytes([body[0], body[1]]),
             request_code: body[2],
@@ -87,8 +106,9 @@ impl FelicaStandardCommand {
 
     fn parse_request_service(body: &[u8]) -> Result<Self, FelicaStandardError> {
         let (idm, rest) = parse_idm(body)?;
-        let (service_codes, _consumed) =
+        let (service_codes, rest) =
             take_service_code_list(rest, MAX_SERVICE_CODES, "request service")?;
+        ensure_no_trailing_bytes(rest, "request service")?;
         Ok(FelicaStandardCommand::RequestService { idm, service_codes })
     }
 
@@ -112,7 +132,8 @@ impl FelicaStandardCommand {
             "read without encryption",
             "block",
         )?;
-        let (block_list, _rest) = take_block_list(rest, block_count)?;
+        let (block_list, rest) = take_block_list(rest, block_count)?;
+        ensure_no_trailing_bytes(rest, "read without encryption")?;
         Ok(FelicaStandardCommand::ReadWithoutEncryption {
             idm,
             service_codes,
@@ -134,12 +155,17 @@ impl FelicaStandardCommand {
         let expected_len = block_count.checked_mul(BLOCK_SIZE).ok_or_else(|| {
             FelicaStandardError::Protocol("write without encryption data length overflow".into())
         })?;
-        let data = rest
-            .get(..expected_len)
-            .ok_or_else(|| {
-                FelicaStandardError::Protocol("write without encryption data truncated".into())
-            })?
-            .to_vec();
+        if rest.len() < expected_len {
+            return Err(FelicaStandardError::Protocol(
+                "write without encryption data truncated".into(),
+            ));
+        }
+        if rest.len() > expected_len {
+            return Err(FelicaStandardError::Protocol(
+                "write without encryption payload has trailing bytes".into(),
+            ));
+        }
+        let data = rest.to_vec();
         Ok(FelicaStandardCommand::WriteWithoutEncryption {
             idm,
             service_codes,
@@ -153,6 +179,11 @@ impl FelicaStandardCommand {
         if rest.len() < 2 {
             return Err(FelicaStandardError::Protocol(
                 "search service code payload too short".into(),
+            ));
+        }
+        if rest.len() > 2 {
+            return Err(FelicaStandardError::Protocol(
+                "search service code payload has trailing bytes".into(),
             ));
         }
         Ok(FelicaStandardCommand::SearchServiceCode {
@@ -173,12 +204,13 @@ impl FelicaStandardCommand {
 
     fn parse_request_block_information(body: &[u8]) -> Result<Self, FelicaStandardError> {
         let (idm, rest) = parse_idm(body)?;
-        let (node_codes, _rest) = take_u16_list(
+        let (node_codes, rest) = take_u16_list(
             rest,
             1..=MAX_NODE_CODES,
             "request block information",
             "node",
         )?;
+        ensure_no_trailing_bytes(rest, "request block information")?;
         Ok(FelicaStandardCommand::RequestBlockInformation { idm, node_codes })
     }
 
@@ -210,6 +242,11 @@ impl FelicaStandardCommand {
         let challenge_1a = rest.get(cursor..cursor + 8).ok_or_else(|| {
             FelicaStandardError::Protocol("authentication1 missing challenge1a".into())
         })?;
+        if cursor + 8 != rest.len() {
+            return Err(FelicaStandardError::Protocol(
+                "authentication1 payload has trailing bytes".into(),
+            ));
+        }
         let mut challenge_bytes = [0u8; 8];
         challenge_bytes.copy_from_slice(challenge_1a);
         Ok(FelicaStandardCommand::Authentication1 {
@@ -222,9 +259,17 @@ impl FelicaStandardCommand {
 
     fn parse_authentication2(body: &[u8]) -> Result<Self, FelicaStandardError> {
         let (idm, rest) = parse_idm(body)?;
-        let challenge_2b = rest.get(..8).ok_or_else(|| {
-            FelicaStandardError::Protocol("authentication2 missing challenge2b".into())
-        })?;
+        if rest.len() < 8 {
+            return Err(FelicaStandardError::Protocol(
+                "authentication2 missing challenge2b".into(),
+            ));
+        }
+        if rest.len() > 8 {
+            return Err(FelicaStandardError::Protocol(
+                "authentication2 payload has trailing bytes".into(),
+            ));
+        }
+        let challenge_2b = rest;
         let mut challenge_bytes = [0u8; 8];
         challenge_bytes.copy_from_slice(challenge_2b);
         Ok(FelicaStandardCommand::Authentication2 {
@@ -254,12 +299,13 @@ impl FelicaStandardCommand {
 
     fn parse_request_block_information_ex(body: &[u8]) -> Result<Self, FelicaStandardError> {
         let (idm, rest) = parse_idm(body)?;
-        let (node_codes, _rest) = take_u16_list(
+        let (node_codes, rest) = take_u16_list(
             rest,
             1..=MAX_NODE_CODES,
             "request block information ex",
             "node",
         )?;
+        ensure_no_trailing_bytes(rest, "request block information ex")?;
         Ok(FelicaStandardCommand::RequestBlockInformationEx { idm, node_codes })
     }
 
@@ -345,12 +391,13 @@ impl FelicaStandardCommand {
         let node_property_type = NodePropertyType::from_byte(type_byte).ok_or_else(|| {
             FelicaStandardError::Protocol("get node property type out of range".into())
         })?;
-        let (node_codes, _rest) = take_u16_list(
+        let (node_codes, rest) = take_u16_list(
             rest,
             1..=MAX_NODE_PROPERTY_CODES,
             "get node property",
             "node",
         )?;
+        ensure_no_trailing_bytes(rest, "get node property")?;
         Ok(FelicaStandardCommand::GetNodeProperty {
             idm,
             node_property_type,
@@ -377,9 +424,54 @@ impl FelicaStandardCommand {
 
     fn parse_request_service_v2(body: &[u8]) -> Result<Self, FelicaStandardError> {
         let (idm, rest) = parse_idm(body)?;
-        let (service_codes, _consumed) =
+        let (service_codes, rest) =
             take_service_code_list(rest, MAX_SERVICE_CODES, "request service v2")?;
+        ensure_no_trailing_bytes(rest, "request service v2")?;
         Ok(FelicaStandardCommand::RequestServiceV2 { idm, service_codes })
+    }
+
+    fn parse_authentication1_v2(body: &[u8]) -> Result<Self, FelicaStandardError> {
+        let (idm, rest) = parse_idm(body)?;
+        let (&operation_parameter, rest) = rest.split_first().ok_or_else(|| {
+            FelicaStandardError::Protocol("authentication1 v2 missing operation parameter".into())
+        })?;
+        let (nodes, rest) =
+            take_u16_list(rest, 1..=MAX_SERVICE_CODES, "authentication1 v2", "node")?;
+        if rest.len() < 16 {
+            return Err(FelicaStandardError::Protocol(
+                "authentication1 v2 missing challenge1a".into(),
+            ));
+        }
+        if rest.len() > 16 {
+            return Err(FelicaStandardError::Protocol(
+                "authentication1 v2 payload has trailing bytes".into(),
+            ));
+        }
+        let mut challenge_1a = [0u8; 16];
+        challenge_1a.copy_from_slice(rest);
+        Ok(FelicaStandardCommand::Authentication1V2 {
+            idm,
+            operation_parameter,
+            nodes,
+            challenge_1a,
+        })
+    }
+
+    fn parse_authentication2_v2(body: &[u8]) -> Result<Self, FelicaStandardError> {
+        let (idm, rest) = parse_idm(body)?;
+        if rest.len() < 16 {
+            return Err(FelicaStandardError::Protocol(
+                "authentication2 v2 missing challenge2b".into(),
+            ));
+        }
+        if rest.len() > 16 {
+            return Err(FelicaStandardError::Protocol(
+                "authentication2 v2 payload has trailing bytes".into(),
+            ));
+        }
+        let mut challenge_2b = [0u8; 16];
+        challenge_2b.copy_from_slice(rest);
+        Ok(FelicaStandardCommand::Authentication2V2 { idm, challenge_2b })
     }
 
     fn parse_get_system_status(body: &[u8]) -> Result<Self, FelicaStandardError> {
@@ -461,6 +553,11 @@ impl FelicaStandardCommand {
         if body.len() > 2 {
             return Err(FelicaStandardError::Protocol(
                 "get container id payload has trailing bytes".into(),
+            ));
+        }
+        if body.iter().any(|value| *value != 0x00) {
+            return Err(FelicaStandardError::Protocol(
+                "get container id reserved bytes must be 0x00".into(),
             ));
         }
         Ok(FelicaStandardCommand::GetContainerId)
@@ -560,6 +657,16 @@ fn parse_idm(data: &[u8]) -> Result<([u8; IDM_LEN], &[u8]), FelicaStandardError>
     let mut idm = [0u8; IDM_LEN];
     idm.copy_from_slice(&data[..IDM_LEN]);
     Ok((idm, &data[IDM_LEN..]))
+}
+
+fn ensure_no_trailing_bytes(data: &[u8], label: &str) -> Result<(), FelicaStandardError> {
+    if data.is_empty() {
+        Ok(())
+    } else {
+        Err(FelicaStandardError::Protocol(format!(
+            "{label} payload has trailing bytes"
+        )))
+    }
 }
 
 /// Takes the one-byte count that introduces a list, with the bytes behind it.
