@@ -14,10 +14,20 @@ pub fn polling_timeout_ms(time_slots: u8) -> u16 {
     (seconds * 1000.0).ceil().clamp(0.0, u16::MAX as f32) as u16
 }
 
+/// Data returned when an NFC-F target is selected by Polling.
+///
+/// Besides identifying the card, PMm supplies maximum-response-time parameters
+/// used by the timeout helpers on this type (§2.3.4). Short or missing PMm data
+/// is treated as zero-valued timing parameters and all results are rounded up to
+/// milliseconds with the implementation's minimum timeout floor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Type3TagPollingResult {
+    /// Eight-byte Manufacture ID (`IDm`) identifying the activated card.
     pub idm: Vec<u8>,
+    /// Eight-byte Manufacture Parameter (`PMm`).
     pub pmm: Vec<u8>,
+    /// Polling request data selected by the request code, such as System Code or
+    /// communication-performance bytes.
     pub optional: Vec<u8>,
 }
 

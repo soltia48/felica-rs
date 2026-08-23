@@ -100,6 +100,7 @@ pub(crate) const MAX_SECURE_READ_V2_BLOCK_COUNT: usize = (MAX_PACKET_LEN
     - (2 + TRANSACTION_NUMBER_SIZE + SECURE_READ_RESPONSE_OVERHEAD + V2_AES128_MAC_SIZE))
     / BLOCK_SIZE;
 
+/// Cryptographic scheme of an authenticated secure-messaging session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecureSessionScheme {
     /// FeliCa Standard secure messaging (DES/3DES).
@@ -113,15 +114,22 @@ pub enum SecureSessionScheme {
 /// copy has to be an explicit `clone()` that zeroizes when it goes out of scope.
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum SecureSessionCredentials {
+    /// Eight-byte legacy DES session key established by Authentication2.
     Des([u8; 8]),
+    /// AES-128 secure-messaging keys and the Authentication1 v2 challenge
+    /// parameter used when constructing the IV.
     Aes128 {
+        /// AES-128 OFB encryption key.
         encryption_key: [u8; 16],
+        /// AES-128 CMAC key.
         mac_key: [u8; 16],
+        /// Four-byte `challenge 3C` value returned by Authentication1 v2.
         challenge_3c: [u8; 4],
     },
 }
 
 impl SecureSessionCredentials {
+    /// Returns the secure-messaging scheme selected by these credentials.
     pub fn scheme(&self) -> SecureSessionScheme {
         match self {
             Self::Des(_) => SecureSessionScheme::Des,
@@ -186,16 +194,29 @@ impl fmt::Debug for AuthenticatedContext {
     }
 }
 
+/// Borrowed view of secure-session credentials.
+///
+/// The custom [`Debug`](fmt::Debug) implementation redacts all key bytes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SecureSessionCredentialsRef<'a> {
+    /// Borrowed legacy DES session key.
     Des(&'a [u8; 8]),
+    /// Borrowed AES-128 session material.
     Aes128 {
+        /// AES-128 OFB encryption key.
         encryption_key: &'a [u8; 16],
+        /// AES-128 CMAC key.
         mac_key: &'a [u8; 16],
+        /// Four-byte `challenge 3C` IV input.
         challenge_3c: &'a [u8; 4],
     },
 }
 
+/// State shared by consecutive commands in one authenticated session.
+///
+/// It contains the transaction counter and identifier, secret credentials, and
+/// the ordered Node list referenced by secure Block List Elements. Secret fields
+/// are redacted from [`Debug`](fmt::Debug) and zeroized on drop.
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct AuthenticatedContext {
     transaction_number: u16,
@@ -209,6 +230,12 @@ pub struct AuthenticatedContext {
 }
 
 impl AuthenticatedContext {
+    /// Creates session state with an empty addressable-Node list.
+    ///
+    /// Call [`with_nodes`](Self::with_nodes) when Block List Elements or DES key
+    /// changes need to resolve Node positions. This constructor is primarily for
+    /// importing a session established by a relay; normal users obtain a fully
+    /// initialized context through the mutual-authentication helpers.
     pub fn new(
         transaction_number: u16,
         transaction_id: [u8; 6],
@@ -256,6 +283,7 @@ impl AuthenticatedContext {
         self.nodes.iter().position(|listed| *listed == node)
     }
 
+    /// Returns the cryptographic scheme of this session.
     pub fn scheme(&self) -> SecureSessionScheme {
         self.credentials.scheme()
     }
@@ -277,14 +305,20 @@ impl AuthenticatedContext {
         Ok(())
     }
 
+    /// Returns the most recently accepted transaction number.
     pub fn transaction_number(&self) -> u16 {
         self.transaction_number
     }
 
+    /// Returns the six-byte transaction identifier established by authentication.
     pub fn transaction_id(&self) -> &[u8; 6] {
         &self.transaction_id
     }
 
+    /// Borrows the scheme-specific session keys.
+    ///
+    /// Key bytes remain secret and are redacted by the returned value's
+    /// [`Debug`](fmt::Debug) implementation.
     pub fn credentials(&self) -> SecureSessionCredentialsRef<'_> {
         match &self.credentials {
             SecureSessionCredentials::Des(key) => SecureSessionCredentialsRef::Des(key),
@@ -300,6 +334,10 @@ impl AuthenticatedContext {
         }
     }
 
+    /// Advances and returns the transaction number before sending a command.
+    ///
+    /// Returns [`FelicaStandardError::SecureSession`] instead of wrapping after
+    /// `FFFFh`; a fresh mutual-authentication session is required at that point.
     pub fn increment_transaction_number(&mut self) -> Result<u16, FelicaStandardError> {
         if self.transaction_number == u16::MAX {
             return Err(FelicaStandardError::SecureSession(
@@ -310,6 +348,10 @@ impl AuthenticatedContext {
         Ok(self.transaction_number)
     }
 
+    /// Replaces the counter with a transaction number authenticated in a response.
+    ///
+    /// This is intended for relay/session synchronization. Setting an arbitrary
+    /// value can desynchronize the context from the card.
     pub fn set_transaction_number(&mut self, value: u16) {
         self.transaction_number = value;
     }

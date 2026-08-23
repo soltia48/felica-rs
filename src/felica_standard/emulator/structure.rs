@@ -28,61 +28,109 @@ const AREA_ATTRIBUTE_CHILD_AREAS_ALLOWED: u8 = 0b000000;
 /// (§3.3.1, table 3-1).
 const AREA_ATTRIBUTE_CHILD_AREAS_FORBIDDEN: u8 = 0b000001;
 
+/// Invalid Area/Service hierarchy supplied to the emulator.
+///
+/// These checks encode the node ranges, Area attributes, Service attributes,
+/// and overlap restrictions from the FeliCa file-system model. Rejecting an
+/// invalid tree at construction time prevents ambiguous command behavior later.
 #[derive(Debug, thiserror::Error)]
 pub enum EmulatorConfigError {
+    /// An Area begins after the end of its own Node range.
     #[error("area code 0x{area_code:04X} exceeds end service code 0x{end_service_code:04X}")]
     InvalidAreaRange {
+        /// Beginning Area Code.
         area_code: u16,
+        /// Inclusive end of the Area's Service Code range.
         end_service_code: u16,
     },
+    /// Area 0 does not span the required `0000h..=FFFEh` root range.
     #[error("area code 0x0000 must have end service code 0xFFFE (got 0x{end_service_code:04X})")]
-    InvalidRootAreaRange { end_service_code: u16 },
+    InvalidRootAreaRange {
+        /// Invalid inclusive end supplied for Area 0.
+        end_service_code: u16,
+    },
+    /// A Node Code uses reserved System value `FFFFh` or lies outside the file system.
     #[error(
         "node code 0x{node_code:04X} is outside the usable range 0x0000..=0xFFFE; 0xFFFF denotes the system"
     )]
-    NodeCodeOutOfRange { node_code: u16 },
+    NodeCodeOutOfRange {
+        /// Invalid Node Code.
+        node_code: u16,
+    },
+    /// The low six Area Attribute bits are not a defined value.
     #[error(
         "area code 0x{area_code:04X} has attribute {attribute:06b}, but an area attribute must be 000000b (child areas allowed) or 000001b (child areas forbidden)"
     )]
-    InvalidAreaAttribute { area_code: u16, attribute: u8 },
+    InvalidAreaAttribute {
+        /// Area Code containing the undefined attribute.
+        area_code: u16,
+        /// Undefined six-bit Area Attribute.
+        attribute: u8,
+    },
+    /// A child Area was inserted below an Area whose attribute forbids it.
     #[error(
         "area 0x{area_code:04X} has attribute 000001b, so no child area may be created below it"
     )]
-    ChildAreaForbidden { area_code: u16 },
+    ChildAreaForbidden {
+        /// Parent Area Code.
+        area_code: u16,
+    },
+    /// The low six Service Attribute bits are not defined by the specification.
     #[error(
         "service code 0x{service_code:04X} has attribute {attribute:06b}, which is not a service attribute defined by table 3-2"
     )]
-    UndefinedServiceAttribute { service_code: u16, attribute: u8 },
+    UndefinedServiceAttribute {
+        /// Service Code containing the undefined attribute.
+        service_code: u16,
+        /// Undefined six-bit Service Attribute.
+        attribute: u8,
+    },
+    /// A Service Code is not contained by its parent Area range.
     #[error(
         "service code 0x{service_code:04X} is outside area range 0x{area_code:04X}..=0x{end_service_code:04X}"
     )]
     ServiceOutOfRange {
+        /// Parent Area Code.
         area_code: u16,
+        /// Inclusive end of the parent Area range.
         end_service_code: u16,
+        /// Out-of-range Service Code.
         service_code: u16,
     },
+    /// A child Area range is not contained by its parent Area range.
     #[error(
         "child area 0x{child_area_code:04X}..=0x{child_end_service_code:04X} is outside area range 0x{area_code:04X}..=0x{end_service_code:04X}"
     )]
     AreaOutOfRange {
+        /// Parent Area Code.
         area_code: u16,
+        /// Inclusive end of the parent Area range.
         end_service_code: u16,
+        /// Beginning of the invalid child Area range.
         child_area_code: u16,
+        /// Inclusive end of the invalid child Area range.
         child_end_service_code: u16,
     },
+    /// Overlapping Service attributes name different storage semantics.
     #[error(
         "service 0x{service_code:04X} would overlap service number 0x{service_number:03X}, which is a {existing_kind:?} service, but it is a {added_kind:?} service; random, cyclic and purse services cannot be mixed in an overlap"
     )]
     OverlapKindMismatch {
+        /// Newly added Service Code.
         service_code: u16,
+        /// Ten-bit Service Number shared by all overlapping Services.
         service_number: u16,
+        /// Kind already assigned to the shared Blocks.
         existing_kind: ServiceKind,
+        /// Conflicting kind of the newly added Service.
         added_kind: ServiceKind,
     },
 }
 
-/// Clears its area key on drop; the children clear their own keys through their
-/// own `Drop` impls.
+/// One Area in an emulated System's logical hierarchy.
+///
+/// The Area owns a Node Code range and an ordered collection of child Areas and
+/// Services. Its DES key is cleared on drop; descendants clear their own keys.
 #[derive(ZeroizeOnDrop)]
 pub struct EmulatedArea {
     #[zeroize(skip)]
@@ -97,6 +145,10 @@ pub struct EmulatedArea {
 }
 
 impl EmulatedArea {
+    /// Creates an empty Area with key version `0000h` and an all-zero DES key.
+    ///
+    /// Area 0 must end at `FFFEh`; all other ranges and Area Attributes are also
+    /// validated.
     pub fn new(area_code: u16, end_service_code: u16) -> Result<Self, EmulatorConfigError> {
         validate_area_range(area_code, end_service_code)?;
         Ok(Self {
@@ -108,6 +160,7 @@ impl EmulatedArea {
         })
     }
 
+    /// Creates an empty Area with an explicit two-byte key version.
     pub fn with_key_version(
         area_code: u16,
         end_service_code: u16,
@@ -123,6 +176,7 @@ impl EmulatedArea {
         })
     }
 
+    /// Alias of [`new`](Self::new) retained for builder readability.
     pub fn with_end_service_code(
         area_code: u16,
         end_service_code: u16,
@@ -130,6 +184,7 @@ impl EmulatedArea {
         Self::new(area_code, end_service_code)
     }
 
+    /// Returns the Area Code, including its six-bit Area Attribute.
     pub fn area_code(&self) -> u16 {
         self.area_code
     }
@@ -145,18 +200,22 @@ impl EmulatedArea {
         self.attribute() == AREA_ATTRIBUTE_CHILD_AREAS_ALLOWED
     }
 
+    /// Returns the inclusive end of this Area's Node Code range.
     pub fn end_service_code(&self) -> u16 {
         self.end_service_code
     }
 
+    /// Returns the two-byte DES Area key version.
     pub fn key_version(&self) -> u16 {
         self.key_version
     }
 
+    /// Borrows the eight-byte DES Area key.
     pub fn key(&self) -> &[u8; 8] {
         &self.key
     }
 
+    /// Replaces the DES Area key, zeroizing the previous bytes.
     pub fn set_key(&mut self, key: [u8; 8]) -> &mut Self {
         // Overwrite rather than replace, so the previous key does not survive.
         self.key.zeroize();
@@ -164,6 +223,7 @@ impl EmulatedArea {
         self
     }
 
+    /// Adds a direct child Service after validating its code and attribute.
     pub fn add_service(
         &mut self,
         service: EmulatedService,
@@ -173,6 +233,7 @@ impl EmulatedArea {
         Ok(self)
     }
 
+    /// Adds a direct child Area after validating attributes and range containment.
     pub fn add_area(&mut self, area: EmulatedArea) -> Result<&mut Self, EmulatorConfigError> {
         self.validate_child_area(&area)?;
         self.children.push(AreaChild::Area(area));
@@ -371,7 +432,11 @@ impl Default for LimitPurseProperty {
     }
 }
 
-/// Clears its service key on drop.
+/// One emulated Service and its shared 16-byte Block storage.
+///
+/// Services with the same ten-bit Service Number become overlap Services and
+/// share their Blocks after being added to an [`EmulatedSystem`](super::EmulatedSystem).
+/// The DES Service key is cleared on drop.
 #[derive(ZeroizeOnDrop)]
 pub struct EmulatedService {
     #[zeroize(skip)]
@@ -394,6 +459,7 @@ impl EmulatedService {
         Self::with_key_version(service_code, 0x0000, block_count)
     }
 
+    /// Creates zero-filled Block storage with an explicit key version.
     pub fn with_key_version(
         service_code: ServiceCode,
         key_version: u16,
@@ -412,6 +478,7 @@ impl EmulatedService {
         }
     }
 
+    /// Creates a Service from caller-supplied Block data and key version.
     pub fn with_blocks(
         service_code: ServiceCode,
         key_version: u16,
@@ -426,6 +493,7 @@ impl EmulatedService {
         }
     }
 
+    /// Returns the Service Code, including its access attribute.
     pub fn service_code(&self) -> ServiceCode {
         self.service_code
     }
@@ -447,14 +515,17 @@ impl EmulatedService {
         self.limit_purse
     }
 
+    /// Returns the two-byte DES Service key version.
     pub fn key_version(&self) -> u16 {
         self.key_version
     }
 
+    /// Borrows the eight-byte DES Service key.
     pub fn key(&self) -> &[u8; 8] {
         &self.key
     }
 
+    /// Replaces the DES Service key, zeroizing the previous bytes.
     pub fn set_key(&mut self, key: [u8; 8]) -> &mut Self {
         // Overwrite rather than replace, so the previous key does not survive.
         self.key.zeroize();
@@ -462,20 +533,32 @@ impl EmulatedService {
         self
     }
 
+    /// Immutably borrows all 16-byte Blocks owned or shared by this Service.
+    ///
+    /// The returned runtime borrow remains active until the [`Ref`] is dropped.
     pub fn blocks(&self) -> Ref<'_, [[u8; BLOCK_SIZE]]> {
         Ref::map(self.blocks.borrow(), |blocks| blocks.as_slice())
     }
 
+    /// Mutably borrows all 16-byte Blocks owned or shared by this Service.
+    ///
+    /// Overlap Services observe these mutations through their shared storage.
+    /// The returned runtime borrow remains active until the [`RefMut`] is dropped.
     pub fn blocks_mut(&self) -> RefMut<'_, [[u8; BLOCK_SIZE]]> {
         RefMut::map(self.blocks.borrow_mut(), |blocks| blocks.as_mut_slice())
     }
 }
 
+/// One Area or Service entry in the emulator's Search Service Code directory.
 #[derive(Clone, Copy, Debug)]
 pub enum DirectoryEntry {
+    /// A Service entry.
     Service(ServiceCode),
+    /// An Area entry and the inclusive end of its Node Code range.
     Area {
+        /// Area Code, including its Area Attribute.
         area_code: u16,
+        /// Inclusive last Service Code managed by the Area.
         end_service_code: u16,
     },
 }

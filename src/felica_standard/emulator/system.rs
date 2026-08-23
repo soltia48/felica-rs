@@ -154,6 +154,10 @@ pub struct EmulatedSystem {
 }
 
 impl EmulatedSystem {
+    /// Creates a Mode 0 System with an empty Area 0 hierarchy.
+    ///
+    /// The System and Area 0 keys and key versions initially contain zeros.
+    /// `idm` and `pmm` are the eight-byte values returned by Polling.
     pub fn new(system_code: u16, idm: [u8; 8], pmm: [u8; 8]) -> Result<Self, EmulatorConfigError> {
         let root_area = EmulatedArea::new(ROOT_AREA_CODE, ROOT_END_SERVICE_CODE)?;
         Ok(Self {
@@ -172,39 +176,52 @@ impl EmulatedSystem {
         })
     }
 
+    /// Returns this System's two-byte System Code.
     pub fn system_code(&self) -> u16 {
         self.system_code
     }
 
+    /// Returns the two-byte legacy DES System key version.
     pub fn system_key_version(&self) -> u16 {
         self.system_key_version
     }
 
+    /// Borrows the eight-byte legacy DES System key.
     pub fn system_key(&self) -> &[u8; 8] {
         &self.system_key
     }
 
+    /// Returns the eight-byte Manufacture ID (`IDm`).
     pub fn idm(&self) -> &[u8; 8] {
         &self.idm
     }
 
+    /// Returns the eight-byte Manufacture Parameter (`PMm`).
     pub fn pmm(&self) -> &[u8; 8] {
         &self.pmm
     }
 
+    /// Borrows Area 0, the root of the System's logical hierarchy.
     pub fn root_area(&self) -> &EmulatedArea {
         &self.root_area
     }
 
+    /// Mutably borrows Area 0 for direct hierarchy construction.
+    ///
+    /// Prefer [`add_area`](Self::add_area) and [`add_service`](Self::add_service)
+    /// when overlap Services may be present, because those helpers synchronize
+    /// shared Block storage after insertion.
     pub fn root_area_mut(&mut self) -> &mut EmulatedArea {
         &mut self.root_area
     }
 
+    /// Sets the two-byte legacy DES System key version.
     pub fn set_system_key_version(&mut self, version: u16) -> &mut Self {
         self.system_key_version = version;
         self
     }
 
+    /// Replaces the legacy DES System key, zeroizing the previous bytes.
     pub fn set_system_key(&mut self, system_key: [u8; 8]) -> &mut Self {
         // Overwrite rather than replace, so the key this system was holding does
         // not survive in the old bytes.
@@ -213,12 +230,15 @@ impl EmulatedSystem {
         self
     }
 
+    /// Sets the Issue ID (`IDi`) and Issue Parameter (`PMi`) returned after
+    /// successful mutual authentication.
     pub fn set_idi_pmi(&mut self, idi: [u8; 8], pmi: [u8; 8]) -> &mut Self {
         self.idi = idi;
         self.pmi = pmi;
         self
     }
 
+    /// Descriptive alias for [`set_idi_pmi`](Self::set_idi_pmi).
     pub fn set_issue_information(
         &mut self,
         issue_id: [u8; 8],
@@ -227,6 +247,7 @@ impl EmulatedSystem {
         self.set_idi_pmi(issue_id, issue_parameter)
     }
 
+    /// Adds a Service directly below Area 0 and synchronizes overlap storage.
     pub fn add_service(
         &mut self,
         service: EmulatedService,
@@ -236,12 +257,14 @@ impl EmulatedSystem {
         Ok(self)
     }
 
+    /// Adds an Area directly below Area 0 and synchronizes overlap storage.
     pub fn add_area(&mut self, area: EmulatedArea) -> Result<&mut Self, EmulatorConfigError> {
         self.root_area.add_area(area)?;
         self.sync_overlapping_services()?;
         Ok(self)
     }
 
+    /// Flattens the Area/Service hierarchy into Search Service Code order.
     pub fn directory(&self) -> Vec<DirectoryEntry> {
         let mut entries = Vec::new();
         self.root_area.append_directory_entries(&mut entries);
@@ -253,6 +276,7 @@ impl EmulatedSystem {
         self.communication_performance
     }
 
+    /// Sets the two-byte capability data returned for Polling request code `02h`.
     pub fn set_communication_performance(
         &mut self,
         performance: CommunicationPerformance,

@@ -2,6 +2,11 @@ use super::*;
 use std::ops::RangeInclusive;
 
 impl FelicaStandardCommand {
+    /// Parses a complete FeliCa frame containing a LEN byte and command packet.
+    ///
+    /// Returns [`FelicaStandardError::Protocol`] if the frame is empty, its LEN
+    /// byte disagrees with the slice length, the command code is unsupported,
+    /// or any field/count is malformed.
     pub fn parse_frame(frame: &[u8]) -> Result<Self, FelicaStandardError> {
         if frame.is_empty() {
             return Err(FelicaStandardError::Protocol("empty Felica frame".into()));
@@ -15,6 +20,10 @@ impl FelicaStandardCommand {
         Self::parse_payload(&frame[1..])
     }
 
+    /// Parses command packet data beginning with the command-code byte.
+    ///
+    /// Unlike [`parse_frame`](Self::parse_frame), `payload` must not contain the
+    /// leading FeliCa LEN byte.
     pub fn parse_payload(payload: &[u8]) -> Result<Self, FelicaStandardError> {
         let (&command, body) = payload
             .split_first()

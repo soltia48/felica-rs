@@ -9,6 +9,11 @@ use crate::felica_standard::payload::{
 const RESULT: &str = "result";
 
 impl FelicaStandardResponse {
+    /// Serializes the response packet data without a leading LEN byte.
+    ///
+    /// For secure response variants this returns the plaintext inner payload
+    /// that must still be encrypted and authenticated by the appropriate secure
+    /// session.
     pub fn to_payload(&self) -> Result<Vec<u8>, FelicaStandardError> {
         match self {
             FelicaStandardResponse::Polling { idm, pmm, optional } => {
@@ -402,6 +407,10 @@ impl FelicaStandardResponse {
         }
     }
 
+    /// Serializes a non-secure response as a complete frame with a LEN byte.
+    ///
+    /// Secure response variants are rejected because their inner payload must
+    /// be encrypted before it can be put on the wire.
     pub fn to_frame(&self) -> Result<Vec<u8>, FelicaStandardError> {
         match self {
             FelicaStandardResponse::Read { .. }
@@ -421,6 +430,10 @@ impl FelicaStandardResponse {
         }
     }
 
+    /// Serializes a secure response's plaintext inner payload.
+    ///
+    /// The returned bytes begin with Status Flag 1 and Status Flag 2 and omit
+    /// the outer response code, transaction header, encryption, MAC, and LEN.
     pub fn to_secure_payload(&self) -> Result<Vec<u8>, FelicaStandardError> {
         match self {
             FelicaStandardResponse::Read {

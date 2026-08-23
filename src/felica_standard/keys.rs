@@ -88,7 +88,10 @@ pub enum KeyError {
     Io(#[from] std::io::Error),
     /// A node required for the derivation has no key in the store.
     #[error("missing key for node {node:#06X}")]
-    MissingKey { node: u16 },
+    MissingKey {
+        /// Node Code whose key was required.
+        node: u16,
+    },
     /// The nodes in the chain do not all use the same scheme.
     #[error("cannot mix DES and AES-128 keys in one authentication chain")]
     MixedAlgorithm,
@@ -123,7 +126,9 @@ pub struct KeyRecordWarning {
 /// Result of loading a [`KeyStore`]: the store plus any per-line warnings.
 #[derive(Debug)]
 pub struct KeyStoreLoad {
+    /// Successfully parsed key records.
     pub store: KeyStore,
+    /// Non-fatal diagnostics for lines that were skipped.
     pub warnings: Vec<KeyRecordWarning>,
 }
 
@@ -446,7 +451,9 @@ pub enum DerivedAuthKeys {
         /// Services to pass as `services` (always non-empty for DES).
         #[zeroize(skip)]
         services: Vec<ServiceCode>,
+        /// Derived group Service key.
         group_service_key: [u8; DES_KEY_LEN],
+        /// Derived user Service key.
         user_service_key: [u8; DES_KEY_LEN],
     },
     /// AES-128 keys for [`FelicaStandard::mutual_authentication_v2`].
@@ -456,7 +463,9 @@ pub enum DerivedAuthKeys {
         /// Node codes to pass as `nodes`.
         #[zeroize(skip)]
         nodes: Vec<u16>,
+        /// Derived AES group key.
         group_key: [u8; AES_KEY_LEN],
+        /// AES individual key paired with the group key.
         individual_key: [u8; AES_KEY_LEN],
     },
 }

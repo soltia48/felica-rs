@@ -1,7 +1,10 @@
-//! FeliCa Standard protocol implementation.
+//! FeliCa Standard card protocol.
 //!
-//! This module provides a complete implementation of the FeliCa Standard protocol
-//! for communicating with FeliCa cards (Type 3 NFC tags).
+//! This module implements the application-layer packet format, file-system
+//! addressing, response-time calculations, mutual authentication, secure
+//! messaging, and an in-process card emulator for FeliCa Standard cards over
+//! NFC-F. The same polling and transport layer underpins NFC Forum Type 3 Tags.
+//! Reader-specific RF framing remains behind the [`FelicaDriver`] trait.
 //!
 //! ## Key Types
 //!
@@ -9,6 +12,25 @@
 //! - [`FelicaDriver`] - Trait implemented by NFC reader drivers
 //! - [`ServiceCode`] - FeliCa service code representation
 //! - [`BlockListElement`] - Block list element for read/write operations
+//! - [`AuthenticatedContext`] - State of a DES or AES secure session
+//! - [`FelicaStandardCommand`] and [`FelicaStandardResponse`] - low-level packet
+//!   representations for relays, emulators, and protocol tooling
+//!
+//! ## Card model
+//!
+//! A card can contain several **systems**, each identified by a system code. A
+//! system contains a hierarchy of **areas** and **services**, and every service
+//! owns one or more 16-byte blocks. [`ServiceCode`] decodes the service number,
+//! service kind, access permissions, and authentication requirement.
+//! [`BlockListElement`] then selects a block through the zero-based position of
+//! its service in the command's service-code list.
+//!
+//! Commands for authentication-free services use
+//! [`FelicaStandard::read_without_encryption`] and
+//! [`FelicaStandard::write_without_encryption`]. Services whose attributes
+//! require authentication are accessed through a DES or AES session established
+//! by [`FelicaStandard::mutual_authentication`] or
+//! [`FelicaStandard::mutual_authentication_v2`].
 //!
 //! ## Example
 //!
@@ -26,6 +48,15 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Specification references
+//!
+//! Terminology, field encodings, limits, and section references in this module
+//! follow *FeliCa Card User's Manual, Excerpted Edition*, version 2.31
+//! (M617-E02-31 / M617-J02-31). Details not present in that excerpt are described
+//! from the accompanying unofficial users-manual project. Product-dependent
+//! limits and optional commands must still be confirmed against the manual for
+//! the particular card product.
 
 mod api;
 mod command;

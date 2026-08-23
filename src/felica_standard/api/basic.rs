@@ -1,6 +1,13 @@
 use super::*;
 
 impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
+    /// Checks whether Nodes exist and returns their two-byte key versions.
+    ///
+    /// The result contains one entry per requested code, in request order;
+    /// `FFFFh` is the card's no-such-node marker. This original command is
+    /// intended for DES-capable cards; use
+    /// [`request_service_v2`](Self::request_service_v2) when the card exposes
+    /// AES/DES cryptographic-system information.
     pub fn request_service(
         &mut self,
         service_codes: &[ServiceCode],
@@ -28,6 +35,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the card's current mode byte.
+    ///
+    /// Cards start in Mode 0, enter Mode 1 after Authentication1, and enter
+    /// Mode 2 after Authentication2 completes mutual authentication. Issuing
+    /// commands can move a supported card to Mode 3.
     pub fn request_response(&mut self) -> Result<u8, FelicaStandardError> {
         let idm = self.idm_bytes()?;
 
@@ -45,6 +57,12 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Reads 16-byte Blocks from authentication-free Services.
+    ///
+    /// Each Block List Element selects a Service by its zero-based position in
+    /// `service_codes`; returned Blocks preserve Block List order. The command
+    /// does not encrypt its payload despite its name and must only address
+    /// Services whose attribute permits access without authentication.
     pub fn read_without_encryption(
         &mut self,
         service_codes: &[ServiceCode],
@@ -101,6 +119,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Writes 16-byte Blocks to authentication-free Services.
+    ///
+    /// `data` is the concatenation of exactly one 16-byte Block for every Block
+    /// List Element. Access mode `001b` requests purse cashback; ordinary writes
+    /// use `000b`.
     pub fn write_without_encryption(
         &mut self,
         service_codes: &[ServiceCode],
@@ -146,6 +169,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the Area or Service entry at a zero-based system-list index.
+    ///
+    /// `None` is the protocol's end-of-list marker. Repeated calls beginning at
+    /// index zero can therefore enumerate the selected System's node structure.
     pub fn search_service_code(
         &mut self,
         service_index: u16,
@@ -165,6 +192,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns every System Code registered on the currently selected card.
     pub fn request_system_code(&mut self) -> Result<Vec<u16>, FelicaStandardError> {
         let idm = self.idm_bytes()?;
         let timeout_ms = self.polling_result.request_system_code_timeout_ms();
@@ -181,6 +209,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the assigned Block count of each requested Node.
+    ///
+    /// Counts retain the order of `node_codes`. A Node may be a System, Area, or
+    /// Service supported by the card product.
     pub fn request_block_information(
         &mut self,
         node_codes: &[u16],
@@ -209,6 +241,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns assigned and free Block counts for each requested Node.
+    ///
+    /// Both vectors retain `node_codes` order and have the same length on a
+    /// valid response.
     pub fn request_block_information_ex(
         &mut self,
         node_codes: &[u16],
@@ -256,6 +292,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns one page of child Area and Service codes under `parent_node_code`.
+    ///
+    /// `index` is the page/start position defined by the command. Inspect
+    /// [`RequestCodeListResult::continue_flag`] to determine whether another
+    /// request is necessary.
     pub fn request_code_list(
         &mut self,
         parent_node_code: u16,
@@ -285,6 +326,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Selects the card's SRM encryption format and Node Code width.
+    ///
+    /// This optional command changes communication parameters for later
+    /// commands; support and permitted transitions are product-dependent.
     pub fn set_parameter(
         &mut self,
         encryption_type: SetParameterEncryptionType,
@@ -316,6 +361,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns mobile-FeliCa container format/carrier and handset-model data.
+    ///
+    /// This optional command is only implemented by applicable mobile FeliCa
+    /// products.
     pub fn get_container_issue_information(
         &mut self,
     ) -> Result<ContainerInformation, FelicaStandardError> {
@@ -339,6 +388,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the raw value of a product-dependent mobile-FeliCa property.
     pub fn get_container_property(
         &mut self,
         property: ContainerProperty,
@@ -357,6 +407,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the eight-byte Container IDm from a mobile FeliCa product.
+    ///
+    /// Unlike most commands, Get Container ID is not addressed by the currently
+    /// selected card IDm.
     pub fn get_container_id(&mut self) -> Result<[u8; IDM_LEN], FelicaStandardError> {
         let timeout_ms = self.polling_result.get_container_id_timeout_ms();
 
@@ -372,6 +426,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns product-defined configuration state for the selected System.
     pub fn get_system_status(&mut self) -> Result<GetSystemStatusResult, FelicaStandardError> {
         let idm = self.idm_bytes()?;
         let timeout_ms = self.polling_result.get_system_status_timeout_ms();
@@ -396,6 +451,9 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the card's product-information bytes.
+    ///
+    /// The field layout is product-dependent and is therefore kept raw.
     pub fn request_product_information(&mut self) -> Result<Vec<u8>, FelicaStandardError> {
         let idm = self.idm_bytes()?;
         let timeout_ms = self.polling_result.request_product_information_timeout_ms();
@@ -422,6 +480,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the basic and optional-feature versions implemented by the card.
+    ///
+    /// `None` is preserved for a successful response that omits the optional
+    /// version payload.
     pub fn request_specification_version(
         &mut self,
     ) -> Result<Option<SpecificationVersion>, FelicaStandardError> {
@@ -454,6 +516,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the card to Mode 0.
+    ///
+    /// Any previously authenticated context no longer describes the card's
+    /// state; call [`clear_authenticated_context`](Self::clear_authenticated_context)
+    /// before starting another secure exchange.
     pub fn reset_mode(&mut self) -> Result<(), FelicaStandardError> {
         let idm = self.idm_bytes()?;
         let timeout_ms = self.polling_result.reset_mode_timeout_ms();
@@ -477,6 +544,7 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns the product-dependent two-byte information field for an Area.
     pub fn get_area_information(
         &mut self,
         node_code: u16,
@@ -501,6 +569,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Returns one property value for each requested Node, in request order.
+    ///
+    /// Supported property groups are the limited-purse configuration and the
+    /// communication-with-MAC enable flag. This command is optional and only
+    /// available on applicable AES or AES/DES products.
     pub fn get_node_property(
         &mut self,
         node_property_type: NodePropertyType,

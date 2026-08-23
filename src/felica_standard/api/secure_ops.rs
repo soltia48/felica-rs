@@ -7,6 +7,13 @@ use zeroize::Zeroize;
 type Authentication1V2Challenges = ([u8; 16], [u8; 16], [u8; 4]);
 
 impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
+    /// Performs the first, card-authentication half of legacy DES mutual
+    /// authentication.
+    ///
+    /// This low-level method sends the caller-provided encrypted challenge and
+    /// returns `(challenge_1b, challenge_2a)` without verifying or decrypting
+    /// them. Prefer [`mutual_authentication`](Self::mutual_authentication) unless
+    /// challenge processing is deliberately performed elsewhere.
     pub fn authentication1(
         &mut self,
         areas: &[u16],
@@ -47,6 +54,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Performs the second, reader-authentication half of legacy DES mutual
+    /// authentication.
+    ///
+    /// The returned encrypted payload must be verified and decrypted with the
+    /// session material established during Authentication1.
     pub fn authentication2(
         &mut self,
         challenge_2b: &[u8; 8],
@@ -69,6 +81,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Completes legacy DES mutual authentication and installs a secure session.
+    ///
+    /// `areas` and `services` define the Node key chain used to derive
+    /// `group_service_key` and `user_service_key`. Authentication-free Services
+    /// do not contribute their key. On success the returned value contains IDi
+    /// and PMi, and subsequent [`read`](Self::read) / [`write`](Self::write)
+    /// calls use the retained DES session automatically.
     pub fn mutual_authentication(
         &mut self,
         areas: &[u16],
@@ -146,18 +165,27 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         })
     }
 
+    /// Borrows the current secure-session state, if authentication has completed.
     pub fn authenticated_context(&self) -> Option<&AuthenticatedContext> {
         self.authenticated_context.as_ref()
     }
 
+    /// Replaces the secure-session state used by subsequent secure commands.
+    ///
+    /// This supports relays that authenticate in another process. The caller
+    /// must ensure the transaction number, transaction ID, credentials, scheme,
+    /// and Node order describe the same live card session; inconsistent state
+    /// will fail MAC or transaction-number validation.
     pub fn set_authenticated_context(&mut self, context: AuthenticatedContext) {
         self.authenticated_context = Some(context);
     }
 
+    /// Drops and zeroizes the retained secure-session credentials.
     pub fn clear_authenticated_context(&mut self) {
         self.authenticated_context = None;
     }
 
+    /// Returns the active secure-messaging scheme, or `None` before authentication.
     pub fn authenticated_scheme(&self) -> Option<SecureSessionScheme> {
         self.authenticated_context.as_ref().map(|ctx| ctx.scheme())
     }
@@ -252,6 +280,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         Ok(decrypted_response.payload)
     }
 
+    /// Reads authenticated Services through the active legacy DES session.
+    ///
+    /// Block List service indexes refer to the Service list supplied during
+    /// DES Authentication1. Returned 16-byte Blocks retain Block List order.
     pub fn read(
         &mut self,
         block_list: &[BlockListElement],
@@ -300,6 +332,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Reads authenticated Services through the active AES-128 session.
+    ///
+    /// Block List service indexes refer to the Node list supplied during
+    /// Authentication1 v2. Returned 16-byte Blocks retain Block List order.
     pub fn read_v2(
         &mut self,
         block_list: &[BlockListElement],
@@ -347,6 +383,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Writes authenticated Services through the active legacy DES session.
+    ///
+    /// `data` must contain one contiguous 16-byte Block per Block List Element.
+    /// This command also supports DES key-change access mode `100b`; the safer
+    /// [`change_keys`](Self::change_keys) helper constructs those packages.
     pub fn write(
         &mut self,
         block_list: &[BlockListElement],
@@ -378,6 +419,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Writes authenticated Services through the active AES-128 session.
+    ///
+    /// `data` must contain one contiguous 16-byte Block per Block List Element.
+    /// AES Write v2 does not permit key-change access mode `100b`.
     pub fn write_v2(
         &mut self,
         block_list: &[BlockListElement],
@@ -475,6 +520,11 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         self.write(&block_list, &data)
     }
 
+    /// Returns AES/DES-aware key-version information for requested Nodes.
+    ///
+    /// Entries retain request order. The response's Cryptographic System
+    /// Identifier determines whether each entry contains one version or separate
+    /// AES and DES versions; `FFFFh` is normalized by the entry accessors.
     pub fn request_service_v2(
         &mut self,
         service_codes: &[ServiceCode],
@@ -517,6 +567,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Performs the first, card-authentication half of AES-128 mutual
+    /// authentication.
+    ///
+    /// This low-level method returns the encrypted challenges and four-byte
+    /// challenge parameter without interpreting them. Prefer
+    /// [`mutual_authentication_v2`](Self::mutual_authentication_v2) for local key
+    /// handling.
     pub fn authentication1_v2(
         &mut self,
         operation_parameter: u8,
@@ -552,6 +609,8 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Performs the second, reader-authentication half of AES-128 mutual
+    /// authentication and returns the still-encrypted response container.
     pub fn authentication2_v2(
         &mut self,
         challenge_2b: &[u8; 16],
@@ -574,6 +633,13 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Completes AES-128 mutual authentication and installs a secure session.
+    ///
+    /// `nodes` is the ordered Node Code List used by later Block List Elements.
+    /// `group_key` and `individual_key` are the two AES keys derived for that
+    /// list. On success the returned value contains IDi and PMi; subsequent
+    /// [`read_v2`](Self::read_v2) / [`write_v2`](Self::write_v2) calls use the
+    /// retained AES encryption and MAC keys automatically.
     pub fn mutual_authentication_v2(
         &mut self,
         operation_parameter: u8,
@@ -831,6 +897,10 @@ impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
         }
     }
 
+    /// Commits the results of preceding DES issuing commands to the System Block.
+    ///
+    /// This is the final step of a supported issuance sequence and requires the
+    /// applicable authenticated issuing mode.
     pub fn change_system_block(&mut self) -> Result<(), FelicaStandardError> {
         let timeout_ms = self.polling_result.registration_timeout_ms();
         let response = self.execute_command(

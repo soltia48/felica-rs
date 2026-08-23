@@ -115,14 +115,24 @@ impl ServiceAttribute {
     }
 }
 
+/// A 16-bit Service Code: ten service-number bits followed by six attribute bits.
+///
+/// Service codes are serialized little-endian in command packets. The raw tuple
+/// field is public for compatibility; [`new`](Self::new) and [`raw`](Self::raw)
+/// make intent clearer at API boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ServiceCode(pub u16);
+pub struct ServiceCode(
+    /// The unencoded 16-bit Service Code value in host byte order.
+    pub u16,
+);
 
 impl ServiceCode {
+    /// Wraps a raw 16-bit Service Code.
     pub fn new(raw: u16) -> Self {
         ServiceCode(raw)
     }
 
+    /// Returns the complete 16-bit Service Code.
     pub fn raw(&self) -> u16 {
         self.0
     }
@@ -149,6 +159,11 @@ impl ServiceCode {
         self.attribute().map(ServiceAttribute::kind)
     }
 
+    /// Returns a concise description of the service kind, permissions, and
+    /// authentication requirement.
+    ///
+    /// Returns `None` when the attribute bits are not assigned by the service
+    /// attribute table.
     pub fn attributes_description(&self) -> Option<String> {
         let suffix = if self.requires_key() {
             "with key"
@@ -206,6 +221,7 @@ pub enum StatusFlag1 {
 }
 
 impl StatusFlag1 {
+    /// Decodes the raw Status Flag 1 byte without discarding an error position.
     pub fn from_byte(value: u8) -> Self {
         match value {
             0x00 => StatusFlag1::NormalCompletion,
@@ -254,6 +270,8 @@ impl StatusFlag1 {
         positions
     }
 
+    /// Returns a diagnostic description of the completion state and, where
+    /// applicable, both permitted interpretations of the error-position byte.
     pub fn description(&self) -> String {
         match self {
             StatusFlag1::NormalCompletion => "normal completion".to_string(),
@@ -278,37 +296,71 @@ impl StatusFlag1 {
     }
 }
 
+/// Status flag 2 (§4.5.2): the reason a command failed, or a product-dependent
+/// warning accompanying normal completion.
+///
+/// Status flag 1 determines command success. In particular, `71h` can be paired
+/// with normal completion after a write has already occurred, so callers must
+/// not decide success from this flag alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusFlag2 {
+    /// `00h` — no additional error detail.
     NormalCompletion,
+    /// `01h` — decrement would underflow, or cashback would overflow.
     PurseDecrementUnderflowOrCashbackOverflow,
+    /// `02h` — cashback exceeds the currently stored purse value.
     CashbackExceedsStoredValue,
+    /// `03h` — a limited-purse write lies outside its configured range.
     LimitPurseOutOfRange,
+    /// `70h` — card memory error.
     MemoryError,
+    /// `71h` — the product-defined memory rewrite count was exceeded.
     MemoryWriteCountExceeded,
+    /// `A1h` — the command's Service or Node count is outside its allowed range.
     ServiceOrNodeCountOutOfRange,
+    /// `A2h` — the requested Block count is outside the product-defined range.
     BlockCountOutOfRange,
+    /// `A3h` — a Block List Element refers past the Service Code List.
     ServiceListIndexOutOfRange,
+    /// `A4h` — an Area Code or Service Code has an invalid attribute.
     AreaOrServiceAttributeMismatch,
+    /// `A5h` — access is not permitted or a command success condition is unmet.
     AccessDeniedOrParameterMismatch,
+    /// `A6h` — a Block List or Node Code List refers to a missing node.
     ReferencedNodeDoesNotExist,
+    /// `A7h` — a Block List Element uses an invalid access mode.
     InvalidAccessMode,
+    /// `A8h` — a block number exceeds the blocks allocated to its Service.
     BlockNumberOutOfRange,
+    /// `A9h` — writing during an issuing command failed.
     IssuingWriteFailure,
+    /// `AAh` — a DES key-change operation failed.
     KeyChangeFailed,
+    /// `ABh` — an issuing package has invalid parity or MAC data.
     PackageParityOrMacInvalid,
+    /// `ACh` — an issuing command contains an invalid parameter.
     InvalidParameters,
+    /// `ADh` — the Service being registered already exists.
     ServiceAlreadyExists,
+    /// `AEh` — an issuing command contains an invalid System Code.
     InvalidSystemCode,
+    /// `AFh` — one operation writes more cyclic blocks than the Service owns.
     CyclicServiceWriteOverflow,
+    /// `C0h` — an issuing package has an invalid package identifier.
     PackageIdentifierInvalid,
+    /// `C1h` — parameters inside and outside an issuing package disagree.
     PackageParameterMismatch,
+    /// `C2h` — issuing commands are disabled on the card.
     IssuingCommandDisabled,
+    /// `C3h` — a command specifies a node with the wrong node attribute.
     NodeAttributeMismatch,
+    /// A value not assigned by the documented Status Flag 2 table.
     Unknown(u8),
 }
 
 impl StatusFlag2 {
+    /// Decodes a raw Status Flag 2 byte, retaining unassigned values as
+    /// [`Unknown`](Self::Unknown).
     pub fn from_byte(value: u8) -> Self {
         match value {
             0x00 => StatusFlag2::NormalCompletion,
@@ -340,6 +392,7 @@ impl StatusFlag2 {
         }
     }
 
+    /// Returns a concise diagnostic description of this status reason.
     pub fn description(&self) -> &'static str {
         match self {
             StatusFlag2::NormalCompletion => "no additional error detail",
@@ -380,20 +433,38 @@ impl StatusFlag2 {
     }
 }
 
+/// Decodes and formats a pair of raw FeliCa status flags.
+///
+/// The result is intended for logs and error messages. For programmatic
+/// inspection use [`StatusFlag1::from_byte`] and [`StatusFlag2::from_byte`].
 pub fn status_flag_description(sf1: u8, sf2: u8) -> String {
     let sf1_desc = StatusFlag1::from_byte(sf1).description();
     let sf2_desc = StatusFlag2::from_byte(sf2).description();
     format!("SF1: {sf1_desc}; SF2: {sf2_desc}")
 }
 
+/// Identifies one Service and Block in a read or write command (§4.2.1).
+///
+/// Values below `0x0100` serialize in the compact two-byte form; larger block
+/// numbers use the three-byte form. Both encodings reserve four bits for the
+/// zero-based Service Code List position and three bits for the access mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockListElement {
+    /// Block number, or the new key version when `access_mode == 0b100`.
     pub block_number_or_key_version: u16,
+    /// Zero-based position in the command's Service Code List, in `0..=15`.
     pub service_code_list_index: u8,
+    /// Three-bit access mode: `000b` normal, `001b` purse cashback, or `100b`
+    /// DES key change.
     pub access_mode: u8,
 }
 
 impl BlockListElement {
+    /// Creates a Block List Element.
+    ///
+    /// Construction performs no validation. Serialization masks
+    /// `service_code_list_index` to four bits and `access_mode` to three bits;
+    /// callers should use only the access modes defined above.
     pub fn new(
         block_number_or_key_version: u16,
         service_code_list_index: u8,
@@ -422,22 +493,31 @@ impl BlockListElement {
     }
 }
 
+/// One entry returned by Search Service Code (§4.4.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchServiceCodeResult {
+    /// A Service Code at the requested index.
     Service(ServiceCode),
+    /// An Area Code together with the last Service Code covered by that Area.
     Area {
+        /// The Area Code, including its Area Attribute bits.
         area_code: u16,
+        /// The inclusive upper bound of the Area's Service Code range.
         end_service_code: u16,
     },
 }
 
+/// An Area Code and the inclusive end of the code range managed by the Area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AreaCodeRange {
+    /// The Area Code, including Area Attribute bits.
     pub area_code: u16,
+    /// The inclusive last Service Code belonging to the Area.
     pub end_service_code: u16,
 }
 
 impl AreaCodeRange {
+    /// Creates an Area range from its first and last encoded node values.
     pub fn new(area_code: u16, end_service_code: u16) -> Self {
         Self {
             area_code,
@@ -446,13 +526,17 @@ impl AreaCodeRange {
     }
 }
 
+/// The 16-byte container issue information returned by mobile FeliCa products.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContainerInformation {
+    /// Five bytes containing format-version and carrier information.
     pub format_version_carrier_information: [u8; 5],
+    /// Eleven bytes containing product-specific mobile-phone model information.
     pub mobile_phone_model_information: [u8; 11],
 }
 
 impl ContainerInformation {
+    /// Creates container information from its two on-wire fields.
     pub fn new(
         format_version_carrier_information: [u8; 5],
         mobile_phone_model_information: [u8; 11],
@@ -464,14 +548,19 @@ impl ContainerInformation {
     }
 }
 
+/// Property index for the product-dependent Get Container Property command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerProperty {
+    /// Property index `0000h`.
     Property1,
+    /// Property index `0001h`.
     Property2,
+    /// An index not given a symbolic name by this crate.
     Unknown(u16),
 }
 
 impl ContainerProperty {
+    /// Returns the 16-bit property index placed in the command.
     pub fn index(self) -> u16 {
         match self {
             ContainerProperty::Property1 => 0x0000,
@@ -493,9 +582,12 @@ impl ContainerProperty {
     }
 }
 
+/// Property group requested by Get Node Property.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodePropertyType {
+    /// Limited-purse enable flag, upper/lower limits, and generation count.
     ValueLimitedPurseService,
+    /// Communication-with-MAC enable flag.
     MacCommunication,
 }
 
@@ -516,20 +608,32 @@ impl NodePropertyType {
     }
 }
 
+/// A decoded property value returned for one Node.
+///
+/// Entries retain the order of the Node Code List supplied to Get Node
+/// Property.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeProperty {
+    /// Limited-purse configuration for a purse Service.
     ValueLimitedPurseService {
+        /// Whether the limited-purse feature is enabled.
         enabled: bool,
+        /// Signed upper bound accepted for the stored purse value.
         upper_limit: i32,
+        /// Signed lower bound accepted for the stored purse value.
         lower_limit: i32,
+        /// Product-defined limited-purse generation number.
         generation_number: u8,
     },
+    /// Communication-with-MAC configuration for a Service.
     MacCommunication {
+        /// Whether communication with MAC is enabled.
         enabled: bool,
     },
 }
 
 impl NodeProperty {
+    /// Returns the property group represented by this value.
     pub fn property_type(&self) -> NodePropertyType {
         match self {
             NodeProperty::ValueLimitedPurseService { .. } => {
@@ -561,9 +665,12 @@ impl NodeProperty {
     }
 }
 
+/// SRM encryption-format selector used by Set Parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetParameterEncryptionType {
+    /// SRM type 1 (`00h`).
     SrmType1,
+    /// SRM type 2 (`01h`).
     SrmType2,
 }
 
@@ -584,9 +691,12 @@ impl SetParameterEncryptionType {
     }
 }
 
+/// Node-code width selected by Set Parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetParameterPacketType {
+    /// Two-byte Node Codes (`00h`).
     NodeCodeSize2,
+    /// Four-byte Node Codes (`01h`).
     NodeCodeSize4,
 }
 
@@ -607,44 +717,64 @@ impl SetParameterPacketType {
     }
 }
 
+/// One page of child Areas and Services returned by Request Code List.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestCodeListResult {
+    /// Whether another request with a later index is needed to continue the list.
     pub continue_flag: bool,
+    /// Area entries contained in this response page.
     pub areas: Vec<AreaCodeRange>,
+    /// Service entries contained in this response page.
     pub services: Vec<ServiceCode>,
 }
 
+/// Assigned and free Block counts returned by Request Block Information Ex.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestBlockInformationExResult {
+    /// Assigned Block count for each requested Node, in request order.
     pub assigned_block_counts: Vec<u16>,
+    /// Free Block count for each requested Node, in request order.
     pub free_block_counts: Vec<u16>,
 }
 
+/// Product-dependent two-byte information returned for an Area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GetAreaInformationResult {
+    /// Echoed Node Code identifying the requested Area.
     pub node_code: u16,
+    /// Raw two-byte Area information field.
     pub data: [u8; 2],
 }
 
+/// Property values returned by Get Node Property.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetNodePropertyResult {
+    /// One decoded property for each requested Node, in request order.
     pub node_properties: Vec<NodeProperty>,
 }
 
+/// System configuration state returned by Get System Status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetSystemStatusResult {
+    /// Product-defined system-status flag.
     pub flag: u8,
+    /// Product-defined status data following the flag.
     pub data: Vec<u8>,
 }
 
+/// A packed FeliCa specification version with three four-bit components.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OptionVersion {
+    /// Major version (`0..=15`).
     pub major: u8,
+    /// Minor version (`0..=15`).
     pub minor: u8,
+    /// Patch version (`0..=15`).
     pub patch: u8,
 }
 
 impl OptionVersion {
+    /// Creates a version, retaining only the low four bits of each component.
     pub fn new(major: u8, minor: u8, patch: u8) -> Self {
         Self {
             major: major & 0x0F,
@@ -669,34 +799,45 @@ impl OptionVersion {
     }
 }
 
+/// Card OS basic and optional-feature versions returned by Request
+/// Specification Version (§4.4.16).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecificationVersion {
+    /// Layout version for the fields that follow; version 2.31 defines `00h`.
     pub format_version: u8,
+    /// Version of the basic FeliCa command set.
     pub basic_version: OptionVersion,
+    /// Optional-feature versions in the specification-defined order.
     pub option_versions: Vec<OptionVersion>,
 }
 
 impl SpecificationVersion {
+    /// Returns option-list entry 0, the DES option version.
     pub fn des_option_version(&self) -> Option<OptionVersion> {
         self.option_versions.first().copied()
     }
 
+    /// Returns option-list entry 1, the special-option version.
     pub fn special_option_version(&self) -> Option<OptionVersion> {
         self.option_versions.get(1).copied()
     }
 
+    /// Returns option-list entry 2, the extended-overlap option version.
     pub fn extended_overlap_option_version(&self) -> Option<OptionVersion> {
         self.option_versions.get(2).copied()
     }
 
+    /// Returns option-list entry 3, the limited-purse option version.
     pub fn value_limited_purse_service_option_version(&self) -> Option<OptionVersion> {
         self.option_versions.get(3).copied()
     }
 
+    /// Returns option-list entry 4, the communication-with-MAC option version.
     pub fn communication_with_mac_option_version(&self) -> Option<OptionVersion> {
         self.option_versions.get(4).copied()
     }
 
+    /// Returns option-list entry 5, the random-ID option version.
     pub fn random_id_option_version(&self) -> Option<OptionVersion> {
         self.option_versions.get(5).copied()
     }
@@ -713,35 +854,49 @@ impl SpecificationVersion {
     }
 }
 
+/// Block data returned by Read Without Encryption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadWithoutEncryptionResult {
+    /// Sixteen-byte blocks in the same order as the request's Block List.
     pub blocks: Vec<[u8; BLOCK_SIZE]>,
 }
 
+/// Block data returned by an authenticated Read or Read v2 command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadResult {
+    /// Sixteen-byte blocks in the same order as the request's Block List.
     pub blocks: Vec<[u8; BLOCK_SIZE]>,
 }
 
+/// Cryptographic capability and key versions returned by Request Service v2.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestServiceV2Result {
+    /// Raw Cryptographic System Identifier reported by the card.
     pub crypto_id: u8,
+    /// Key-version entry for each requested Node, in request order.
     pub key_versions: Vec<RequestServiceV2KeyVersion>,
 }
 
+/// Issuance result returned after registering Issue ID data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterIssueIdResult {
+    /// Number of unallocated Blocks remaining in the System after registration.
     pub remaining_blocks: u16,
 }
 
+/// Issuance result returned after registering a Service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterServiceResult {
+    /// Number of unallocated Blocks remaining in the containing Area.
     pub remaining_blocks: u16,
 }
 
+/// Public issue data returned when mutual authentication completes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MutualAuthenticationResult {
+    /// Eight-byte Issue ID (`IDi`).
     pub issue_id: [u8; 8],
+    /// Eight-byte Issue Parameter (`PMi`).
     pub issue_parameter: [u8; 8],
 }
 
@@ -768,23 +923,38 @@ pub struct ChangeKeyParameters {
     pub new_key_version: u16,
 }
 
+/// Key-version representation selected by the card's Cryptographic System
+/// Identifier in a Request Service v2 response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestServiceV2KeyVersion {
+    /// One key version (AES-only or DES-only card).
     Single(u16),
-    Dual { aes: u16, des: u16 },
+    /// Separate versions for an AES/DES card.
+    Dual {
+        /// AES key version.
+        aes: u16,
+        /// DES key version.
+        des: u16,
+    },
 }
 
 impl RequestServiceV2KeyVersion {
     const NO_KEY_VERSION: u16 = 0xFFFF;
 
+    /// Creates a single-version entry.
     pub fn single(value: u16) -> Self {
         RequestServiceV2KeyVersion::Single(value)
     }
 
+    /// Creates an AES/DES dual-version entry.
     pub fn dual(aes: u16, des: u16) -> Self {
         RequestServiceV2KeyVersion::Dual { aes, des }
     }
 
+    /// Returns the single version, or the AES version of a dual entry.
+    ///
+    /// The protocol sentinel `FFFFh`, meaning that no usable key version is
+    /// present, is normalized to `None`.
     pub fn primary(&self) -> Option<u16> {
         match self {
             RequestServiceV2KeyVersion::Single(value) => Self::normalize_key_version(*value),
@@ -792,6 +962,9 @@ impl RequestServiceV2KeyVersion {
         }
     }
 
+    /// Returns the DES version of a dual entry.
+    ///
+    /// Returns `None` for a single entry and for the `FFFFh` no-key sentinel.
     pub fn secondary(&self) -> Option<u16> {
         match self {
             RequestServiceV2KeyVersion::Single(_) => None,
@@ -858,10 +1031,12 @@ impl ChangeKeyParameters {
         }
     }
 
+    /// Returns the Node Code whose key will be changed.
     pub fn node(&self) -> u16 {
         self.node
     }
 
+    /// Returns the version assigned to the new key.
     pub fn new_key_version(&self) -> u16 {
         self.new_key_version
     }

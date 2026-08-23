@@ -26,7 +26,15 @@ use crate::driver::errors::Result as DriverResult;
 use crate::felica_standard::Type3TagPollingResult;
 use std::convert::TryInto;
 
+/// Minimal reader interface required by the FeliCa Standard protocol layer.
+///
+/// Hardware drivers implement card discovery and raw packet exchange; packet
+/// construction, parsing, timeouts, authentication, and secure messaging are
+/// handled by [`FelicaStandard`]. A relay or test double can implement this
+/// trait without depending on USB support.
 pub trait FelicaDriver {
+    /// Polls for an NFC-F target and returns its IDm, PMm, and optional request
+    /// data.
     fn detect_type_f(
         &mut self,
         target: &RemoteTarget,
@@ -35,6 +43,8 @@ pub trait FelicaDriver {
         time_slots: u8,
     ) -> DriverResult<Type3TagPollingResult>;
 
+    /// Sends one length-prefixed FeliCa command packet to an activated target
+    /// and returns its length-prefixed response packet.
     fn transceive(
         &mut self,
         target: &RemoteTarget,
@@ -43,6 +53,11 @@ pub trait FelicaDriver {
     ) -> DriverResult<Vec<u8>>;
 }
 
+/// Stateful high-level interface to one polled FeliCa Standard card.
+///
+/// The value borrows the reader driver for its lifetime and retains the target
+/// bitrate, polling result, and optional authenticated-session state. Create it
+/// with [`polling`](Self::polling) or [`polling_multi`](Self::polling_multi).
 pub struct FelicaStandard<'a, D: FelicaDriver + ?Sized> {
     device: &'a mut D,
     target: RemoteTarget,
@@ -51,10 +66,15 @@ pub struct FelicaStandard<'a, D: FelicaDriver + ?Sized> {
 }
 
 impl<'a, D: FelicaDriver + ?Sized> FelicaStandard<'a, D> {
+    /// Returns the eight-byte Manufacture ID (`IDm`) selected by Polling.
     pub fn idm(&self) -> &[u8] {
         &self.polling_result.idm
     }
 
+    /// Returns the eight-byte Manufacture Parameter (`PMm`).
+    ///
+    /// PMm bytes 2 through 7 encode the card's maximum response times and are
+    /// used automatically for subsequent command timeouts.
     pub fn pmm(&self) -> &[u8] {
         &self.polling_result.pmm
     }

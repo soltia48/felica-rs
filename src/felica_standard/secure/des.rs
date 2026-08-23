@@ -15,16 +15,27 @@ use crate::felica_standard::{
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Encrypted payload returned by legacy DES Authentication2.
+///
+/// Use [`decrypt_payload`](Self::decrypt_payload) with the card challenge/session
+/// key established during Authentication1. The encrypted bytes are intentionally
+/// private so callers cannot accidentally treat them as authenticated issue data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authentication2Response {
     pub(crate) encrypted_payload: Vec<u8>,
 }
 
 impl Authentication2Response {
+    /// Returns [`SecureSessionScheme::Des`](super::SecureSessionScheme::Des).
     pub fn scheme(&self) -> super::SecureSessionScheme {
         super::SecureSessionScheme::Des
     }
 
+    /// Decrypts the response, verifies its DES packet MAC, and removes the MAC.
+    ///
+    /// On success the plaintext begins with transaction number and transaction
+    /// ID, followed by IDi and PMi. MAC failure is reported as a secure-session
+    /// error; malformed ciphertext is a protocol error.
     pub fn decrypt_payload(&self, session_key: &[u8; 8]) -> Result<Vec<u8>, FelicaStandardError> {
         let plaintext = decrypt_des_cbc_zero_iv(&self.encrypted_payload, session_key)
             .map_err(FelicaStandardError::SecureSession)?;
@@ -233,6 +244,12 @@ pub(crate) fn build_secure_response_frame_des(
     frame_with_length_prefix(&frame_payload).ok()
 }
 
+/// Derives the DES group and user Service keys for an authentication chain.
+///
+/// Starting at `system_key`, each Area key is folded in order to obtain the
+/// group Service key. Each authentication-required Service key is then folded
+/// in order to obtain the user Service key. Authentication-free Service keys
+/// must be omitted by the caller.
 pub fn generate_service_keys_des(
     system_key: &[u8; 8],
     area_keys: &[[u8; 8]],

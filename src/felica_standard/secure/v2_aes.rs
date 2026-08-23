@@ -31,16 +31,26 @@ const V2_AES128_DERIVE_MAC_KEY_INPUT: [u8; V2_AES128_BLOCK_SIZE] = [
     0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
 ];
 
+/// Encrypted payload returned by AES-128 Authentication2 v2.
+///
+/// Use [`decrypt_payload`](Self::decrypt_payload) with the transaction and
+/// session material derived from Authentication1 v2.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Authentication2V2Response {
     pub(crate) encrypted_payload: Vec<u8>,
 }
 
 impl Authentication2V2Response {
+    /// Returns [`SecureSessionScheme::Aes128`](super::SecureSessionScheme::Aes128).
     pub fn scheme(&self) -> super::SecureSessionScheme {
         super::SecureSessionScheme::Aes128
     }
 
+    /// Decrypts the response and verifies its truncated AES-CMAC.
+    ///
+    /// Returns the response transaction number separately from the decrypted
+    /// payload. A MAC mismatch or invalid AES frame is reported as a
+    /// [`FelicaStandardError::SecureSession`].
     pub fn decrypt_payload(
         &self,
         transaction_id: &[u8; 6],
@@ -339,6 +349,11 @@ pub(crate) fn build_secure_response_frame_v2_aes128(
     frame_with_length_prefix(&frame_payload).ok()
 }
 
+/// Derives the AES-128 group key for an ordered Node key chain.
+///
+/// Node keys must be passed in the same order as the Authentication1 v2 Node
+/// Code List. The derivation starts from the protocol-defined initialization
+/// block and encrypts it successively with every Node key.
 pub fn generate_group_key_v2_aes128(
     node_keys: &[[u8; V2_AES128_BLOCK_SIZE]],
 ) -> [u8; V2_AES128_BLOCK_SIZE] {

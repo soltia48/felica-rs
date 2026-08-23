@@ -2,27 +2,53 @@ use crate::clf::errors::UnsupportedTargetError;
 use crate::driver::errors::DriverError;
 use thiserror::Error;
 
+/// Errors produced while constructing, exchanging, or validating a FeliCa
+/// Standard command.
+///
+/// Transport failures are preserved as [`Driver`](Self::Driver), while a card
+/// that returned status flags indicating failure becomes [`Status`](Self::Status).
+/// This distinction lets callers decide whether retrying an RF exchange is safe:
+/// a status error means the card received and processed the command.
 #[derive(Debug, Error)]
 pub enum FelicaStandardError {
+    /// The reader driver or its underlying transport failed.
     #[error(transparent)]
     Driver(#[from] DriverError),
+    /// The requested target bitrate or modulation is unsupported or malformed.
     #[error(transparent)]
     UnsupportedTarget(#[from] UnsupportedTargetError),
+    /// A caller-supplied value cannot be encoded by the command or violates a
+    /// protocol limit.
     #[error("Felica parameter error: {0}")]
     InvalidParameter(String),
+    /// The card returned a non-success status flag 1.
+    ///
+    /// `status_flag1` identifies whether the failure belongs to a list entry;
+    /// `status_flag2` describes the reason. `detail` is their human-readable
+    /// interpretation and should be treated as diagnostic text.
     #[error("{command} failed with status {status_flag1:02X} {status_flag2:02X}: {detail}")]
     Status {
+        /// Name of the command whose response reported the error.
         command: &'static str,
+        /// Raw Status Flag 1 byte from the response.
         status_flag1: u8,
+        /// Raw Status Flag 2 byte from the response.
         status_flag2: u8,
+        /// Human-readable interpretation of both status bytes.
         detail: String,
     },
+    /// A secure command was requested without an authenticated session.
     #[error("secure command requires mutual authentication")]
     AuthenticationRequired,
+    /// A challenge response did not authenticate the card, or the card rejected
+    /// the reader during mutual authentication.
     #[error("authentication failed: {0}")]
     AuthenticationFailed(String),
+    /// Secure-session state, encryption, MAC, or transaction-number processing
+    /// failed after authentication.
     #[error("secure session error: {0}")]
     SecureSession(String),
+    /// A packet was structurally inconsistent with the FeliCa protocol.
     #[error("Felica protocol error: {0}")]
     Protocol(String),
 }

@@ -27,6 +27,13 @@ pub use system::{CommunicationPerformance, EmulatedSystem};
 
 type SharedBlocks = Rc<RefCell<Vec<[u8; BLOCK_SIZE]>>>;
 
+/// In-memory multi-System FeliCa Standard card emulator.
+///
+/// It models Polling/System selection, card Modes, file-system access, legacy
+/// DES authentication and secure messaging, purse behavior, overlap Services,
+/// and issuing commands. It is suitable for protocol tests and reader-target
+/// mode implementations; RF timing and collision behavior remain the host's
+/// responsibility.
 pub struct FelicaStandardEmulator {
     systems: Vec<EmulatedSystem>,
     active_system: Option<u16>,
@@ -39,6 +46,7 @@ impl Default for FelicaStandardEmulator {
 }
 
 impl FelicaStandardEmulator {
+    /// Creates an emulator with no Systems.
     pub fn new() -> Self {
         Self {
             systems: Vec::new(),
@@ -46,6 +54,7 @@ impl FelicaStandardEmulator {
         }
     }
 
+    /// Appends a System; the first added System becomes active automatically.
     pub fn add_system(&mut self, system: EmulatedSystem) -> &mut Self {
         let system_code = system.system_code;
         self.systems.push(system);
@@ -55,6 +64,10 @@ impl FelicaStandardEmulator {
         self
     }
 
+    /// Selects a registered System and resets that System to Mode 0.
+    ///
+    /// Returns `false` without changing the selection if `system_code` is not
+    /// present.
     pub fn set_active_system(&mut self, system_code: u16) -> bool {
         match self
             .systems
@@ -70,6 +83,7 @@ impl FelicaStandardEmulator {
         }
     }
 
+    /// Returns the selected System Code, or `None` when the card has no Systems.
     pub fn active_system_code(&self) -> Option<u16> {
         self.resolve_active_system_code()
     }
@@ -89,6 +103,7 @@ impl FelicaStandardEmulator {
         self
     }
 
+    /// Returns registered System Codes in insertion order.
     pub fn system_codes(&self) -> Vec<u16> {
         self.systems
             .iter()
@@ -195,6 +210,13 @@ impl FelicaStandardEmulator {
         self.handle_command(command)
     }
 
+    /// Handles one already-decoded non-secure command.
+    ///
+    /// Returns a complete length-prefixed response, or `None` when the addressed
+    /// System/IDm is absent, the current Mode requires the card to ignore the
+    /// command, or the command cannot be represented. Encrypted commands must be
+    /// passed to [`handle_frame`](Self::handle_frame) so their session wrapper is
+    /// available for verification and decryption.
     pub fn handle_command(&mut self, command: FelicaStandardCommand) -> Option<Vec<u8>> {
         match command {
             FelicaStandardCommand::Polling {

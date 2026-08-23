@@ -8,6 +8,12 @@ const IDM_OFFSET: usize = 2;
 const PAYLOAD_OFFSET: usize = IDM_OFFSET + IDM_LEN;
 
 impl FelicaStandardResponse {
+    /// Parses a complete length-prefixed response received from a card.
+    ///
+    /// Packet length, fixed-size fields, item counts, status-dependent fields,
+    /// and response-code-specific structure are validated. Unknown response
+    /// codes are represented by [`FelicaStandardResponse::Unknown`]. Secure
+    /// inner responses must first be decrypted by an authenticated session.
     pub fn from_bytes(data: &[u8]) -> DriverResult<FelicaStandardResponse> {
         Self::ensure_response_len(data, 2, "short Felica response")?;
         let expected_len = data[0] as usize;
