@@ -1,12 +1,12 @@
 //! # felica
 //!
 //! A Rust library for interacting with NFC (Near Field Communication) devices,
-//! with support for Sony's NFC Port-100 (RC-S380), Port-400, RC-S320, and
-//! RC-S330/RC-S360/RC-S370 PaSoRi readers.
+//! with support for Sony's NFC Port-100 (RC-S380/RC-S634), Port-400, RC-S320,
+//! and RC-S330/RC-S360/RC-S370 PaSoRi readers.
 //!
 //! ## Features
 //!
-//! - Support for NFC Port-100 (RC-S380) readers
+//! - Support for NFC Port-100 (RC-S380/RC-S634) readers
 //! - Support for NFC Port-400 readers
 //! - Support for RC-S320 readers
 //! - Support for RC-S956 (RC-S330/RC-S360/RC-S370) readers

@@ -29,7 +29,7 @@ pub type Rcs956Device = Rcs956Driver<UsbTransport>;
 pub enum ReaderPreference {
     /// Try every supported reader in turn.
     Auto,
-    /// Only the NFC Port-100 (RC-S380).
+    /// Only the NFC Port-100 (RC-S380/RC-S634).
     ForcePort100,
     /// Only the NFC Port-400.
     ForcePort400,
