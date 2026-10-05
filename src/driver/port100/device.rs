@@ -21,11 +21,12 @@ pub fn init<T: Transport>(transport: T) -> Result<Device<T>> {
 }
 
 pub fn open_port100() -> Result<Device<UsbTransport>> {
-    const PRODUCT_IDS: [u16; 2] = [0x06C1, 0x06C3];
+    // RC-S380/S, RC-S634/UA (embedded module), RC-S380/P — all NFC Port-100.
+    const PRODUCT_IDS: [u16; 3] = [0x06C1, 0x06C2, 0x06C3];
     common::open_usb_device(
         common::SONY_VENDOR_ID,
         &PRODUCT_IDS,
-        "RC-S380 reader not found",
+        "Port-100 reader not found",
         init,
     )
 }

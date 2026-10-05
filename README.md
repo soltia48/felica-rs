@@ -15,7 +15,7 @@ rather than a reader of its own.
 
 ## Features
 
-- **Port-100 (RC-S380) Support** - Full support for Sony RC-S380 NFC readers
+- **Port-100 (RC-S380/RC-S634) Support** - Full support for Sony RC-S380 NFC readers and the RC-S634/UA embedded module
 - **Port-400 (RC-S300) Support** - Support for Sony RC-S300 NFC readers
 - **RC-S320 Support** - Support for older Sony RC-S320 readers
 - **RC-S956 (RC-S330/RC-S360/RC-S370) Support** - Support for RC-S956-based readers
@@ -145,7 +145,7 @@ Available commands:
 | `clf` | Contactless Frontend utilities (CRC, errors, targets) |
 | `driver` | Hardware driver implementations for NFC readers |
 | `driver::framing` | Sony SOF frame envelope shared by the Port-100, RC-S320 and RC-S956 drivers |
-| `driver::port100` | Sony Port-100 (RC-S380) driver |
+| `driver::port100` | Sony Port-100 (RC-S380/RC-S634) driver |
 | `driver::port400` | Sony Port-400 (RC-S300) driver |
 | `driver::rcs320` | Sony RC-S320 driver |
 | `driver::rcs956` | Sony RC-S956 (RC-S330/RC-S360/RC-S370) driver |
@@ -220,6 +220,7 @@ let result = felica.search_service_code(0)?;
 | Device | VID:PID | Status |
 |--------|---------|--------|
 | Sony RC-S380 (Port-100) | 054C:06C1, 054C:06C3 | ✅ Supported |
+| Sony RC-S634/UA (Port-100) | 054C:06C2 | ✅ Supported |
 | Sony RC-S300 (Port-400) | 054C:0DC8, 054C:0DC9, 054C:0D8F | ✅ Supported |
 | Sony RC-S320 | 054C:01BB | ✅ Supported |
 | Sony RC-S330/RC-S360/RC-S370 (RC-S956) | 054C:02E1, 054C:0193 | ✅ Supported |
