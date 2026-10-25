@@ -52,6 +52,8 @@ struct DumpOutput {
     /// FeliCa bitrate the card was detected at ("212F" or "424F").
     data_rate: String,
     systems: Vec<SystemSummary>,
+    /// Problems that are not tied to one system, such as a system that failed to dump.
+    warnings: Vec<DumpWarning>,
     generated_at: SystemTime,
 }
 
@@ -332,14 +334,15 @@ fn run_local_dump(key_store: Option<&KeyStore>) -> Result<DumpOutput, Box<dyn Er
     let reader_info = build_reader_info(&reader);
     let (data_rate, system_codes) =
         discover_system_codes(reader.driver_mut()).map_err(boxed_error)?;
-    let systems = collect_system_summaries(reader.driver_mut(), &system_codes, key_store)
-        .map_err(boxed_error)?;
+    let (systems, warnings) =
+        collect_system_summaries(reader.driver_mut(), &system_codes, key_store);
 
     Ok(DumpOutput {
         reader: Some(reader_info),
         remote: None,
         data_rate,
         systems,
+        warnings,
         generated_at: SystemTime::now(),
     })
 }
@@ -348,8 +351,7 @@ fn run_remote_dump(addr: &str, key_store: Option<&KeyStore>) -> Result<DumpOutpu
     let mut driver = RemoteDriver::connect(addr)?;
 
     let (data_rate, system_codes) = discover_system_codes(&mut driver).map_err(boxed_error)?;
-    let systems =
-        collect_system_summaries(&mut driver, &system_codes, key_store).map_err(boxed_error)?;
+    let (systems, warnings) = collect_system_summaries(&mut driver, &system_codes, key_store);
 
     Ok(DumpOutput {
         reader: None,
@@ -358,6 +360,7 @@ fn run_remote_dump(addr: &str, key_store: Option<&KeyStore>) -> Result<DumpOutpu
         }),
         data_rate,
         systems,
+        warnings,
         generated_at: SystemTime::now(),
     })
 }
@@ -403,12 +406,21 @@ fn collect_system_summaries<D: FelicaDriver + ?Sized>(
     driver: &mut D,
     system_codes: &[u16],
     key_store: Option<&KeyStore>,
-) -> Result<Vec<SystemSummary>, FelicaStandardError> {
+) -> (Vec<SystemSummary>, Vec<DumpWarning>) {
+    // A failure in one system (card moved, a protocol error, ...) must not discard
+    // the systems already read or skip the ones after it.
     let mut systems = Vec::with_capacity(system_codes.len());
+    let mut warnings = Vec::new();
     for &system_code in system_codes {
-        systems.push(summarize_system(driver, system_code, key_store)?);
+        match summarize_system(driver, system_code, key_store) {
+            Ok(summary) => systems.push(summary),
+            Err(err) => warnings.push(DumpWarning::new(format!(
+                "Failed to dump system 0x{:04X}: {}",
+                system_code, err
+            ))),
+        }
     }
-    Ok(systems)
+    (systems, warnings)
 }
 
 fn summarize_system<D: FelicaDriver + ?Sized>(
@@ -1206,6 +1218,8 @@ struct DumpFile {
     remote: Option<DumpFileRemote>,
     data_rate: String,
     systems: Vec<DumpFileSystem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<DumpFileWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1304,6 +1318,7 @@ impl DumpOutput {
                 .iter()
                 .map(SystemSummary::to_dump_file)
                 .collect(),
+            warnings: warnings_to_dump_file(&self.warnings),
         }
     }
 }
@@ -1330,14 +1345,7 @@ impl SystemSummary {
                         .map(ServiceGroupSummary::to_dump_file),
                 )
                 .collect(),
-            warnings: self
-                .warnings
-                .iter()
-                .map(|warning| DumpFileWarning {
-                    node: warning.node.map(hex_u16),
-                    message: warning.message.clone(),
-                })
-                .collect(),
+            warnings: warnings_to_dump_file(&self.warnings),
         }
     }
 }
@@ -1395,6 +1403,16 @@ impl KeyVersionSummary {
             aes: self.aes_key_version_hex.clone(),
         }
     }
+}
+
+fn warnings_to_dump_file(warnings: &[DumpWarning]) -> Vec<DumpFileWarning> {
+    warnings
+        .iter()
+        .map(|warning| DumpFileWarning {
+            node: warning.node.map(hex_u16),
+            message: warning.message.clone(),
+        })
+        .collect()
 }
 
 /// `"Random read/write with key"` -> `"random_read_write_with_key"`
@@ -1534,14 +1552,18 @@ fn print_human(output: &DumpOutput) {
 
     if output.systems.is_empty() {
         println!();
-        println!("  {}", p.dim("(no systems reported by the card)"));
-        return;
+        if output.warnings.is_empty() {
+            println!("  {}", p.dim("(no systems reported by the card)"));
+        } else {
+            println!("  {}", p.dim("(no system could be read)"));
+        }
     }
 
     for system in &output.systems {
         print_system(&p, system);
     }
 
+    print_warnings(&p, &output.warnings);
     println!();
 }
 
@@ -1596,15 +1618,17 @@ fn print_system(p: &Painter, system: &SystemSummary) {
     }
 
     // --- Warnings -----------------------------------------------------------
-    if !system.warnings.is_empty() {
-        println!();
-        println!(
-            "  {}",
-            p.yellow(&format!("Warnings ({})", system.warnings.len()))
-        );
-        for warning in &system.warnings {
-            println!("  {} {}", p.yellow("!"), p.dim(&warning.message));
-        }
+    print_warnings(p, &system.warnings);
+}
+
+fn print_warnings(p: &Painter, warnings: &[DumpWarning]) {
+    if warnings.is_empty() {
+        return;
+    }
+    println!();
+    println!("  {}", p.yellow(&format!("Warnings ({})", warnings.len())));
+    for warning in warnings {
+        println!("  {} {}", p.yellow("!"), p.dim(&warning.message));
     }
 }
 
@@ -1840,6 +1864,7 @@ mod tests {
                 }],
                 warnings: vec![DumpWarning::at(0x1008, "Authenticated Read failed")],
             }],
+            warnings: Vec::new(),
             generated_at: UNIX_EPOCH + Duration::from_secs(1_761_379_200),
         }
     }
@@ -1854,6 +1879,7 @@ mod tests {
         assert_eq!(json["format_version"], 1);
         assert_eq!(json["generated_at"], "2025-10-25T08:00:00Z");
         assert!(json.get("remote").is_none());
+        assert!(json.get("warnings").is_none());
 
         let system = &json["systems"][0];
         assert_eq!(system["system_code"], "0x0003");
@@ -1910,6 +1936,55 @@ mod tests {
         let mut violations = Vec::new();
         walk("$", &sample_json(), &mut violations);
         assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// A reader with no card in range: every poll fails.
+    struct NoCardDriver;
+
+    impl FelicaDriver for NoCardDriver {
+        fn detect_type_f(
+            &mut self,
+            _target: &felica::RemoteTarget,
+            _system_code: u16,
+            _request_code: u8,
+            _time_slots: u8,
+        ) -> felica::prelude::DriverResult<felica::felica_standard::Type3TagPollingResult> {
+            Err(felica::DriverError::other("no card"))
+        }
+
+        fn transceive(
+            &mut self,
+            _target: &felica::RemoteTarget,
+            _data: &[u8],
+            _timeout_ms: Option<u16>,
+        ) -> felica::prelude::DriverResult<Vec<u8>> {
+            Err(felica::DriverError::other("no card"))
+        }
+    }
+
+    #[test]
+    fn failed_system_does_not_stop_the_dump() {
+        let (systems, warnings) =
+            collect_system_summaries(&mut NoCardDriver, &[0x0003, 0xFE00], None);
+        assert!(systems.is_empty());
+        // Both systems were attempted: the first failure did not end the loop.
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings[0]
+                .message
+                .starts_with("Failed to dump system 0x0003:")
+        );
+        assert!(
+            warnings[1]
+                .message
+                .starts_with("Failed to dump system 0xFE00:")
+        );
+
+        let mut output = sample_output();
+        output.warnings = warnings;
+        let json = serde_json::to_value(output.to_dump_file()).unwrap();
+        assert_eq!(json["warnings"].as_array().map(Vec::len), Some(2));
+        assert!(json["warnings"][0].get("node").is_none());
     }
 
     #[test]
